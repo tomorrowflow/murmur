@@ -4,6 +4,10 @@ macOS voice assistant with global hotkeys - transcribe speech to text with offli
 
 ## Demo
 
+**Parakeet transcription (fast and accurate):**
+
+https://github.com/user-attachments/assets/163e6484-a3b1-49ef-b5e1-d9887d1f65d0
+
 **Instant text-to-speech:**
 
 https://github.com/user-attachments/assets/c961f0c6-f3b3-49d9-9b42-7a7d93ee6bc8

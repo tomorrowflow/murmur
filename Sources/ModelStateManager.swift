@@ -321,8 +321,14 @@ class ModelStateManager: ObservableObject {
         // Cancel any existing loading task (shouldn't happen with guard above, but just in case)
         currentParakeetLoadingTask?.cancel()
 
-        // Set downloading state immediately (before creating task)
-        parakeetLoadingState = .downloading
+        // Check if model is already cached - show "loading" vs "downloading"
+        let modelName = parakeetVersion == .v2 ? "parakeet-tdt-0.6b-v2-coreml" : "parakeet-tdt-0.6b-v3-coreml"
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let modelPath = documentsPath.appendingPathComponent("FluidAudio").appendingPathComponent(modelName)
+        let isAlreadyDownloaded = FileManager.default.fileExists(atPath: modelPath.path)
+
+        // Set appropriate state
+        parakeetLoadingState = isAlreadyDownloaded ? .loading : .downloading
 
         // Create new loading task
         let task = Task { () -> Void in

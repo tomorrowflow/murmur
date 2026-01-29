@@ -48,6 +48,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     private var displayTimer: Timer?
     private var modelCancellable: AnyCancellable?
+    private var engineCancellable: AnyCancellable?
+    private var parakeetVersionCancellable: AnyCancellable?
     private var transcriptionTimer: Timer?
     private var videoProcessingTimer: Timer?
     private var audioManager: AudioTranscriptionManager!
@@ -200,23 +202,48 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         Task {
             await ModelStateManager.shared.checkDownloadedModels()
             print("Model check completed at startup")
-            
-            // Load the initially selected model
-            if let selectedModel = ModelStateManager.shared.selectedModel {
-                _ = await ModelStateManager.shared.loadModel(selectedModel)
+
+            // Load the initially selected model based on engine
+            switch ModelStateManager.shared.selectedEngine {
+            case .whisperKit:
+                if let selectedModel = ModelStateManager.shared.selectedModel {
+                    _ = await ModelStateManager.shared.loadModel(selectedModel)
+                }
+            case .parakeet:
+                await ModelStateManager.shared.loadParakeetModel()
             }
         }
-        
-        // Observe model selection changes
+
+        // Observe WhisperKit model selection changes
         modelCancellable = ModelStateManager.shared.$selectedModel
             .dropFirst() // Skip the initial value
             .sink { selectedModel in
                 guard let selectedModel = selectedModel else { return }
+                // Only load if WhisperKit is the selected engine
+                guard ModelStateManager.shared.selectedEngine == .whisperKit else { return }
                 Task {
                     // Load the new model
                     _ = await ModelStateManager.shared.loadModel(selectedModel)
                 }
             }
+
+        // Observe engine changes - only handle memory management, not loading
+        // Loading is triggered by user actions (selecting/downloading models)
+        engineCancellable = ModelStateManager.shared.$selectedEngine
+            .dropFirst() // Skip the initial value
+            .sink { engine in
+                switch engine {
+                case .whisperKit:
+                    // Unload Parakeet to free memory
+                    ModelStateManager.shared.unloadParakeetModel()
+                case .parakeet:
+                    // Unload WhisperKit to free memory
+                    ModelStateManager.shared.unloadWhisperKitModel()
+                }
+            }
+
+        // Note: Parakeet version changes don't auto-load
+        // User must click to download/select a specific version
     }
     
 

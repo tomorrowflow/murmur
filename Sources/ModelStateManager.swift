@@ -3,10 +3,34 @@ import SwiftUI
 import WhisperKit
 import SharedModels
 
+/// Transcription engine selection
+public enum TranscriptionEngine: String, CaseIterable {
+    case whisperKit = "whisperKit"
+    case parakeet = "parakeet"
+
+    public var displayName: String {
+        switch self {
+        case .whisperKit:
+            return "WhisperKit"
+        case .parakeet:
+            return "Parakeet"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .whisperKit:
+            return "On-device transcription by Argmax"
+        case .parakeet:
+            return "Fast & accurate by FluidAudio"
+        }
+    }
+}
+
 @MainActor
 class ModelStateManager: ObservableObject {
     static let shared = ModelStateManager()
-    
+
     enum ModelLoadingState: Equatable {
         case notDownloaded
         case downloading(progress: Double)
@@ -15,7 +39,25 @@ class ModelStateManager: ObservableObject {
         case loading
         case loaded
     }
-    
+
+    // MARK: - Engine Selection
+    @Published var selectedEngine: TranscriptionEngine = .whisperKit {
+        didSet {
+            UserDefaults.standard.set(selectedEngine.rawValue, forKey: "selectedTranscriptionEngine")
+        }
+    }
+
+    // MARK: - Parakeet State
+    @Published var loadedParakeetTranscriber: ParakeetTranscriber? = nil
+    @Published var parakeetVersion: ParakeetVersion = .v2 {
+        didSet {
+            UserDefaults.standard.set(parakeetVersion.rawValue, forKey: "selectedParakeetVersion")
+        }
+    }
+    @Published var parakeetLoadingState: ParakeetLoadingState = .notDownloaded
+    private var currentParakeetLoadingTask: Task<Void, Never>? = nil
+
+    // MARK: - WhisperKit State
     @Published var downloadedModels: Set<String> = []
     @Published var isCheckingModels = true  // Start as true to prevent flash
     @Published var selectedModel: String? = nil {
@@ -31,9 +73,21 @@ class ModelStateManager: ObservableObject {
     @Published var modelLoadingStates: [String: ModelLoadingState] = [:]
     @Published var loadedWhisperKit: WhisperKit? = nil
     private var currentLoadingTask: Task<WhisperKit?, Never>? = nil
-    
+
     private init() {
-        // Restore the selected model from UserDefaults
+        // Restore the selected engine from UserDefaults
+        if let engineRaw = UserDefaults.standard.string(forKey: "selectedTranscriptionEngine"),
+           let engine = TranscriptionEngine(rawValue: engineRaw) {
+            self.selectedEngine = engine
+        }
+
+        // Restore the selected Parakeet version from UserDefaults
+        if let versionRaw = UserDefaults.standard.string(forKey: "selectedParakeetVersion"),
+           let version = ParakeetVersion(rawValue: versionRaw) {
+            self.parakeetVersion = version
+        }
+
+        // Restore the selected WhisperKit model from UserDefaults
         self.selectedModel = UserDefaults.standard.string(forKey: "selectedWhisperModel")
     }
     
@@ -253,5 +307,79 @@ class ModelStateManager: ObservableObject {
         
         currentLoadingTask = task
         return await task.value
+    }
+
+    // MARK: - Parakeet Model Loading
+
+    func loadParakeetModel() async {
+        // Cancel any existing loading task
+        currentParakeetLoadingTask?.cancel()
+
+        // Set downloading state immediately (before creating task)
+        parakeetLoadingState = .downloading
+
+        // Create new loading task
+        let task = Task { () -> Void in
+            // Check if cancelled before starting
+            if Task.isCancelled {
+                print("Parakeet model loading cancelled")
+                return
+            }
+
+            do {
+                let transcriber = ParakeetTranscriber()
+                try await transcriber.loadModel(version: parakeetVersion)
+
+                // Check if cancelled after loading
+                if Task.isCancelled {
+                    print("Parakeet model loading cancelled after load")
+                    await MainActor.run {
+                        parakeetLoadingState = .notDownloaded
+                    }
+                    return
+                }
+
+                // Update state to loaded
+                await MainActor.run {
+                    self.loadedParakeetTranscriber = transcriber
+                    self.parakeetLoadingState = .loaded
+                }
+
+                print("Parakeet model loaded successfully: \(parakeetVersion.displayName)")
+
+            } catch {
+                if Task.isCancelled {
+                    print("Parakeet model loading cancelled: \(error)")
+                } else {
+                    print("Failed to load Parakeet model: \(error)")
+                }
+
+                await MainActor.run {
+                    parakeetLoadingState = .notDownloaded
+                    loadedParakeetTranscriber = nil
+                }
+            }
+        }
+
+        currentParakeetLoadingTask = task
+        await task.value
+    }
+
+    /// Unload Parakeet model to free memory
+    func unloadParakeetModel() {
+        loadedParakeetTranscriber?.unloadModel()
+        loadedParakeetTranscriber = nil
+        parakeetLoadingState = .notDownloaded
+        print("Parakeet model unloaded")
+    }
+
+    /// Unload WhisperKit model to free memory
+    func unloadWhisperKitModel() {
+        loadedWhisperKit = nil
+        // Reset loading states to downloaded for all downloaded models
+        for model in ModelData.availableModels where downloadedModels.contains(model.name) {
+            setLoadingState(for: model.name, state: .downloaded)
+        }
+        print("WhisperKit model unloaded")
     }
 }

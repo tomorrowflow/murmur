@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import SharedModels
 
 struct AccuracyBar: View {
     let accuracy: String
@@ -199,6 +200,141 @@ struct ModelCard: View {
                             .multilineTextAlignment(.trailing)
                     }
                 }
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.1) : Color.gray.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor : Color.gray.opacity(0.2), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isDownloaded {
+                onSelect()
+            }
+        }
+    }
+}
+
+struct ParakeetModelCard: View {
+    let version: ParakeetVersion
+    let isSelected: Bool
+    let loadingState: ParakeetLoadingState
+    let onSelect: () -> Void
+    let onDownload: () -> Void
+
+    var isDownloaded: Bool {
+        loadingState == .loaded || loadingState == .downloaded
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            // Radio button
+            Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                .foregroundColor(isSelected ? .accentColor : .secondary)
+                .imageScale(.large)
+
+            // Model info
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(version.displayName)
+                        .font(.headline)
+
+                    // Language badge
+                    Text(version.languages)
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color.blue.opacity(0.15))
+                        )
+                        .foregroundColor(.blue)
+                }
+
+                Text(version.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 16) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "internaldrive")
+                        Text(version.size)
+                            .fixedSize()
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                    HStack(spacing: 4) {
+                        Image(systemName: "speedometer")
+                        Text(version.speed)
+                            .fixedSize()
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .help("Real-time factor - how many times faster than real-time the model transcribes")
+
+                    HStack(spacing: 4) {
+                        Image(systemName: "chart.bar.fill")
+                            .foregroundColor(.secondary)
+                        Text(version.accuracy)
+                            .fixedSize()
+                    }
+                    .font(.caption)
+                    .foregroundColor(.green)
+                    .help("Word Error Rate - lower is better")
+                }
+            }
+
+            Spacer()
+
+            // Download button or status
+            if isDownloaded {
+                switch loadingState {
+                case .loading:
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                        Text("Loading...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                case .loaded:
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Loaded")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                default:
+                    HStack {
+                        Image(systemName: "checkmark.circle")
+                            .foregroundColor(.blue)
+                        Text("Downloaded")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } else if loadingState == .downloading {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .frame(width: 80)
+                    Text("Downloading...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Button(action: onDownload) {
+                    Label("Download", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.bordered)
             }
         }
         .padding()

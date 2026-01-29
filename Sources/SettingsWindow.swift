@@ -10,10 +10,10 @@ struct SettingsView: View {
     @State private var downloadingModels: Set<String> = []
     @State private var downloadProgress: [String: Double] = [:]
     @State private var downloadErrors: [String: String] = [:]
-    
-    let models = ModelData.availableModels
-    
-    
+
+    let whisperModels = ModelData.availableModels
+
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -21,23 +21,75 @@ struct SettingsView: View {
                 Text("Super Voice Assistant Settings")
                     .font(.title2)
                     .fontWeight(.semibold)
-                
+
                 Text("Choose a speech recognition model")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
-            
+
             Divider()
-            
-            // Model Selection
+
+            // All models in one list
             ScrollView {
                 VStack(spacing: 12) {
-                    ForEach(models, id: \.name) { model in
+                    // Parakeet section header
+                    HStack {
+                        Text("Parakeet")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        Text("by FluidAudio")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 4)
+
+                    // Parakeet models
+                    ForEach(ParakeetVersion.allCases, id: \.self) { version in
+                        ParakeetModelCard(
+                            version: version,
+                            isSelected: modelState.selectedEngine == .parakeet && modelState.parakeetVersion == version,
+                            loadingState: modelState.parakeetVersion == version ? modelState.parakeetLoadingState : .notDownloaded,
+                            onSelect: {
+                                modelState.selectedEngine = .parakeet
+                                modelState.parakeetVersion = version
+                                // Load the model if not already loaded
+                                if modelState.parakeetLoadingState != .loaded {
+                                    Task {
+                                        await modelState.loadParakeetModel()
+                                    }
+                                }
+                            },
+                            onDownload: {
+                                modelState.selectedEngine = .parakeet
+                                modelState.parakeetVersion = version
+                                Task {
+                                    await modelState.loadParakeetModel()
+                                }
+                            }
+                        )
+                    }
+
+                    // WhisperKit section header
+                    HStack {
+                        Text("WhisperKit")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        Text("by Argmax")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.top, 8)
+
+                    // WhisperKit models
+                    ForEach(whisperModels, id: \.name) { model in
                         ModelCard(
                             model: model,
-                            isSelected: modelState.selectedModel == model.name,
+                            isSelected: modelState.selectedEngine == .whisperKit && modelState.selectedModel == model.name,
                             isDownloaded: modelState.downloadedModels.contains(model.name),
                             isDownloading: downloadingModels.contains(model.name),
                             downloadProgress: downloadProgress[model.name] ?? 0,
@@ -45,8 +97,8 @@ struct SettingsView: View {
                             loadingState: modelState.getLoadingState(for: model.name),
                             onSelect: {
                                 if modelState.downloadedModels.contains(model.name) {
+                                    modelState.selectedEngine = .whisperKit
                                     modelState.selectedModel = model.name
-                                    // Model will be loaded by the observer in main.swift
                                 }
                             },
                             onDownload: {
@@ -58,31 +110,21 @@ struct SettingsView: View {
                 }
                 .padding()
             }
-            
+
             Divider()
-            
+
             // Footer with current status
             HStack {
                 if modelState.isCheckingModels {
                     Label("Checking models...", systemImage: "arrow.clockwise")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                } else if modelState.downloadedModels.isEmpty {
-                    Label("Download a model to get started", systemImage: "arrow.down.circle")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else if let selected = modelState.selectedModel {
-                    Label("Current model: \(models.first(where: { $0.name == selected })?.displayName ?? "None")", systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 } else {
-                    Label("Select a downloaded model", systemImage: "cursorarrow.click")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    currentModelStatusLabel
                 }
-                
+
                 Spacer()
-                
+
                 Button("Done") {
                     NSApplication.shared.keyWindow?.close()
                 }
@@ -90,7 +132,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 600, height: 500)
+        .frame(width: 600, height: 550)
         .onAppear {
             // If models haven't been checked yet (e.g., settings opened very quickly after app start)
             if modelState.isCheckingModels {
@@ -98,10 +140,46 @@ struct SettingsView: View {
                     await modelState.checkDownloadedModels()
                 }
             }
-            
+
             // Check for incomplete downloads that need auto-resume
             Task {
                 await checkForIncompleteDownloads()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var currentModelStatusLabel: some View {
+        switch modelState.selectedEngine {
+        case .parakeet:
+            switch modelState.parakeetLoadingState {
+            case .loaded:
+                Label("Current: \(modelState.parakeetVersion.displayName)", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            case .loading, .downloading:
+                Label("Loading Parakeet...", systemImage: "arrow.clockwise")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            default:
+                Label("Download a model to get started", systemImage: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        case .whisperKit:
+            if let selected = modelState.selectedModel,
+               let model = whisperModels.first(where: { $0.name == selected }) {
+                Label("Current: \(model.displayName)", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else if modelState.downloadedModels.isEmpty {
+                Label("Download a model to get started", systemImage: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Label("Select a downloaded model", systemImage: "cursorarrow.click")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -112,7 +190,7 @@ struct SettingsView: View {
         // Only check for incomplete downloads that need auto-resume
         var partiallyDownloadedModels: [String] = []
         
-        for model in models {
+        for model in whisperModels {
             let modelPath = getModelPath(for: model.whisperKitModelName)
             
             // Check if directory exists but model is not in downloaded set
@@ -148,7 +226,7 @@ struct SettingsView: View {
     }
     
     func downloadModel(_ modelName: String) {
-        guard let model = models.first(where: { $0.name == modelName }) else {
+        guard let model = whisperModels.first(where: { $0.name == modelName }) else {
             print("Model not found: \(modelName)")
             return
         }

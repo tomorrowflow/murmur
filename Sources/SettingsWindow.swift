@@ -218,17 +218,11 @@ struct SettingsView: View {
             }
         }
         
-        // Auto-resume downloads for partially downloaded models with immediate UI feedback
+        // Auto-resume downloads for partially downloaded models
         for modelName in partiallyDownloadedModels {
             await MainActor.run {
-                // Set UI state immediately before starting download
-                downloadingModels.insert(modelName)
-                downloadProgress[modelName] = 0.0
-                
-                // Small delay to ensure UI updates
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    self.downloadModel(modelName)
-                }
+                // Just call downloadModel - it handles all the state setup
+                downloadModel(modelName)
             }
         }
     }

@@ -321,12 +321,12 @@ struct ParakeetModelCard: View {
                             .foregroundColor(.secondary)
                     }
                 }
-            } else if loadingState == .downloading {
+            } else if loadingState == .downloading || loadingState == .loading {
                 HStack(spacing: 8) {
                     ProgressView()
                         .progressViewStyle(.linear)
                         .frame(width: 80)
-                    Text("Downloading...")
+                    Text(loadingState == .downloading ? "Downloading..." : "Loading...")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

@@ -198,19 +198,29 @@ class ModelStateManager: ObservableObject {
     }
     
     func getLoadingState(for modelName: String) -> ModelLoadingState {
-        if let state = modelLoadingStates[modelName] {
-            return state
+        // First check if this model is actually loaded in memory
+        if selectedModel == modelName && loadedWhisperKit != nil {
+            return .loaded
         }
-        
-        // Determine state based on what we know
-        if downloadedModels.contains(modelName) {
-            // Check if it's the currently loaded model
-            if selectedModel == modelName && loadedWhisperKit != nil {
-                return .loaded
+
+        // Check for in-progress states (downloading, loading, validating)
+        if let state = modelLoadingStates[modelName] {
+            switch state {
+            case .downloading, .loading, .validating:
+                return state
+            case .loaded:
+                // Only return loaded if WhisperKit is actually loaded (checked above)
+                return .downloaded
+            case .downloaded, .notDownloaded:
+                break
             }
+        }
+
+        // Determine state based on download status
+        if downloadedModels.contains(modelName) {
             return .downloaded
         }
-        
+
         return .notDownloaded
     }
     

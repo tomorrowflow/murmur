@@ -312,7 +312,13 @@ class ModelStateManager: ObservableObject {
     // MARK: - Parakeet Model Loading
 
     func loadParakeetModel() async {
-        // Cancel any existing loading task
+        // Skip if already downloading or loading
+        guard parakeetLoadingState != .downloading && parakeetLoadingState != .loading else {
+            print("Parakeet model already downloading/loading, skipping...")
+            return
+        }
+
+        // Cancel any existing loading task (shouldn't happen with guard above, but just in case)
         currentParakeetLoadingTask?.cancel()
 
         // Set downloading state immediately (before creating task)

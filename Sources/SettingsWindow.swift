@@ -230,7 +230,13 @@ struct SettingsView: View {
             print("Model not found: \(modelName)")
             return
         }
-        
+
+        // Prevent concurrent downloads of the same model
+        guard !downloadingModels.contains(modelName) else {
+            print("Model \(modelName) is already downloading, skipping...")
+            return
+        }
+
         print("Starting download of \(model.displayName)...")
         downloadingModels.insert(modelName)
         downloadProgress[modelName] = 0.0

@@ -362,10 +362,22 @@ class AudioTranscriptionManager {
             return
         }
 
+        // Pad short audio with 1 second of silence to improve transcription reliability
+        let paddingThresholdSeconds = 1.5
+        let paddingDurationSeconds = 1.0
+        let minSamplesForPadding = Int(paddingThresholdSeconds * sampleRate)
+        let paddingSamples = Int(paddingDurationSeconds * sampleRate)
+
+        var paddedBuffer = audioBuffer
+        if audioBuffer.count < minSamplesForPadding {
+            paddedBuffer.append(contentsOf: [Float](repeating: 0.0, count: paddingSamples))
+            print("Padded short audio with \(paddingDurationSeconds)s of silence")
+        }
+
         print("Transcribing \(audioBuffer.count) samples (\(Double(audioBuffer.count) / sampleRate) seconds) with Parakeet...")
 
         do {
-            let transcription = try await transcriber.transcribe(audioSamples: audioBuffer)
+            let transcription = try await transcriber.transcribe(audioSamples: paddedBuffer)
             isTranscribing = false
             handleTranscriptionResult(transcription)
         } catch {

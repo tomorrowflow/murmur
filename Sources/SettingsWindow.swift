@@ -186,12 +186,12 @@ struct SettingsView: View {
 
     /// Get loading state for a Parakeet version, checking filesystem for non-selected versions
     private func parakeetLoadingState(for version: ParakeetVersion) -> ParakeetLoadingState {
-        // For the selected version, use the actual state
-        if modelState.parakeetVersion == version {
+        // For the selected version when Parakeet is active, use the actual state
+        if modelState.selectedEngine == .parakeet && modelState.parakeetVersion == version {
             return modelState.parakeetLoadingState
         }
 
-        // For other versions, check if downloaded on disk
+        // For other versions or when WhisperKit is active, check if downloaded on disk
         let modelName = version == .v2 ? "parakeet-tdt-0.6b-v2-coreml" : "parakeet-tdt-0.6b-v3-coreml"
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let modelPath = documentsPath.appendingPathComponent("FluidAudio").appendingPathComponent(modelName)

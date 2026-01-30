@@ -47,7 +47,17 @@ public enum ParakeetVersion: String, CaseIterable {
         case .v2:
             return "1.69% WER"
         case .v3:
-            return "1.8% WER"
+            return "1.93% WER"
+        }
+    }
+
+    /// Accuracy as percentage (100 - WER) for display in AccuracyBar
+    public var accuracyPercent: String {
+        switch self {
+        case .v2:
+            return "98.31%"  // 100 - 1.69
+        case .v3:
+            return "98.07%"  // 100 - 1.93
         }
     }
 

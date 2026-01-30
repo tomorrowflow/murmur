@@ -278,15 +278,13 @@ struct ParakeetModelCard: View {
                     .foregroundColor(.secondary)
                     .help("Real-time factor - how many times faster than real-time the model transcribes")
 
-                    HStack(spacing: 4) {
-                        Image(systemName: "chart.bar.fill")
-                            .foregroundColor(.secondary)
-                        Text(version.accuracy)
-                            .fixedSize()
-                    }
-                    .font(.caption)
-                    .foregroundColor(.green)
-                    .help("Word Error Rate - lower is better")
+                    AccuracyBar(
+                        accuracy: version.accuracyPercent,
+                        note: "Word Error Rate on LibriSpeech test-clean",
+                        sourceURL: version == .v2
+                            ? "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml"
+                            : "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml"
+                    )
                 }
             }
 

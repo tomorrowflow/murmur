@@ -858,12 +858,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         pasteTextAtCursor(text)
         if shouldSendReturn {
             // Simulate Return key after paste completes (slight delay for paste to land)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 let source = CGEventSource(stateID: .hidSystemState)
+                var carriageReturn: UniChar = 0x0D
                 if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true) {
+                    keyDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &carriageReturn)
                     keyDown.post(tap: .cghidEventTap)
                 }
                 if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false) {
+                    keyUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &carriageReturn)
                     keyUp.post(tap: .cghidEventTap)
                 }
                 print("STT PTT: sent Return key")

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import SharedModels
+import FluidAudioTTS
 
 struct AccuracyBar: View {
     let accuracy: String
@@ -320,10 +321,10 @@ struct ParakeetModelCard: View {
                     }
                 }
             } else if loadingState == .downloading || loadingState == .loading {
-                HStack(spacing: 8) {
+                HStack {
                     ProgressView()
-                        .progressViewStyle(.linear)
-                        .frame(width: 80)
+                        .scaleEffect(0.5)
+                        .frame(width: 16, height: 16)
                     Text(loadingState == .downloading ? "Downloading..." : "Loading...")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -350,5 +351,119 @@ struct ParakeetModelCard: View {
                 onSelect()
             }
         }
+    }
+}
+
+struct KokoroTtsModelCard: View {
+    let loadingState: ParakeetLoadingState
+    let onDownload: () -> Void
+
+    var isDownloaded: Bool {
+        loadingState == .loaded || loadingState == .downloaded
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            // Speaker icon
+            Image(systemName: "speaker.wave.2.fill")
+                .foregroundColor(.accentColor)
+                .imageScale(.large)
+
+            // Model info
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Kokoro TTS (82M)")
+                        .font(.headline)
+
+                    Text("American English")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color.blue.opacity(0.15))
+                        )
+                        .foregroundColor(.blue)
+                }
+
+                Text("Native CoreML \u{2022} 24kHz \u{2022} Voice: \(UserDefaults.standard.string(forKey: "kokoroVoice") ?? "af_heart")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 16) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "internaldrive")
+                        Text("~200 MB")
+                            .fixedSize()
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                        Text("Real-time on Apple Silicon")
+                            .fixedSize()
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            // Download button or status
+            if isDownloaded {
+                switch loadingState {
+                case .loading:
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                        Text("Loading...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                case .loaded:
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Loaded")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                default:
+                    HStack {
+                        Image(systemName: "checkmark.circle")
+                            .foregroundColor(.blue)
+                        Text("Downloaded")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } else if loadingState == .downloading || loadingState == .loading {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.5)
+                        .frame(width: 16, height: 16)
+                    Text(loadingState == .downloading ? "Downloading..." : "Loading...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Button(action: onDownload) {
+                    Label("Download", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.gray.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+        )
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import WhisperKit
 import SharedModels
+import FluidAudioTTS
 
 /// Transcription engine selection
 public enum TranscriptionEngine: String, CaseIterable {
@@ -56,6 +57,11 @@ class ModelStateManager: ObservableObject {
     }
     @Published var parakeetLoadingState: ParakeetLoadingState = .notDownloaded
     private var currentParakeetLoadingTask: Task<Void, Never>? = nil
+
+    // MARK: - Kokoro TTS State
+    @Published var kokoroLoadingState: ParakeetLoadingState = .notDownloaded
+    @Published var loadedTtsManager: TtSManager? = nil
+    private var currentKokoroLoadingTask: Task<Void, Never>? = nil
 
     // MARK: - WhisperKit State
     @Published var downloadedModels: Set<String> = []
@@ -403,6 +409,84 @@ class ModelStateManager: ObservableObject {
             parakeetLoadingState = .notDownloaded
         }
         print("Parakeet model unloaded")
+    }
+
+    // MARK: - Kokoro TTS Model Loading
+
+    func loadKokoroTtsModel() async {
+        guard kokoroLoadingState != .downloading && kokoroLoadingState != .loading else {
+            print("Kokoro TTS model already downloading/loading, skipping...")
+            return
+        }
+
+        currentKokoroLoadingTask?.cancel()
+
+        // Check if model is already cached
+        let modelPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/fluidaudio/Models/kokoro")
+        let isAlreadyDownloaded = FileManager.default.fileExists(atPath: modelPath.path)
+
+        kokoroLoadingState = isAlreadyDownloaded ? .loading : .downloading
+
+        let task = Task { () -> Void in
+            if Task.isCancelled { return }
+
+            do {
+                let manager = TtSManager()
+                try await manager.initialize()
+
+                if Task.isCancelled {
+                    manager.cleanup()
+                    await MainActor.run {
+                        kokoroLoadingState = .notDownloaded
+                    }
+                    return
+                }
+
+                // Apply saved voice preference
+                if let savedVoice = UserDefaults.standard.string(forKey: "kokoroVoice") {
+                    try? await manager.setDefaultVoice(savedVoice)
+                    print("Kokoro TTS: applied saved voice '\(savedVoice)'")
+                }
+
+                await MainActor.run {
+                    self.loadedTtsManager = manager
+                    self.kokoroLoadingState = .loaded
+                }
+
+                print("Kokoro TTS model loaded successfully")
+            } catch {
+                if Task.isCancelled {
+                    print("Kokoro TTS model loading cancelled: \(error)")
+                } else {
+                    print("Failed to load Kokoro TTS model: \(error)")
+                }
+
+                await MainActor.run {
+                    kokoroLoadingState = .notDownloaded
+                    loadedTtsManager = nil
+                }
+            }
+        }
+
+        currentKokoroLoadingTask = task
+        await task.value
+    }
+
+    func unloadKokoroTtsModel() {
+        loadedTtsManager?.cleanup()
+        loadedTtsManager = nil
+
+        // Check if model files exist on disk
+        let modelPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/fluidaudio/Models/kokoro")
+
+        if FileManager.default.fileExists(atPath: modelPath.path) {
+            kokoroLoadingState = .downloaded
+        } else {
+            kokoroLoadingState = .notDownloaded
+        }
+        print("Kokoro TTS model unloaded")
     }
 
     /// Unload WhisperKit model to free memory

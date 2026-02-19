@@ -22,12 +22,14 @@ func loadEnvironmentVariables() {
     for line in envContent.components(separatedBy: .newlines) {
         let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedLine.isEmpty && !trimmedLine.hasPrefix("#") else { continue }
-        
-        let parts = trimmedLine.components(separatedBy: "=")
-        guard parts.count == 2 else { continue }
-        
-        let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let equalsIndex = trimmedLine.firstIndex(of: "=") else { continue }
+
+        let key = String(trimmedLine[trimmedLine.startIndex..<equalsIndex])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = String(trimmedLine[trimmedLine.index(after: equalsIndex)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { continue }
         setenv(key, value, 1)
     }
 }
@@ -36,31 +38,50 @@ extension KeyboardShortcuts.Name {
     static let startRecording = Self("startRecording")
     static let showHistory = Self("showHistory")
     static let readSelectedText = Self("readSelectedText")
-    static let toggleScreenRecording = Self("toggleScreenRecording")
-    static let geminiAudioRecording = Self("geminiAudioRecording")
+
     static let pasteLastTranscription = Self("pasteLastTranscription")
+    static let openclawRecording = Self("openclawRecording")
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, GeminiAudioRecordingManagerDelegate {
+enum OptionDoubleTapState {
+    case idle
+    case firstPress
+    case firstRelease
+    case recording
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate {
     var statusItem: NSStatusItem!
     var settingsWindow: SettingsWindowController?
     private var unifiedWindow: UnifiedManagerWindow?
+    private var historyWindow: TranscriptionHistoryWindow?
 
     private var displayTimer: Timer?
     private var modelCancellable: AnyCancellable?
     private var engineCancellable: AnyCancellable?
     private var parakeetVersionCancellable: AnyCancellable?
-    private var transcriptionTimer: Timer?
-    private var videoProcessingTimer: Timer?
+    private var waveformAnimationTimer: Timer?
     private var audioManager: AudioTranscriptionManager!
-    private var geminiAudioManager: GeminiAudioRecordingManager!
+    private var audioOverlay: AudioTranscriptionOverlayWindow?
     private var streamingPlayer: GeminiStreamingPlayer?
     private var audioCollector: GeminiAudioCollector?
     private var isCurrentlyPlaying = false
     private var currentStreamingTask: Task<Void, Never>?
-    private var screenRecorder = ScreenRecorder()
-    private var currentVideoURL: URL?
-    private var videoTranscriber = VideoTranscriber()
+    private var currentPlayingSound: NSSound?
+    var openClawManagerPublic: OpenClawManager? { openClawManager }
+    private var openClawManager: OpenClawManager?
+    private var openClawRecordingManager: OpenClawRecordingManager?
+    private var openClawOverlay: OpenClawOverlayWindow?
+    private var optionDoubleTapMonitor: Any?
+    private var leftOptionState: OptionDoubleTapState = .idle
+    private var leftOptionFirstPressTime: TimeInterval = 0
+    private var leftOptionFirstReleaseTime: TimeInterval = 0
+    private var leftOptionResetTimer: Timer?
+    private var rightOptionState: OptionDoubleTapState = .idle
+    private var rightOptionFirstPressTime: TimeInterval = 0
+    private var rightOptionFirstReleaseTime: TimeInterval = 0
+    private var rightOptionResetTimer: Timer?
+    private var sttPushToTalkActive = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
@@ -84,54 +105,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         
         // Set the waveform icon
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Assistant")
+            button.image = defaultWaveformImage()
         }
         
         // Create menu
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Recording: Press Command+Option+Z", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Gemini Audio Recording: Press Command+Option+X", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "History: Press Command+Option+A", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Read Selected Text: Press Command+Option+S", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Screen Recording: Press Command+Option+C", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Paste Last Transcription: Press Command+Option+V", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "View History...", action: #selector(showTranscriptionHistory), keyEquivalent: "h"))
-        menu.addItem(NSMenuItem(title: "Statistics...", action: #selector(showStats), keyEquivalent: "s"))
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
-        
-        // Set default keyboard shortcuts
-        KeyboardShortcuts.setShortcut(.init(.z, modifiers: [.command, .option]), for: .startRecording)
-        KeyboardShortcuts.setShortcut(.init(.x, modifiers: [.command, .option]), for: .geminiAudioRecording)
-        KeyboardShortcuts.setShortcut(.init(.a, modifiers: [.command, .option]), for: .showHistory)
-        KeyboardShortcuts.setShortcut(.init(.s, modifiers: [.command, .option]), for: .readSelectedText)
-        KeyboardShortcuts.setShortcut(.init(.c, modifiers: [.command, .option]), for: .toggleScreenRecording)
-        KeyboardShortcuts.setShortcut(.init(.v, modifiers: [.command, .option]), for: .pasteLastTranscription)
+
+        // Set default keyboard shortcuts only if not already stored
+        let defaults: [(KeyboardShortcuts.Key, KeyboardShortcuts.Name)] = [
+            (.c, .startRecording),
+            (.a, .showHistory),
+            (.s, .readSelectedText),
+            (.v, .pasteLastTranscription),
+            (.o, .openclawRecording)
+        ]
+        for (key, name) in defaults {
+            if KeyboardShortcuts.getShortcut(for: name) == nil {
+                KeyboardShortcuts.setShortcut(.init(key, modifiers: [.command, .option]), for: name)
+            }
+        }
         
         // Set up keyboard shortcut handlers
         KeyboardShortcuts.onKeyUp(for: .startRecording) { [weak self] in
             guard let self = self else { return }
 
-            // Prevent starting audio recording if screen recording is active
-            if self.screenRecorder.recording {
+            // Prevent starting audio recording if OpenClaw recording is active
+            if self.openClawRecordingManager?.isRecording == true || self.openClawRecordingManager?.isProcessing == true {
                 let notification = NSUserNotification()
                 notification.title = "Cannot Start Audio Recording"
-                notification.informativeText = "Screen recording is currently active. Stop it first with Cmd+Option+C"
+                notification.informativeText = "OpenClaw recording is currently active. Stop it first with Cmd+Option+O"
                 NSUserNotificationCenter.default.deliver(notification)
-                print("⚠️ Blocked audio recording - screen recording is active")
-                return
-            }
-
-            // Prevent starting audio recording if Gemini audio recording is active
-            if self.geminiAudioManager.isRecording {
-                let notification = NSUserNotification()
-                notification.title = "Cannot Start Audio Recording"
-                notification.informativeText = "Gemini audio recording is currently active. Stop it first with Cmd+Option+X"
-                NSUserNotificationCenter.default.deliver(notification)
-                print("⚠️ Blocked audio recording - Gemini audio recording is active")
+                print("⚠️ Blocked audio recording - OpenClaw recording is active")
                 return
             }
 
@@ -151,53 +160,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             self?.handleReadSelectedTextToggle()
         }
 
-        KeyboardShortcuts.onKeyUp(for: .geminiAudioRecording) { [weak self] in
-            guard let self = self else { return }
-
-            // Prevent starting Gemini audio recording if screen recording is active
-            if self.screenRecorder.recording {
-                let notification = NSUserNotification()
-                notification.title = "Cannot Start Gemini Audio Recording"
-                notification.informativeText = "Screen recording is currently active. Stop it first with Cmd+Option+C"
-                NSUserNotificationCenter.default.deliver(notification)
-                print("⚠️ Blocked Gemini audio recording - screen recording is active")
-                return
-            }
-
-            // Prevent starting Gemini audio recording if WhisperKit recording is active
-            if self.audioManager.isRecording {
-                let notification = NSUserNotification()
-                notification.title = "Cannot Start Gemini Audio Recording"
-                notification.informativeText = "WhisperKit recording is currently active. Stop it first with Cmd+Option+Z"
-                NSUserNotificationCenter.default.deliver(notification)
-                print("⚠️ Blocked Gemini audio recording - WhisperKit recording is active")
-                return
-            }
-
-            // If about to start a fresh recording, make sure any previous
-            // processing indicator is stopped and UI is reset.
-            if !self.geminiAudioManager.isRecording {
-                self.stopTranscriptionIndicator()
-            }
-            self.geminiAudioManager.toggleRecording()
-        }
-
-        KeyboardShortcuts.onKeyUp(for: .toggleScreenRecording) { [weak self] in
-            self?.toggleScreenRecording()
-        }
-
         KeyboardShortcuts.onKeyUp(for: .pasteLastTranscription) { [weak self] in
             self?.pasteLastTranscription()
+        }
+
+        KeyboardShortcuts.onKeyUp(for: .openclawRecording) { [weak self] in
+            guard let self = self else { return }
+
+            // Mutual exclusion with WhisperKit recording
+            if self.audioManager.isRecording {
+                let notification = NSUserNotification()
+                notification.title = "Cannot Start OpenClaw Recording"
+                notification.informativeText = "WhisperKit recording is currently active. Stop it first with Cmd+Option+Z"
+                NSUserNotificationCenter.default.deliver(notification)
+                print("OpenClaw: blocked - WhisperKit recording is active")
+                return
+            }
+
+            guard let recordingManager = self.openClawRecordingManager else {
+                let notification = NSUserNotification()
+                notification.title = "OpenClaw Not Configured"
+                notification.informativeText = "Configure OpenClaw credentials in Settings → OpenClaw"
+                NSUserNotificationCenter.default.deliver(notification)
+                return
+            }
+
+            if !recordingManager.isRecording {
+                self.stopTranscriptionIndicator()
+            }
+            recordingManager.toggleRecording()
         }
 
         // Set up audio manager
         audioManager = AudioTranscriptionManager()
         audioManager.delegate = self
 
-        // Set up Gemini audio manager
-        geminiAudioManager = GeminiAudioRecordingManager()
-        geminiAudioManager.delegate = self
-        
+        // Initialize OpenClaw if configured (from UserDefaults)
+        if let openClawURL = UserDefaults.standard.string(forKey: "openClaw.url"), !openClawURL.isEmpty,
+           let openClawToken = UserDefaults.standard.string(forKey: "openClaw.token"), !openClawToken.isEmpty {
+            let sessionKey = UserDefaults.standard.string(forKey: "openClaw.sessionKey") ?? "voice-assistant"
+            let password = UserDefaults.standard.string(forKey: "openClaw.password")
+            connectOpenClaw(url: openClawURL, token: openClawToken, password: password, sessionKey: sessionKey)
+        }
+
+        // Set up double-tap-and-hold Option key for OpenClaw push-to-talk
+        setupOptionDoubleTapMonitor()
+
         // Check downloaded models at startup (in background)
         Task {
             await ModelStateManager.shared.checkDownloadedModels()
@@ -211,6 +219,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 }
             case .parakeet:
                 await ModelStateManager.shared.loadParakeetModel()
+            }
+
+            // Auto-load Kokoro TTS if previously downloaded
+            let kokoroPath = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cache/fluidaudio/Models/kokoro")
+            if FileManager.default.fileExists(atPath: kokoroPath.path) {
+                print("Kokoro TTS: found on disk, auto-loading...")
+                await ModelStateManager.shared.loadKokoroTtsModel()
             }
         }
 
@@ -255,21 +271,229 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         unifiedWindow?.showWindow(tab: .settings)
     }
     
-    @objc func showTranscriptionHistory() {
-        if unifiedWindow == nil {
-            unifiedWindow = UnifiedManagerWindow()
+    func connectOpenClaw(url: String, token: String, password: String?, sessionKey: String) {
+        // Tear down existing connection if any
+        disconnectOpenClaw()
+
+        let manager = OpenClawManager(url: url, token: token, password: password, sessionKey: sessionKey)
+        openClawManager = manager
+        openClawRecordingManager = OpenClawRecordingManager(
+            openClawManager: manager,
+            streamingPlayer: streamingPlayer,
+            audioCollector: audioCollector
+        )
+        openClawRecordingManager?.delegate = self
+        if openClawOverlay == nil {
+            openClawOverlay = OpenClawOverlayWindow()
+            openClawOverlay?.onCancel = { [weak self] in
+                self?.openClawRecordingManager?.cancelRecording()
+                self?.stopWaveformAnimation()
+            }
         }
-        unifiedWindow?.showWindow(tab: .history)
+        manager.connect()
+        print("OpenClaw: initialized (url=\(url))")
     }
-    
-    @objc func showStats() {
-        if unifiedWindow == nil {
-            unifiedWindow = UnifiedManagerWindow()
+
+    func disconnectOpenClaw() {
+        openClawManager?.disconnect()
+        openClawManager = nil
+        openClawRecordingManager = nil
+    }
+
+    // MARK: - Double-Tap-and-Hold Option Keys (Push-to-Talk)
+    // Left Option → OpenClaw, Right Option → STT Recording
+
+    private func setupOptionDoubleTapMonitor() {
+        let leftOptionKeyCode: UInt16 = 58
+        let rightOptionKeyCode: UInt16 = 61
+
+        optionDoubleTapMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self = self else { return }
+
+            let optionDown = event.modifierFlags.contains(.option)
+
+            // Ignore if other modifiers are held (Cmd, Ctrl, Shift) — don't interfere with shortcuts
+            let otherModifiers: NSEvent.ModifierFlags = [.command, .control, .shift]
+            if !event.modifierFlags.intersection(otherModifiers).isEmpty {
+                self.resetLeftOptionState()
+                self.resetRightOptionState()
+                return
+            }
+
+            let now = ProcessInfo.processInfo.systemUptime
+
+            if event.keyCode == leftOptionKeyCode {
+                self.handleDoubleTapHold(
+                    optionDown: optionDown, now: now,
+                    state: &self.leftOptionState,
+                    firstPressTime: &self.leftOptionFirstPressTime,
+                    firstReleaseTime: &self.leftOptionFirstReleaseTime,
+                    resetTimer: &self.leftOptionResetTimer,
+                    onStart: { self.startOpenClawPushToTalk() },
+                    onStop: { self.stopOpenClawPushToTalk() },
+                    onReset: { self.resetLeftOptionState() }
+                )
+            } else if event.keyCode == rightOptionKeyCode {
+                self.handleDoubleTapHold(
+                    optionDown: optionDown, now: now,
+                    state: &self.rightOptionState,
+                    firstPressTime: &self.rightOptionFirstPressTime,
+                    firstReleaseTime: &self.rightOptionFirstReleaseTime,
+                    resetTimer: &self.rightOptionResetTimer,
+                    onStart: { self.startSTTPushToTalk() },
+                    onStop: { self.stopSTTPushToTalk() },
+                    onReset: { self.resetRightOptionState() }
+                )
+            }
         }
-        unifiedWindow?.showWindow(tab: .statistics)
+    }
+
+    private func handleDoubleTapHold(
+        optionDown: Bool, now: TimeInterval,
+        state: inout OptionDoubleTapState,
+        firstPressTime: inout TimeInterval,
+        firstReleaseTime: inout TimeInterval,
+        resetTimer: inout Timer?,
+        onStart: @escaping () -> Void,
+        onStop: @escaping () -> Void,
+        onReset: @escaping () -> Void
+    ) {
+        switch state {
+        case .idle:
+            if optionDown {
+                state = .firstPress
+                firstPressTime = now
+                resetTimer?.invalidate()
+                resetTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
+                    onReset()
+                }
+            }
+
+        case .firstPress:
+            if !optionDown {
+                let tapDuration = now - firstPressTime
+                if tapDuration < 0.3 {
+                    state = .firstRelease
+                    firstReleaseTime = now
+                    resetTimer?.invalidate()
+                    resetTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { _ in
+                        onReset()
+                    }
+                } else {
+                    onReset()
+                }
+            }
+
+        case .firstRelease:
+            if optionDown {
+                let gap = now - firstReleaseTime
+                if gap < 0.4 {
+                    resetTimer?.invalidate()
+                    resetTimer = nil
+                    state = .recording
+                    onStart()
+                } else {
+                    onReset()
+                }
+            }
+
+        case .recording:
+            if !optionDown {
+                state = .idle
+                onStop()
+            }
+        }
+    }
+
+    private func resetLeftOptionState() {
+        leftOptionState = .idle
+        leftOptionResetTimer?.invalidate()
+        leftOptionResetTimer = nil
+    }
+
+    private func resetRightOptionState() {
+        rightOptionState = .idle
+        rightOptionResetTimer?.invalidate()
+        rightOptionResetTimer = nil
+    }
+
+    private func startOpenClawPushToTalk() {
+        if audioManager.isRecording {
+            print("OpenClaw PTT: blocked - audio recording is active")
+            resetLeftOptionState()
+            return
+        }
+
+        guard let recordingManager = openClawRecordingManager else {
+            print("OpenClaw PTT: not configured")
+            resetLeftOptionState()
+            return
+        }
+
+        if recordingManager.isRecording || recordingManager.isProcessing {
+            print("OpenClaw PTT: already recording/processing")
+            resetLeftOptionState()
+            return
+        }
+
+        print("OpenClaw PTT: started (double-tap-hold)")
+        stopTranscriptionIndicator()
+        recordingManager.toggleRecording()
+    }
+
+    private func stopOpenClawPushToTalk() {
+        guard let recordingManager = openClawRecordingManager, recordingManager.isRecording else {
+            return
+        }
+
+        print("OpenClaw PTT: released — stopping")
+        recordingManager.toggleRecording()
+    }
+
+    private func startSTTPushToTalk() {
+        if openClawRecordingManager?.isRecording == true || openClawRecordingManager?.isProcessing == true {
+            print("STT PTT: blocked - OpenClaw recording is active")
+            resetRightOptionState()
+            return
+        }
+
+        if audioManager.isRecording {
+            print("STT PTT: already recording")
+            resetRightOptionState()
+            return
+        }
+
+        print("STT PTT: started (double-tap-hold)")
+        sttPushToTalkActive = true
+        stopTranscriptionIndicator()
+        audioManager.toggleRecording()
+    }
+
+    private func stopSTTPushToTalk() {
+        guard audioManager.isRecording else { return }
+
+        print("STT PTT: released — stopping")
+        audioManager.toggleRecording()
+    }
+
+    @discardableResult
+    private func ensureAudioOverlay() -> AudioTranscriptionOverlayWindow {
+        if audioOverlay == nil {
+            audioOverlay = AudioTranscriptionOverlayWindow()
+        }
+        return audioOverlay!
+    }
+
+    @objc func showTranscriptionHistory() {
+        if historyWindow == nil {
+            historyWindow = TranscriptionHistoryWindow()
+        }
+        historyWindow?.showWindow()
     }
     
     func handleReadSelectedTextToggle() {
+        NSLog("TTS: handleReadSelectedTextToggle called, isCurrentlyPlaying=\(isCurrentlyPlaying)")
+
         // If currently playing, stop the audio
         if isCurrentlyPlaying {
             stopCurrentPlayback()
@@ -280,146 +504,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         readSelectedText()
     }
 
-    func toggleScreenRecording() {
-        // Prevent starting screen recording if audio recording is active
-        if !screenRecorder.recording && audioManager.isRecording {
-            let notification = NSUserNotification()
-            notification.title = "Cannot Start Screen Recording"
-            notification.informativeText = "Audio recording is currently active. Stop it first with Cmd+Option+Z"
-            NSUserNotificationCenter.default.deliver(notification)
-            print("⚠️ Blocked screen recording - audio recording is active")
-            return
-        }
-
-        // Prevent starting screen recording if Gemini audio recording is active
-        if !screenRecorder.recording && geminiAudioManager.isRecording {
-            let notification = NSUserNotification()
-            notification.title = "Cannot Start Screen Recording"
-            notification.informativeText = "Gemini audio recording is currently active. Stop it first with Cmd+Option+X"
-            NSUserNotificationCenter.default.deliver(notification)
-            print("⚠️ Blocked screen recording - Gemini audio recording is active")
-            return
-        }
-
-        if screenRecorder.recording {
-            // Stop recording
-            screenRecorder.stopRecording { [weak self] result in
-                guard let self = self else { return }
-
-                switch result {
-                case .success(let videoURL):
-                    self.currentVideoURL = videoURL
-
-                    // Start video processing indicator
-                    self.startVideoProcessingIndicator()
-
-                    // Transcribe the video
-                    print("🎬 Starting transcription for: \(videoURL.lastPathComponent)")
-                    self.videoTranscriber.transcribe(videoURL: videoURL) { result in
-                        DispatchQueue.main.async {
-                            self.stopVideoProcessingIndicator()
-
-                            switch result {
-                            case .success(var transcription):
-                                // Apply text replacements from config
-                                transcription = TextReplacements.shared.processText(transcription)
-
-                                // Save to history
-                                TranscriptionHistory.shared.addEntry(transcription)
-
-                                // Paste transcription at cursor
-                                self.pasteTextAtCursor(transcription)
-
-                                // Delete the video file after successful transcription
-                                if let videoURL = self.currentVideoURL {
-                                    do {
-                                        try FileManager.default.removeItem(at: videoURL)
-                                        print("🗑️ Deleted video file: \(videoURL.lastPathComponent)")
-                                    } catch {
-                                        print("⚠️ Failed to delete video file: \(error.localizedDescription)")
-                                    }
-                                }
-
-                                // Show completion notification with transcription
-                                let completionNotification = NSUserNotification()
-                                completionNotification.title = "Video Transcribed"
-                                completionNotification.informativeText = transcription.prefix(100) + (transcription.count > 100 ? "..." : "")
-                                completionNotification.subtitle = "Pasted at cursor"
-                                NSUserNotificationCenter.default.deliver(completionNotification)
-
-                                print("✅ Transcription complete:")
-                                print("─────────────────")
-                                print(transcription)
-                                print("─────────────────")
-
-                            case .failure(let error):
-                                // Show error notification
-                                let errorNotification = NSUserNotification()
-                                errorNotification.title = "Transcription Failed"
-                                errorNotification.informativeText = error.localizedDescription
-                                NSUserNotificationCenter.default.deliver(errorNotification)
-
-                                print("❌ Transcription failed: \(error.localizedDescription)")
-                            }
-                        }
-                    }
-
-                case .failure(let error):
-                    print("❌ Screen recording failed: \(error.localizedDescription)")
-
-                    let errorNotification = NSUserNotification()
-                    errorNotification.title = "Recording Failed"
-                    errorNotification.informativeText = error.localizedDescription
-                    NSUserNotificationCenter.default.deliver(errorNotification)
-
-                    // Reset status bar
-                    if let button = self.statusItem.button {
-                        button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Assistant")
-                        button.title = ""
-                    }
-                }
-            }
-
-            // Show stopping notification
-            let notification = NSUserNotification()
-            notification.title = "Screen Recording Stopped"
-            notification.informativeText = "Saving video..."
-            NSUserNotificationCenter.default.deliver(notification)
-            print("⏹️ Screen recording STOPPED")
-
-        } else {
-            // Start recording
-            screenRecorder.startRecording { [weak self] result in
-                guard let self = self else { return }
-
-                switch result {
-                case .success(let videoURL):
-                    self.currentVideoURL = videoURL
-
-                    // Update status bar to show recording indicator
-                    if let button = self.statusItem.button {
-                        button.image = nil
-                        button.title = "🎥 REC"
-                    }
-
-                    // Show success notification
-                    let notification = NSUserNotification()
-                    notification.title = "Screen Recording Started"
-                    notification.informativeText = "Press Cmd+Option+C again to stop"
-                    NSUserNotificationCenter.default.deliver(notification)
-                    print("🎥 Screen recording STARTED")
-
-                case .failure(let error):
-                    print("❌ Failed to start recording: \(error.localizedDescription)")
-
-                    let errorNotification = NSUserNotification()
-                    errorNotification.title = "Recording Failed"
-                    errorNotification.informativeText = error.localizedDescription
-                    NSUserNotificationCenter.default.deliver(errorNotification)
-                }
-            }
-        }
-    }
 
     func pasteLastTranscription() {
         // Get the most recent transcription from history
@@ -444,16 +528,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     func stopCurrentPlayback() {
         print("🛑 Stopping audio playback")
-        
+
         // Cancel the current streaming task
         currentStreamingTask?.cancel()
         currentStreamingTask = nil
-        
-        // Stop the audio player
+
+        // Stop Kokoro NSSound playback
+        currentPlayingSound?.stop()
+        currentPlayingSound = nil
+
+        // Stop the Gemini audio player
         streamingPlayer?.stopAudioEngine()
-        
+
         // Reset playing state
         isCurrentlyPlaying = false
+        stopWaveformAnimation()
         
         let notification = NSUserNotification()
         notification.title = "Audio Stopped"
@@ -461,239 +550,189 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         NSUserNotificationCenter.default.deliver(notification)
     }
     
+    func getSelectedTextViaAccessibility() -> String? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedElement: AnyObject?
+        let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard result == .success, let element = focusedElement else { return nil }
+
+        var selectedText: AnyObject?
+        let textResult = AXUIElementCopyAttributeValue(element as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedText)
+        guard textResult == .success, let text = selectedText as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
     func readSelectedText() {
-        // Save current clipboard contents first
-        let pasteboard = NSPasteboard.general
-        let savedTypes = pasteboard.types ?? []
-        var savedItems: [NSPasteboard.PasteboardType: Data] = [:]
-        
-        for type in savedTypes {
-            if let data = pasteboard.data(forType: type) {
-                savedItems[type] = data
-            }
+        guard let selectedText = getSelectedTextViaAccessibility(), !selectedText.isEmpty else {
+            NSLog("TTS: no selected text found via Accessibility API")
+            let notification = NSUserNotification()
+            notification.title = "No Text Selected"
+            notification.informativeText = "Please select some text first before using TTS"
+            NSUserNotificationCenter.default.deliver(notification)
+            return
         }
-        
-        print("📋 Saved \(savedItems.count) clipboard types before reading selection")
-        
-        // Simulate Cmd+C to copy selected text
-        let source = CGEventSource(stateID: .hidSystemState)
-        let keyDownC = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true) // 'c' key
-        let keyUpC = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
-        
-        // Set Cmd modifier
-        keyDownC?.flags = .maskCommand
-        keyUpC?.flags = .maskCommand
-        
-        // Post the events
-        keyDownC?.post(tap: .cghidEventTap)
-        keyUpC?.post(tap: .cghidEventTap)
-        
-        // Give system a moment to process the copy command
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            // Read from clipboard
-            let copiedText = pasteboard.string(forType: .string) ?? ""
-            
-            if !copiedText.isEmpty {
-                print("📖 Selected text for streaming TTS: \(copiedText)")
-                
-                // Try to stream speech with our streaming components
-                if let audioCollector = self?.audioCollector, let streamingPlayer = self?.streamingPlayer {
-                    self?.isCurrentlyPlaying = true
-                    
-                    self?.currentStreamingTask = Task {
-                        do {
-                            let notification = NSUserNotification()
-                            notification.title = "Streaming TTS"
-                            notification.informativeText = "Starting streaming synthesis: \(copiedText.prefix(50))\(copiedText.count > 50 ? "..." : "")"
-                            NSUserNotificationCenter.default.deliver(notification)
-                            
-                            // Stream audio using single API call for all text at once
-                            try await streamingPlayer.playText(copiedText, audioCollector: audioCollector)
-                            
-                            // Check if task was cancelled
-                            if Task.isCancelled {
-                                return
-                            }
-                            
-                            let completionNotification = NSUserNotification()
-                            completionNotification.title = "Streaming TTS Complete"
-                            completionNotification.informativeText = "Finished streaming selected text"
-                            NSUserNotificationCenter.default.deliver(completionNotification)
-                            
-                        } catch is CancellationError {
-                            print("🛑 Audio streaming was cancelled")
-                        } catch {
-                            print("❌ Streaming TTS Error: \(error)")
-                            
-                            let errorNotification = NSUserNotification()
-                            errorNotification.title = "Streaming TTS Error"
-                            errorNotification.informativeText = "Failed to stream text: \(error.localizedDescription)"
-                            NSUserNotificationCenter.default.deliver(errorNotification)
-                            
-                            // Note: Text is already in clipboard from Cmd+C, no need to copy again
-                            let fallbackNotification = NSUserNotification()
-                            fallbackNotification.title = "Text Ready in Clipboard"
-                            fallbackNotification.informativeText = "Streaming failed, selected text copied via Cmd+C"
-                            NSUserNotificationCenter.default.deliver(fallbackNotification)
-                        }
-                        
-                        // Reset playing state when task completes (normally or via cancellation)
-                        DispatchQueue.main.async {
-                            self?.isCurrentlyPlaying = false
-                            self?.currentStreamingTask = nil
-                        }
-                        
-                        // Restore original clipboard contents after streaming
-                        DispatchQueue.main.async {
-                            pasteboard.clearContents()
-                            for (type, data) in savedItems {
-                                pasteboard.setData(data, forType: type)
-                            }
-                            print("♻️ Restored original clipboard contents")
-                        }
+
+        NSLog("TTS: got selected text via Accessibility (\(selectedText.count) chars)")
+
+        let hasGemini = audioCollector != nil && streamingPlayer != nil
+
+        isCurrentlyPlaying = true
+        startWaveformAnimation()
+
+        currentStreamingTask = Task { [weak self] in
+            do {
+                // Check for Kokoro inside the task (MainActor-isolated property)
+                let ttsManager = await MainActor.run { ModelStateManager.shared.loadedTtsManager }
+
+                if let ttsManager = ttsManager {
+                    let wavData = try await ttsManager.synthesize(text: selectedText)
+                    guard !Task.isCancelled else { return }
+
+                    let sound = NSSound(data: wavData)
+                    await MainActor.run { self?.currentPlayingSound = sound }
+                    sound?.play()
+
+                    while sound?.isPlaying == true && !Task.isCancelled {
+                        try await Task.sleep(nanoseconds: 100_000_000)
                     }
+                } else if hasGemini, let audioCollector = self?.audioCollector, let streamingPlayer = self?.streamingPlayer {
+                    try await streamingPlayer.playText(selectedText, audioCollector: audioCollector)
                 } else {
                     let notification = NSUserNotification()
-                    notification.title = "Selected Text Copied"
-                    notification.informativeText = "Streaming TTS not available, text copied to clipboard: \(copiedText.prefix(100))\(copiedText.count > 100 ? "..." : "")"
+                    notification.title = "TTS Not Available"
+                    notification.informativeText = "No TTS engine loaded"
                     NSUserNotificationCenter.default.deliver(notification)
-                    
-                    // Don't restore clipboard in this case since user might want the copied text
                 }
-            } else {
-                print("⚠️ No text was copied - nothing selected or copy failed")
-                
+            } catch is CancellationError {
+                NSLog("TTS: playback cancelled")
+            } catch {
+                NSLog("TTS: error: \(error)")
                 let notification = NSUserNotification()
-                notification.title = "No Text Selected"
-                notification.informativeText = "Please select some text first before using TTS"
+                notification.title = "TTS Error"
+                notification.informativeText = error.localizedDescription
                 NSUserNotificationCenter.default.deliver(notification)
-                
-                // Restore clipboard since copy attempt failed
-                pasteboard.clearContents()
-                for (type, data) in savedItems {
-                    pasteboard.setData(data, forType: type)
-                }
-                print("♻️ Restored clipboard after failed copy")
+            }
+
+            DispatchQueue.main.async {
+                self?.isCurrentlyPlaying = false
+                self?.currentStreamingTask = nil
+                self?.currentPlayingSound = nil
+                self?.stopWaveformAnimation()
             }
         }
     }
     
-    func updateStatusBarWithLevel(db: Float) {
-        // Don't update status bar if screen recording is active
-        if screenRecorder.recording {
-            return
+    func defaultWaveformImage() -> NSImage {
+        let width: CGFloat = 18
+        let height: CGFloat = 18
+        let barWidth: CGFloat = 3.0
+        let barSpacing: CGFloat = 1.5
+        let cornerRadius: CGFloat = 1.5
+
+        let barHeights: [CGFloat] = [8.0, 12.0, 8.0]
+
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.lockFocus()
+
+        let totalBarsWidth = 3 * barWidth + 2 * barSpacing
+        let startX = (width - totalBarsWidth) / 2
+
+        for i in 0..<3 {
+            let x = startX + CGFloat(i) * (barWidth + barSpacing)
+            let y = (height - barHeights[i]) / 2
+            let rect = NSRect(x: x, y: y, width: barWidth, height: barHeights[i])
+            let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+            NSColor.black.setFill()
+            path.fill()
         }
 
-        if let button = statusItem.button {
-            button.image = nil
-
-            // Convert dB to a 0-1 range (assuming -55dB to -20dB for normal speech)
-            let normalizedLevel = max(0, min(1, (db + 55) / 35))
-
-            // Create a visual bar using Unicode block characters
-            let barLength = 8
-            let filledLength = Int(normalizedLevel * Float(barLength))
-
-            var bar = ""
-            for i in 0..<barLength {
-                if i < filledLength {
-                    bar += "█"
-                } else {
-                    bar += "▁"
-                }
-            }
-
-            button.title = "● " + bar
-        }
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
     }
-    
-    func startTranscriptionIndicator() {
-        // Don't update status bar if screen recording is active
-        if screenRecorder.recording {
-            return
+
+    func generateWaveformImage() -> NSImage {
+        let width: CGFloat = 18
+        let height: CGFloat = 18
+        let barWidth: CGFloat = 3.0
+        let barSpacing: CGFloat = 1.5
+        let cornerRadius: CGFloat = 1.5
+        let minBarHeight: CGFloat = 4.0
+        let maxBarHeight: CGFloat = 14.0
+
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.lockFocus()
+
+        let totalBarsWidth = 3 * barWidth + 2 * barSpacing
+        let startX = (width - totalBarsWidth) / 2
+
+        for i in 0..<3 {
+            let barHeight = CGFloat.random(in: minBarHeight...maxBarHeight)
+            let x = startX + CGFloat(i) * (barWidth + barSpacing)
+            let y = (height - barHeight) / 2
+            let rect = NSRect(x: x, y: y, width: barWidth, height: barHeight)
+            let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+            NSColor.black.setFill()
+            path.fill()
         }
 
-        // Show initial indicator
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    func startWaveformAnimation() {
+        // Don't start if already animating or screen recording is active
+        if waveformAnimationTimer != nil { return }
+
+        // Show first frame immediately
         if let button = statusItem.button {
-            button.image = nil
-            button.title = "⚙️ Processing..."
+            button.title = ""
+            button.image = generateWaveformImage()
         }
 
-        // Animate the indicator
-        var dotCount = 0
-        transcriptionTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self else {
-                self?.transcriptionTimer?.invalidate()
-                return
-            }
-
-            // Don't update if screen recording is active
-            if self.screenRecorder.recording {
-                return
-            }
-
+        waveformAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
             if let button = self.statusItem.button {
-                dotCount = (dotCount + 1) % 4
-                let dots = String(repeating: ".", count: dotCount)
-                let spaces = String(repeating: " ", count: 3 - dotCount)
-                button.title = "⚙️ Processing" + dots + spaces
-            }
-        }
-    }
-    
-    func stopTranscriptionIndicator() {
-        transcriptionTimer?.invalidate()
-        transcriptionTimer = nil
-
-        // Don't update status bar if screen recording is active
-        if screenRecorder.recording {
-            return
-        }
-
-        // If not currently recording, reset to default icon.
-        // When recording, the live level updates will take over UI shortly.
-        if audioManager?.isRecording != true {
-            if let button = statusItem.button {
-                button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Assistant")
                 button.title = ""
+                button.image = self.generateWaveformImage()
             }
         }
     }
 
-    func startVideoProcessingIndicator() {
-        // Show initial indicator
+    func stopWaveformAnimation() {
+        waveformAnimationTimer?.invalidate()
+        waveformAnimationTimer = nil
+
+        // Don't update status bar if screen recording is active
+
+
         if let button = statusItem.button {
-            button.image = nil
-            button.title = "🎬 Processing..."
-        }
-
-        // Animate the indicator
-        var dotCount = 0
-        videoProcessingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self else {
-                self?.videoProcessingTimer?.invalidate()
-                return
-            }
-
-            if let button = self.statusItem.button {
-                dotCount = (dotCount + 1) % 4
-                let dots = String(repeating: ".", count: dotCount)
-                let spaces = String(repeating: " ", count: 3 - dotCount)
-                button.title = "🎬 Processing" + dots + spaces
-            }
-        }
-    }
-
-    func stopVideoProcessingIndicator() {
-        videoProcessingTimer?.invalidate()
-        videoProcessingTimer = nil
-
-        // Reset to default icon
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Assistant")
+            button.image = defaultWaveformImage()
             button.title = ""
         }
     }
+
+    func updateStatusBarWithLevel(db: Float) {
+
+        startWaveformAnimation()
+    }
+
+    func startTranscriptionIndicator() {
+
+        startWaveformAnimation()
+    }
+
+    func stopTranscriptionIndicator() {
+
+
+        // If not currently recording, stop animation and reset.
+        // When recording, the live level updates will keep animation going.
+        if audioManager?.isRecording != true {
+            stopWaveformAnimation()
+        }
+    }
+
     
 
     
@@ -803,67 +842,160 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     
     func audioLevelDidUpdate(db: Float) {
         updateStatusBarWithLevel(db: db)
+        ensureAudioOverlay().show(state: .listening)
     }
-    
+
     func transcriptionDidStart() {
         startTranscriptionIndicator()
+        ensureAudioOverlay().show(state: .transcribing)
     }
-    
+
     func transcriptionDidComplete(text: String) {
         stopTranscriptionIndicator()
+        audioOverlay?.dismiss()
+        let shouldSendReturn = sttPushToTalkActive
+        sttPushToTalkActive = false
         pasteTextAtCursor(text)
+        if shouldSendReturn {
+            // Simulate Return key after paste completes (slight delay for paste to land)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                let source = CGEventSource(stateID: .hidSystemState)
+                if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true) {
+                    keyDown.post(tap: .cghidEventTap)
+                }
+                if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false) {
+                    keyUp.post(tap: .cghidEventTap)
+                }
+                print("STT PTT: sent Return key")
+            }
+        }
         showTranscriptionNotification(text)
     }
-    
+
     func transcriptionDidFail(error: String) {
         stopTranscriptionIndicator()
+        ensureAudioOverlay().showError(error)
         showTranscriptionError(error)
     }
-    
+
     func recordingWasCancelled() {
+        sttPushToTalkActive = false
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
+        audioOverlay?.dismiss()
         // Reset the status bar icon
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Assistant")
+            button.image = defaultWaveformImage()
             button.title = ""
         }
-        
+
         // Show notification
         let notification = NSUserNotification()
         notification.title = "Recording Cancelled"
         notification.informativeText = "Recording was cancelled"
         NSUserNotificationCenter.default.deliver(notification)
     }
-    
+
     func recordingWasSkippedDueToSilence() {
+        sttPushToTalkActive = false
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
+        audioOverlay?.dismiss()
         // Reset the status bar icon
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Assistant")
+            button.image = defaultWaveformImage()
             button.title = ""
         }
-        
+
         // Optionally show a subtle notification
         let notification = NSUserNotification()
         notification.title = "Recording Skipped"
         notification.informativeText = "Audio was too quiet to transcribe"
         NSUserNotificationCenter.default.deliver(notification)
     }
-    
+
+    // MARK: - OpenClawRecordingManagerDelegate
+
+    func openClawAudioLevelDidUpdate(db: Float) {
+        updateStatusBarWithLevel(db: db)
+        openClawOverlay?.show(state: .listening)
+    }
+
+    func openClawDidStartProcessing() {
+        startTranscriptionIndicator()
+        openClawOverlay?.show(state: .processing)
+    }
+
+    func openClawDidReceiveResponse(text: String) {
+        startWaveformAnimation()
+        openClawOverlay?.updateResponse(text)
+    }
+
+    func openClawDidFinish(question: String, answer: String) {
+        stopWaveformAnimation()
+        openClawOverlay?.updateResponse(answer)
+        openClawOverlay?.complete()
+    }
+
+    func openClawDidFail(error: String) {
+        stopWaveformAnimation()
+        openClawOverlay?.showError(error)
+    }
+
+    func openClawRecordingWasCancelled() {
+        stopWaveformAnimation()
+        openClawOverlay?.dismiss()
+    }
+
+    func openClawTTSDidStart() {
+        openClawOverlay?.ttsStarted()
+    }
+
+    func openClawTTSDidFinish() {
+        openClawOverlay?.ttsFinished()
+    }
+
 }
 
 // Create and run the app
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.regular) // Show in dock and cmd+tab
+app.setActivationPolicy(.accessory) // Hide dock icon, keep global keyboard shortcuts
 
 // Set the app icon from our custom ICNS file
 if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
    let iconImage = NSImage(contentsOf: iconURL) {
     app.applicationIconImage = iconImage
 }
+
+// Set up main menu with Edit menu so text fields support copy/paste
+let mainMenu = NSMenu()
+
+let appMenuItem = NSMenuItem()
+let appMenu = NSMenu()
+appMenu.addItem(withTitle: "Quit Super Voice Assistant", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+appMenuItem.submenu = appMenu
+mainMenu.addItem(appMenuItem)
+
+let fileMenuItem = NSMenuItem()
+let fileMenu = NSMenu(title: "File")
+fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+fileMenuItem.submenu = fileMenu
+mainMenu.addItem(fileMenuItem)
+
+let editMenuItem = NSMenuItem()
+let editMenu = NSMenu(title: "Edit")
+editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+editMenu.addItem(NSMenuItem.separator())
+editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+editMenuItem.submenu = editMenu
+mainMenu.addItem(editMenuItem)
+
+app.mainMenu = mainMenu
 
 app.run()

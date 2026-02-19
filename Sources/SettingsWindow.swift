@@ -107,32 +107,34 @@ struct SettingsView: View {
                             }
                         )
                     }
+
+                    // Kokoro TTS section header
+                    HStack {
+                        Text("Kokoro TTS")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        Text("by FluidAudio")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.top, 8)
+
+                    // Kokoro TTS model card
+                    KokoroTtsModelCard(
+                        loadingState: modelState.kokoroLoadingState,
+                        onDownload: {
+                            Task {
+                                await modelState.loadKokoroTtsModel()
+                            }
+                        }
+                    )
                 }
                 .padding()
             }
 
-            Divider()
-
-            // Footer with current status
-            HStack {
-                if modelState.isCheckingModels {
-                    Label("Checking models...", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    currentModelStatusLabel
-                }
-
-                Spacer()
-
-                Button("Done") {
-                    NSApplication.shared.keyWindow?.close()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding()
         }
-        .frame(width: 600, height: 550)
         .onAppear {
             // If models haven't been checked yet (e.g., settings opened very quickly after app start)
             if modelState.isCheckingModels {
@@ -144,42 +146,6 @@ struct SettingsView: View {
             // Check for incomplete downloads that need auto-resume
             Task {
                 await checkForIncompleteDownloads()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var currentModelStatusLabel: some View {
-        switch modelState.selectedEngine {
-        case .parakeet:
-            switch modelState.parakeetLoadingState {
-            case .loaded:
-                Label("Current: \(modelState.parakeetVersion.displayName)", systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            case .loading, .downloading:
-                Label("Loading Parakeet...", systemImage: "arrow.clockwise")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            default:
-                Label("Download a model to get started", systemImage: "arrow.down.circle")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        case .whisperKit:
-            if let selected = modelState.selectedModel,
-               let model = whisperModels.first(where: { $0.name == selected }) {
-                Label("Current: \(model.displayName)", systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } else if modelState.downloadedModels.isEmpty {
-                Label("Download a model to get started", systemImage: "arrow.down.circle")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } else {
-                Label("Select a downloaded model", systemImage: "cursorarrow.click")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
         }
     }

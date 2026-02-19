@@ -3,43 +3,42 @@ import SwiftUI
 
 enum ManagerTab: Int {
     case settings = 0
-    case history = 1
-    case statistics = 2
-    case audioDevices = 3
+    case shortcuts = 1
+    case audioDevices = 2
+    case openClaw = 3
 }
 
 class UnifiedManagerWindow: NSWindowController {
     private var tabViewController: NSTabViewController!
-    private var historyViewController: TranscriptionHistoryViewController?
-    private var statsViewController: StatsViewController?
     private var settingsController: SettingsWindowController?
+    private var shortcutsViewController: ShortcutsSettingsViewController?
     private var audioDevicesViewController: AudioDevicesViewController?
-    
+    private var openClawViewController: OpenClawSettingsViewController?
+
     override init(window: NSWindow?) {
-        // Create the main window
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 850, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 850, height: 750),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Super Voice Assistant"
-        window.minSize = NSSize(width: 600, height: 400)
-        
+        window.minSize = NSSize(width: 600, height: 550)
+
         super.init(window: window)
-        
+
         setupTabView()
     }
-    
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-    
+
     private func setupTabView() {
         tabViewController = NSTabViewController()
         tabViewController.tabStyle = .toolbar
-        
-        // Settings Tab - Use existing SettingsWindowController's view
+
+        // Settings Tab
         if settingsController == nil {
             settingsController = SettingsWindowController()
         }
@@ -49,42 +48,36 @@ class UnifiedManagerWindow: NSWindowController {
         settingsTab.label = "Settings"
         settingsTab.image = NSImage(systemSymbolName: "gear", accessibilityDescription: "Settings")
         tabViewController.addTabViewItem(settingsTab)
-        
-        // History Tab - Use the new TranscriptionHistoryViewController
-        historyViewController = TranscriptionHistoryViewController()
-        let historyTab = NSTabViewItem(viewController: historyViewController!)
-        historyTab.label = "History"
-        historyTab.image = NSImage(systemSymbolName: "clock", accessibilityDescription: "History")
-        tabViewController.addTabViewItem(historyTab)
-        
-        // Statistics Tab - Use the new StatsViewController
-        statsViewController = StatsViewController()
-        let statsTab = NSTabViewItem(viewController: statsViewController!)
-        statsTab.label = "Statistics"
-        statsTab.image = NSImage(systemSymbolName: "chart.bar", accessibilityDescription: "Statistics")
-        tabViewController.addTabViewItem(statsTab)
-        
+
+        // Shortcuts Tab
+        shortcutsViewController = ShortcutsSettingsViewController()
+        let shortcutsTab = NSTabViewItem(viewController: shortcutsViewController!)
+        shortcutsTab.label = "Shortcuts"
+        shortcutsTab.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Shortcuts")
+        tabViewController.addTabViewItem(shortcutsTab)
+
         // Audio Devices Tab
         audioDevicesViewController = AudioDevicesViewController()
         let audioDevicesTab = NSTabViewItem(viewController: audioDevicesViewController!)
         audioDevicesTab.label = "Audio Devices"
         audioDevicesTab.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Audio Devices")
         tabViewController.addTabViewItem(audioDevicesTab)
-        
+
+        // OpenClaw Tab
+        openClawViewController = OpenClawSettingsViewController()
+        let openClawTab = NSTabViewItem(viewController: openClawViewController!)
+        openClawTab.label = "OpenClaw"
+        openClawTab.image = NSImage(systemSymbolName: "network", accessibilityDescription: "OpenClaw")
+        tabViewController.addTabViewItem(openClawTab)
+
         window?.contentViewController = tabViewController
     }
-    
+
     func showWindow(tab: ManagerTab? = nil) {
-        // If a specific tab is requested, switch to it
         if let tab = tab {
             tabViewController.selectedTabViewItemIndex = tab.rawValue
-            
-            // If showing history tab, refresh it (even if already visible)
-            if tab == .history {
-                historyViewController?.refreshHistory()
-            }
         }
-        
+
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

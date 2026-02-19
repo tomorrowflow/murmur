@@ -389,22 +389,61 @@ class AudioTranscriptionManager {
 
     @MainActor
     private func handleTranscriptionResult(_ rawTranscription: String) {
-        var transcription = rawTranscription.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let transcription = rawTranscription.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         if !transcription.isEmpty {
-            // Apply text replacements from config
-            transcription = TextReplacements.shared.processText(transcription)
-
-            print("Transcription: \"\(transcription)\"")
-
-            // Save to history
-            TranscriptionHistory.shared.addEntry(transcription)
-
-            // Notify delegate
-            delegate?.transcriptionDidComplete(text: transcription)
+            finishTranscription(transcription)
         } else {
-            print("No transcription generated (possibly silence)")
-            // Reset UI and avoid leaving the processing indicator running
-            delegate?.recordingWasSkippedDueToSilence()
+            // Attempt Gemini fallback if API key is available
+            if ProcessInfo.processInfo.environment["GEMINI_API_KEY"] != nil {
+                print("Local transcription returned empty — falling back to Gemini")
+                Task { await fallbackToGemini() }
+            } else {
+                print("No transcription generated (possibly silence)")
+                delegate?.recordingWasSkippedDueToSilence()
+            }
+        }
+    }
+
+    @MainActor
+    private func finishTranscription(_ rawText: String) {
+        var transcription = rawText
+        // Apply text replacements from config
+        transcription = TextReplacements.shared.processText(transcription)
+
+        print("Transcription: \"\(transcription)\"")
+
+        // Save to history
+        TranscriptionHistory.shared.addEntry(transcription)
+
+        // Notify delegate
+        delegate?.transcriptionDidComplete(text: transcription)
+    }
+
+    @MainActor
+    private func fallbackToGemini() async {
+        let gemini = GeminiAudioTranscriber()
+        let buffer = audioBuffer
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            gemini.transcribe(audioBuffer: buffer) { [weak self] result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let text):
+                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            print("Gemini fallback transcription succeeded")
+                            self?.finishTranscription(trimmed)
+                        } else {
+                            print("Gemini fallback also returned empty")
+                            self?.delegate?.recordingWasSkippedDueToSilence()
+                        }
+                    case .failure(let error):
+                        print("Gemini fallback failed: \(error.localizedDescription)")
+                        self?.delegate?.recordingWasSkippedDueToSilence()
+                    }
+                    continuation.resume()
+                }
+            }
         }
     }
 }

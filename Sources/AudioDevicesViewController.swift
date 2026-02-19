@@ -1,21 +1,28 @@
 import Cocoa
 import Combine
 import SharedModels
+import FluidAudioTTS
 
 class AudioDevicesViewController: NSViewController {
     private var deviceManager = AudioDeviceManager.shared
     private var cancellables = Set<AnyCancellable>()
-    
+
     private let inputLabel = NSTextField(labelWithString: "Input Device")
     private let outputLabel = NSTextField(labelWithString: "Output Device")
-    
+
     private let inputSystemDefaultRadio = NSButton(radioButtonWithTitle: "Follow System Default", target: nil, action: nil)
     private let inputSpecificRadio = NSButton(radioButtonWithTitle: "Use Specific Device:", target: nil, action: nil)
     private let inputDevicePopup = NSPopUpButton()
-    
+
     private let outputSystemDefaultRadio = NSButton(radioButtonWithTitle: "Follow System Default", target: nil, action: nil)
     private let outputSpecificRadio = NSButton(radioButtonWithTitle: "Use Specific Device:", target: nil, action: nil)
     private let outputDevicePopup = NSPopUpButton()
+
+    private let voiceLabel = NSTextField(labelWithString: "Kokoro TTS Voice")
+    private let voicePopup = NSPopUpButton()
+    private let voiceInfoLabel = NSTextField(labelWithString: "")
+    private let testVoiceButton = NSButton(title: "Test Voice", target: nil, action: nil)
+    private var testVoiceTask: Task<Void, Never>?
     
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
@@ -26,6 +33,7 @@ class AudioDevicesViewController: NSViewController {
         setupUI()
         bindToDeviceManager()
         updateUIState()
+        updateVoiceUI()
     }
     
     private func setupUI() {
@@ -51,10 +59,26 @@ class AudioDevicesViewController: NSViewController {
         outputDevicePopup.target = self
         outputDevicePopup.action = #selector(outputDeviceChanged)
         
+        voiceLabel.font = .boldSystemFont(ofSize: 14)
+        voiceInfoLabel.font = .systemFont(ofSize: 12)
+        voiceInfoLabel.textColor = .secondaryLabelColor
+        voiceInfoLabel.lineBreakMode = .byWordWrapping
+        voiceInfoLabel.maximumNumberOfLines = 2
+
+        voicePopup.target = self
+        voicePopup.action = #selector(voiceChanged)
+
+        testVoiceButton.target = self
+        testVoiceButton.action = #selector(testVoiceTapped)
+        testVoiceButton.bezelStyle = .rounded
+
         let divider = NSBox()
         divider.boxType = .separator
-        
-        let views = [
+
+        let divider2 = NSBox()
+        divider2.boxType = .separator
+
+        let views: [NSView] = [
             inputLabel,
             inputSystemDefaultRadio,
             inputSpecificRadio,
@@ -63,51 +87,74 @@ class AudioDevicesViewController: NSViewController {
             outputLabel,
             outputSystemDefaultRadio,
             outputSpecificRadio,
-            outputDevicePopup
+            outputDevicePopup,
+            divider2,
+            voiceLabel,
+            voiceInfoLabel,
+            voicePopup,
+            testVoiceButton
         ]
-        
+
         views.forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview($0)
         }
-        
+
         NSLayoutConstraint.activate([
             container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             container.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             container.widthAnchor.constraint(equalToConstant: 400),
-            
+
             inputLabel.topAnchor.constraint(equalTo: container.topAnchor),
             inputLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            
+
             inputSystemDefaultRadio.topAnchor.constraint(equalTo: inputLabel.bottomAnchor, constant: 12),
             inputSystemDefaultRadio.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            
+
             inputSpecificRadio.topAnchor.constraint(equalTo: inputSystemDefaultRadio.bottomAnchor, constant: 8),
             inputSpecificRadio.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            
+
             inputDevicePopup.centerYAnchor.constraint(equalTo: inputSpecificRadio.centerYAnchor),
             inputDevicePopup.leadingAnchor.constraint(equalTo: inputSpecificRadio.trailingAnchor, constant: 8),
             inputDevicePopup.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             inputDevicePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
-            
+
             divider.topAnchor.constraint(equalTo: inputDevicePopup.bottomAnchor, constant: 24),
             divider.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             divider.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            
+
             outputLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 24),
             outputLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            
+
             outputSystemDefaultRadio.topAnchor.constraint(equalTo: outputLabel.bottomAnchor, constant: 12),
             outputSystemDefaultRadio.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            
+
             outputSpecificRadio.topAnchor.constraint(equalTo: outputSystemDefaultRadio.bottomAnchor, constant: 8),
             outputSpecificRadio.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            
+
             outputDevicePopup.centerYAnchor.constraint(equalTo: outputSpecificRadio.centerYAnchor),
             outputDevicePopup.leadingAnchor.constraint(equalTo: outputSpecificRadio.trailingAnchor, constant: 8),
             outputDevicePopup.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             outputDevicePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
-            outputDevicePopup.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+
+            divider2.topAnchor.constraint(equalTo: outputDevicePopup.bottomAnchor, constant: 24),
+            divider2.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            divider2.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            voiceLabel.topAnchor.constraint(equalTo: divider2.bottomAnchor, constant: 24),
+            voiceLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+
+            voiceInfoLabel.topAnchor.constraint(equalTo: voiceLabel.bottomAnchor, constant: 8),
+            voiceInfoLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            voiceInfoLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            voicePopup.topAnchor.constraint(equalTo: voiceInfoLabel.bottomAnchor, constant: 8),
+            voicePopup.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            voicePopup.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            testVoiceButton.topAnchor.constraint(equalTo: voicePopup.bottomAnchor, constant: 12),
+            testVoiceButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            testVoiceButton.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
     }
     
@@ -227,5 +274,83 @@ class AudioDevicesViewController: NSViewController {
         guard let uid = outputDevicePopup.selectedItem?.representedObject as? String else { return }
         deviceManager.selectedOutputDeviceUID = uid
         deviceManager.savePreferences()
+    }
+
+    // MARK: - Kokoro Voice
+
+    private func updateVoiceUI() {
+        let isLoaded = ModelStateManager.shared.loadedTtsManager != nil
+
+        voicePopup.removeAllItems()
+
+        if !isLoaded {
+            voiceInfoLabel.stringValue = "Kokoro TTS is not loaded. Load it from the Settings tab to select a voice."
+            voicePopup.isEnabled = false
+            voicePopup.addItem(withTitle: "Not available")
+            testVoiceButton.isEnabled = false
+            return
+        }
+
+        voiceInfoLabel.stringValue = "Select the voice used for text-to-speech synthesis."
+        voicePopup.isEnabled = true
+        testVoiceButton.isEnabled = true
+
+        let voices = TtsConstants.availableVoices
+        let savedVoice = UserDefaults.standard.string(forKey: "kokoroVoice") ?? TtsConstants.recommendedVoice
+
+        for voice in voices {
+            let label = voice == TtsConstants.recommendedVoice ? "\(voice) (recommended)" : voice
+            voicePopup.addItem(withTitle: label)
+            voicePopup.lastItem?.representedObject = voice
+        }
+
+        if let index = voices.firstIndex(of: savedVoice) {
+            voicePopup.selectItem(at: index)
+        }
+    }
+
+    @objc private func voiceChanged() {
+        guard let voice = voicePopup.selectedItem?.representedObject as? String else { return }
+        UserDefaults.standard.set(voice, forKey: "kokoroVoice")
+
+        // Apply the voice change to the loaded TTS manager
+        if let ttsManager = ModelStateManager.shared.loadedTtsManager {
+            Task {
+                try? await ttsManager.setDefaultVoice(voice)
+                print("Kokoro voice changed to: \(voice)")
+            }
+        }
+    }
+
+    @objc private func testVoiceTapped() {
+        guard let ttsManager = ModelStateManager.shared.loadedTtsManager else { return }
+        let voice = voicePopup.selectedItem?.representedObject as? String
+
+        testVoiceButton.isEnabled = false
+        testVoiceButton.title = "Generating..."
+
+        testVoiceTask?.cancel()
+        testVoiceTask = Task {
+            do {
+                let wavData = try await ttsManager.synthesize(
+                    text: "Hello! This is a test of the selected voice. How does it sound?",
+                    voice: voice
+                )
+                guard !Task.isCancelled else { return }
+                let sound = NSSound(data: wavData)
+                sound?.play()
+            } catch {
+                print("Voice test failed: \(error)")
+            }
+            await MainActor.run {
+                self.testVoiceButton.isEnabled = true
+                self.testVoiceButton.title = "Test Voice"
+            }
+        }
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        updateVoiceUI()
     }
 }

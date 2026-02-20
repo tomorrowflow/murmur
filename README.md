@@ -1,4 +1,4 @@
-# Super Voice Assistant
+# Murmur
 
 > Fork of [ykdojo/super-voice-assistant](https://github.com/ykdojo/super-voice-assistant) with OpenClaw integration, push-to-talk, audio transcription overlay, and consolidated shortcuts.
 
@@ -61,12 +61,12 @@ All keyboard shortcuts are customizable in Settings.
 
 ### Microphone Access
 The app requests microphone permission on first launch. If denied:
-- **System Settings > Privacy & Security > Microphone** — enable for Super Voice Assistant
+- **System Settings > Privacy & Security > Microphone** — enable for Murmur
 
 ### Accessibility Access
 Required for global hotkeys and auto-paste:
 1. **System Settings > Privacy & Security > Accessibility**
-2. Add **Terminal** (if running via `swift run`) or the **SuperVoiceAssistant** binary
+2. Add **Terminal** (if running via `swift run`) or the **Murmur** binary
 3. Ensure the checkbox is enabled
 
 ## Installation
@@ -82,7 +82,7 @@ cp .env.example .env
 
 # Build and run
 swift build
-swift run SuperVoiceAssistant
+swift run Murmur
 ```
 
 The app appears in your menu bar as a waveform icon (no dock icon).

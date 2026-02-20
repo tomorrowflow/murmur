@@ -4,14 +4,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "SuperVoiceAssistant",
+    name: "Murmur",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .executable(
-            name: "SuperVoiceAssistant",
-            targets: ["SuperVoiceAssistant"]),
+            name: "Murmur",
+            targets: ["Murmur"]),
         .executable(
             name: "TestDownload",
             targets: ["TestDownload"]),
@@ -63,7 +63,7 @@ let package = Package(
             dependencies: ["WhisperKit", "FluidAudio", .product(name: "FluidAudioTTS", package: "FluidAudio")],
             path: "SharedSources"),
         .executableTarget(
-            name: "SuperVoiceAssistant",
+            name: "Murmur",
             dependencies: ["KeyboardShortcuts", "WhisperKit", "SharedModels", "FluidAudio", .product(name: "FluidAudioTTS", package: "FluidAudio")],
             path: "Sources",
             resources: [

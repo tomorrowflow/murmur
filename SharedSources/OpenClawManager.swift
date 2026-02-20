@@ -52,7 +52,7 @@ private struct DeviceIdentity {
 
     private static var keyFilePath: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("SuperVoiceAssistant")
+        let dir = appSupport.appendingPathComponent("Murmur")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("device-key.bin")
     }
@@ -350,7 +350,7 @@ public class OpenClawManager: NSObject {
                 "scopes": scopes,
                 "client": [
                     "id": clientId,
-                    "displayName": "Super Voice Assistant",
+                    "displayName": "Murmur",
                     "version": "1.0.0",
                     "platform": "macos",
                     "mode": clientMode

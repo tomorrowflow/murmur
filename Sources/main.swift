@@ -977,7 +977,7 @@ let mainMenu = NSMenu()
 
 let appMenuItem = NSMenuItem()
 let appMenu = NSMenu()
-appMenu.addItem(withTitle: "Quit Super Voice Assistant", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+appMenu.addItem(withTitle: "Quit Murmur", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 appMenuItem.submenu = appMenu
 mainMenu.addItem(appMenuItem)
 

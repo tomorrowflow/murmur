@@ -18,7 +18,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             // Header
             VStack(alignment: .leading, spacing: 8) {
-                Text("Super Voice Assistant Settings")
+                Text("Murmur Settings")
                     .font(.title2)
                     .fontWeight(.semibold)
 

@@ -73,8 +73,8 @@ Required for global hotkeys and auto-paste:
 
 ```bash
 # Clone the repository
-git clone https://github.com/tomorrowflow/super-voice-assistant.git
-cd super-voice-assistant
+git clone https://github.com/tomorrowflow/murmur.git
+cd murmur
 
 # Set up environment (optional — for TTS and cloud transcription fallback)
 cp .env.example .env

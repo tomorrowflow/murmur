@@ -3,6 +3,10 @@ import SwiftUI
 import KeyboardShortcuts
 
 struct ShortcutsSettingsView: View {
+    @AppStorage("ptt.openClaw.enabled") private var openClawPTTEnabled = true
+    @AppStorage("ptt.stt.enabled") private var sttPTTEnabled = true
+    @AppStorage("ptt.stt.sendReturn") private var sttPTTSendReturn = true
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
@@ -12,6 +16,39 @@ struct ShortcutsSettingsView: View {
                     shortcutRow("Paste Last Transcription", for: .pasteLastTranscription)
                     shortcutRow("Show History", for: .showHistory)
                     shortcutRow("OpenClaw Interface", for: .openclawRecording)
+                }
+
+                Section("Push-to-Talk (Double-Tap & Hold)") {
+                    Toggle(isOn: $openClawPTTEnabled) {
+                        HStack {
+                            Text("OpenClaw")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Left Option key")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Toggle(isOn: $sttPTTEnabled) {
+                        HStack {
+                            Text("Recording (STT)")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Right Option key")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Toggle(isOn: $sttPTTSendReturn) {
+                        HStack {
+                            Text("Send Return after paste")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Auto-submit in chat inputs")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(!sttPTTEnabled)
                 }
             }
             .formStyle(.grouped)
@@ -43,6 +80,9 @@ struct ShortcutsSettingsView: View {
         KeyboardShortcuts.setShortcut(.init(.v, modifiers: [.command, .option]), for: .pasteLastTranscription)
         KeyboardShortcuts.setShortcut(.init(.a, modifiers: [.command, .option]), for: .showHistory)
         KeyboardShortcuts.setShortcut(.init(.o, modifiers: [.command, .option]), for: .openclawRecording)
+        openClawPTTEnabled = true
+        sttPTTEnabled = true
+        sttPTTSendReturn = true
     }
 }
 

@@ -7,6 +7,22 @@ import SharedModels
 import Combine
 import ApplicationServices
 import Foundation
+import ServiceManagement
+
+// Find the app icon from either .app bundle Resources or the source directory
+func appIconImage() -> NSImage? {
+    // In a .app bundle, Bundle.main.resourceURL points to Contents/Resources/
+    if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+       let image = NSImage(contentsOf: url) {
+        return image
+    }
+    // Fallback for swift run: look next to the source files
+    let sourceIcon = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("AppIcon.icns")
+    if let image = NSImage(contentsOf: sourceIcon) {
+        return image
+    }
+    return nil
+}
 
 // Environment variable loading
 func loadEnvironmentVariables() {
@@ -102,7 +118,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         
         // Create the status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
+
         // Set the waveform icon
         if let button = statusItem.button {
             button.image = defaultWaveformImage()
@@ -260,6 +276,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         // Note: Parakeet version changes don't auto-load
         // User must click to download/select a specific version
+
+        // First launch: ask about launch at login
+        if !UserDefaults.standard.bool(forKey: "hasShownLaunchAtLoginPrompt") {
+            UserDefaults.standard.set(true, forKey: "hasShownLaunchAtLoginPrompt")
+            DispatchQueue.main.async {
+                self.showLaunchAtLoginPrompt()
+            }
+        }
     }
     
 
@@ -268,7 +292,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         if unifiedWindow == nil {
             unifiedWindow = UnifiedManagerWindow()
         }
-        unifiedWindow?.showWindow(tab: .settings)
+        unifiedWindow?.showWindow(tab: .general)
+    }
+
+    func showLaunchAtLoginPrompt() {
+        let alert = NSAlert()
+        alert.messageText = "Launch Murmur at Login?"
+        alert.informativeText = "Would you like Murmur to start automatically when you log in to your Mac? You can change this later in Settings → General."
+        alert.alertStyle = .informational
+        if let iconImage = appIconImage() {
+            alert.icon = iconImage
+        }
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Not Now")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            do {
+                try SMAppService.mainApp.register()
+                print("✅ Launch at login enabled")
+            } catch {
+                print("Failed to enable launch at login: \(error)")
+            }
+        }
     }
     
     func connectOpenClaw(url: String, token: String, password: String?, sessionKey: String) {
@@ -967,8 +1013,7 @@ app.delegate = delegate
 app.setActivationPolicy(.accessory) // Hide dock icon, keep global keyboard shortcuts
 
 // Set the app icon from our custom ICNS file
-if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
-   let iconImage = NSImage(contentsOf: iconURL) {
+if let iconImage = appIconImage() {
     app.applicationIconImage = iconImage
 }
 

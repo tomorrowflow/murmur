@@ -71,6 +71,8 @@ Required for global hotkeys and auto-paste:
 
 ## Installation
 
+### As an Application (recommended)
+
 ```bash
 # Clone the repository
 git clone https://github.com/tomorrowflow/murmur.git
@@ -80,7 +82,16 @@ cd murmur
 cp .env.example .env
 # Edit .env and add your GEMINI_API_KEY
 
-# Build and run
+# Build the .app bundle and install
+./build.sh
+cp -R build/Murmur.app /Applications/
+```
+
+On first launch, Murmur will ask for microphone permission and offer to enable launch at login.
+
+### Development mode
+
+```bash
 swift build
 swift run Murmur
 ```
@@ -109,6 +120,7 @@ Useful for correcting common speech-to-text misrecognitions for proper nouns, br
 
 Access via the menu bar icon > Settings:
 
+- **General** — Launch at login toggle
 - **Models** — Select and download transcription engine (Parakeet or WhisperKit)
 - **Audio Devices** — Configure input/output devices
 - **Shortcuts** — Customize keyboard shortcuts and push-to-talk toggles
@@ -151,7 +163,7 @@ This fork adds the following over [ykdojo/super-voice-assistant](https://github.
 - **Gemini fallback** — Automatic cloud fallback when local transcription returns empty
 - **Configurable shortcuts** — All shortcuts customizable in Settings with PTT toggles
 - **Transcription history window** — Dedicated window for browsing past transcriptions
-- **Unified settings** — Tabbed settings interface (Models, Audio, Shortcuts, OpenClaw)
+- **Unified settings** — Tabbed settings interface (General, Models, Audio, Shortcuts, OpenClaw)
 - **Kokoro TTS** — Local offline text-to-speech via FluidAudio
 - **No dock icon** — Runs as a menu bar-only app
 - **Removed** — Separate Gemini audio recording, screen recording/video transcription

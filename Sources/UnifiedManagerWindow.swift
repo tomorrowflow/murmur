@@ -2,14 +2,16 @@ import Cocoa
 import SwiftUI
 
 enum ManagerTab: Int {
-    case settings = 0
-    case shortcuts = 1
-    case audioDevices = 2
-    case openClaw = 3
+    case general = 0
+    case settings = 1
+    case shortcuts = 2
+    case audioDevices = 3
+    case openClaw = 4
 }
 
 class UnifiedManagerWindow: NSWindowController {
     private var tabViewController: NSTabViewController!
+    private var generalViewController: GeneralSettingsViewController?
     private var settingsController: SettingsWindowController?
     private var shortcutsViewController: ShortcutsSettingsViewController?
     private var audioDevicesViewController: AudioDevicesViewController?
@@ -37,6 +39,13 @@ class UnifiedManagerWindow: NSWindowController {
     private func setupTabView() {
         tabViewController = NSTabViewController()
         tabViewController.tabStyle = .toolbar
+
+        // General Tab
+        generalViewController = GeneralSettingsViewController()
+        let generalTab = NSTabViewItem(viewController: generalViewController!)
+        generalTab.label = "General"
+        generalTab.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "General")
+        tabViewController.addTabViewItem(generalTab)
 
         // Settings Tab
         if settingsController == nil {

@@ -322,7 +322,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
             let now = ProcessInfo.processInfo.systemUptime
 
-            if event.keyCode == leftOptionKeyCode {
+            if event.keyCode == leftOptionKeyCode && UserDefaults.standard.object(forKey: "ptt.openClaw.enabled") as? Bool ?? true {
                 self.handleDoubleTapHold(
                     optionDown: optionDown, now: now,
                     state: &self.leftOptionState,
@@ -333,7 +333,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     onStop: { self.stopOpenClawPushToTalk() },
                     onReset: { self.resetLeftOptionState() }
                 )
-            } else if event.keyCode == rightOptionKeyCode {
+            } else if event.keyCode == rightOptionKeyCode && UserDefaults.standard.object(forKey: "ptt.stt.enabled") as? Bool ?? true {
                 self.handleDoubleTapHold(
                     optionDown: optionDown, now: now,
                     state: &self.rightOptionState,
@@ -853,7 +853,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func transcriptionDidComplete(text: String) {
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
-        let shouldSendReturn = sttPushToTalkActive
+        let shouldSendReturn = sttPushToTalkActive && (UserDefaults.standard.object(forKey: "ptt.stt.sendReturn") as? Bool ?? true)
         sttPushToTalkActive = false
         pasteTextAtCursor(text)
         if shouldSendReturn {

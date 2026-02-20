@@ -19,7 +19,7 @@ class TranscriptionHistory {
     
     private var historyFileURL: URL {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let appSupportDir = documentsPath.appendingPathComponent("SuperVoiceAssistant", isDirectory: true)
+        let appSupportDir = documentsPath.appendingPathComponent("Murmur", isDirectory: true)
         
         // Create directory if it doesn't exist
         try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)

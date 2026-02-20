@@ -1,6 +1,6 @@
 # OpenClaw Integration Specification
 
-> Development guide for adding an OpenClaw voice interaction mode to super-voice-assistant.
+> Development guide for adding an OpenClaw voice interaction mode to murmur.
 > This is an **additive** integration — no existing features are modified or removed.
 
 ---
@@ -19,7 +19,7 @@ The user presses a new keyboard shortcut (`Cmd+Option+O`) to record voice. The e
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   super-voice-assistant                      │
+│                   murmur                      │
 │                                                              │
 │  ┌──────────────┐    ┌─────────────────────────────────┐    │
 │  │  Cmd+Opt+O   │───>│  OpenClawRecordingManager       │    │
@@ -196,8 +196,8 @@ Client sends as the first (and only pre-auth) request:
     "minProtocol": 3,
     "maxProtocol": 3,
     "client": {
-      "id": "super-voice-assistant",
-      "displayName": "Super Voice Assistant",
+      "id": "murmur",
+      "displayName": "Murmur",
       "version": "1.0.0",
       "platform": "macos",
       "mode": "operator"
@@ -1151,7 +1151,7 @@ v2|<deviceId>|<clientId>|<clientMode>|<role>|<scopes>|<signedAtMs>|<token>|<nonc
 ```
 
 - `deviceId`: Derived from Ed25519 public key
-- `clientId`: `"super-voice-assistant"`
+- `clientId`: `"murmur"`
 - `clientMode`: `"operator"`
 - `role`: `"operator"`
 - `scopes`: comma-separated (e.g., `"operator.admin"`)

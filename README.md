@@ -1,107 +1,97 @@
 # Super Voice Assistant
 
-macOS voice assistant with global hotkeys - transcribe speech to text with offline models (WhisperKit or Parakeet) or cloud-based Gemini API, capture and transcribe screen recordings with visual context, and read selected text aloud with Gemini Live. Fast, accurate, and simple.
+> Fork of [ykdojo/super-voice-assistant](https://github.com/ykdojo/super-voice-assistant) with OpenClaw integration, push-to-talk, audio transcription overlay, and consolidated shortcuts.
 
-## Demo
-
-**Parakeet transcription (fast and accurate):**
-
-https://github.com/user-attachments/assets/163e6484-a3b1-49ef-b5e1-d9887d1f65d0
-
-**Instant text-to-speech:**
-
-https://github.com/user-attachments/assets/c961f0c6-f3b3-49d9-9b42-7a7d93ee6bc8
-
-**Visual disambiguation for names:**
-
-https://github.com/user-attachments/assets/0b7f481f-4fec-4811-87ef-13737e0efac4
+macOS voice assistant with global hotkeys and push-to-talk support. Transcribe speech to text with offline models (WhisperKit or Parakeet), interact with OpenClaw AI assistant by voice, and read selected text aloud with TTS. Runs in the menu bar with no dock icon.
 
 ## Features
 
-**Voice-to-Text Transcription**
-- Press Command+Option+Z for local offline transcription (WhisperKit or Parakeet)
-- Press Command+Option+X for cloud transcription with Gemini API
-- Choose your engine in Settings: WhisperKit models or Parakeet (faster, more accurate)
+**Voice-to-Text Transcription (STT)**
+- Press **Cmd+Opt+C** to start/stop recording and transcribe
+- Choose your engine in Settings: Parakeet (recommended) or WhisperKit
+- Automatic Gemini API fallback when local transcription returns empty
 - Automatic text pasting at cursor position
-- Transcription history with Command+Option+A
+- Transcription history with **Cmd+Opt+A**
 
-**Streaming Text-to-Speech**
-- Press Command+Option+S to read selected text aloud using Gemini Live API
-- Press Command+Option+S again while reading to cancel the operation
-- Sequential streaming for smooth, natural speech with minimal latency
-- Smart sentence splitting for optimal speech flow
+**Push-to-Talk**
+- Double-tap-and-hold **Right Option** key for STT recording — release to transcribe and paste
+- Double-tap-and-hold **Left Option** key for OpenClaw — release to send
+- Optional auto-submit: sends Return after paste (for chat inputs like Claude Code)
+- Configurable in Settings — enable/disable each PTT and the auto-Return independently
 
-**Screen Recording & Video Transcription**
-- Press Command+Option+C to start/stop screen recording
-- Automatic video transcription using Gemini 2.5 Flash API with visual context
-- Better accuracy for programming terms, code, technical jargon, and ambiguous words
-- Transcribed text automatically pastes at cursor position
+**OpenClaw AI Assistant**
+- Press **Cmd+Opt+O** to toggle OpenClaw voice recording
+- Floating overlay shows listening, processing, and streaming states
+- Responses displayed in overlay with copy support and auto-dismiss
+- TTS playback of responses via Kokoro (local) or Gemini (cloud)
+- Configure connection in Settings (URL, token, session key)
+
+**Text-to-Speech (TTS)**
+- Press **Cmd+Opt+S** to read selected text aloud
+- Press again to stop playback
+- Supports Kokoro (local, offline) and Gemini Live API (cloud, streaming)
+
+**Audio Transcription Overlay**
+- Visual overlay appears during STT recording and transcription
+- Shows pulsing mic icon while recording, spinner while transcribing
+- Auto-dismisses on completion or shows errors briefly
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| **Cmd+Opt+C** | Start/stop STT recording and transcribe |
+| **Cmd+Opt+S** | Read selected text aloud / stop TTS |
+| **Cmd+Opt+O** | Start/stop OpenClaw voice recording |
+| **Cmd+Opt+A** | Show transcription history |
+| **Cmd+Opt+V** | Paste last transcription at cursor |
+| **Escape** | Cancel active recording |
+| **Right Option** (double-tap-hold) | STT push-to-talk |
+| **Left Option** (double-tap-hold) | OpenClaw push-to-talk |
+
+All keyboard shortcuts are customizable in Settings.
 
 ## Requirements
 
 - macOS 14.0 or later
 - Xcode 15+ or Xcode Command Line Tools (for Swift 5.9+)
-- Gemini API key (for text-to-speech and video transcription)
-- ffmpeg (for screen recording functionality)
+- Gemini API key (optional — for TTS, cloud transcription fallback)
 
-## System Permissions Setup
+## System Permissions
 
-This app requires specific system permissions to function properly:
+### Microphone Access
+The app requests microphone permission on first launch. If denied:
+- **System Settings > Privacy & Security > Microphone** — enable for Super Voice Assistant
 
-### 1. Microphone Access
-The app will automatically request microphone permission on first launch. If denied, grant it manually:
-- Go to **System Settings > Privacy & Security > Microphone**
-- Enable access for **Super Voice Assistant**
+### Accessibility Access
+Required for global hotkeys and auto-paste:
+1. **System Settings > Privacy & Security > Accessibility**
+2. Add **Terminal** (if running via `swift run`) or the **SuperVoiceAssistant** binary
+3. Ensure the checkbox is enabled
 
-### 2. Accessibility Access (Required for Global Hotkeys & Auto-Paste)
-You must manually grant accessibility permissions for the app to:
-- Monitor global keyboard shortcuts (Command+Option+Z/S/X/A/V/C, Escape)
-- Automatically paste transcribed text at cursor position
-
-**To enable:**
-1. Go to **System Settings > Privacy & Security > Accessibility**
-2. Click the lock icon to make changes (enter your password)
-3. Click the **+** button to add an application
-4. Navigate to the app location:
-   - If running via `swift run`: Add **Terminal** or your terminal app (iTerm2, etc.)
-   - If running the built binary directly: Add the **SuperVoiceAssistant** executable
-5. Ensure the checkbox next to the app is checked
-
-**Important:** Without accessibility access, the app cannot detect global hotkeys (Command+Option+Z/X/A/S/C/V, Escape) or paste text automatically.
-
-### 3. Screen Recording Access (Required for Video Transcription)
-The app requires screen recording permission to capture screen content:
-- Go to **System Settings > Privacy & Security > Screen Recording**
-- Enable access for **Terminal** (if running via `swift run`) or **SuperVoiceAssistant**
-
-## Installation & Running
+## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/super-voice-assistant.git
+git clone https://github.com/tomorrowflow/super-voice-assistant.git
 cd super-voice-assistant
 
-# Install ffmpeg (required for screen recording)
-brew install ffmpeg
-
-# Set up environment (for TTS and video transcription)
+# Set up environment (optional — for TTS and cloud transcription fallback)
 cp .env.example .env
 # Edit .env and add your GEMINI_API_KEY
 
-# Build the app
+# Build and run
 swift build
-
-# Run the main app
 swift run SuperVoiceAssistant
 ```
 
-The app will appear in your menu bar as a waveform icon.
+The app appears in your menu bar as a waveform icon (no dock icon).
 
 ## Configuration
 
 ### Text Replacements
 
-You can configure automatic text replacements for transcriptions by editing `config.json` in the project root:
+Configure automatic text replacements for transcriptions by editing `config.json` in the project root:
 
 ```json
 {
@@ -113,121 +103,58 @@ You can configure automatic text replacements for transcriptions by editing `con
 }
 ```
 
-This is useful for correcting common speech-to-text misrecognitions, especially for proper nouns, brand names, or technical terms. Replacements are case-sensitive and applied to all transcriptions.
+Useful for correcting common speech-to-text misrecognitions for proper nouns, brand names, or technical terms. Replacements are case-sensitive.
 
-## Usage
+### Settings
 
-### Voice-to-Text Transcription
+Access via the menu bar icon > Settings:
 
-**Local (Cmd+Option+Z):**
-1. Launch the app - it appears in the menu bar
-2. Open Settings to select and download a model (Parakeet or WhisperKit)
-3. Press **Command+Option+Z** to start recording
-4. Press **Command+Option+Z** again to stop and transcribe
-5. Text automatically pastes at cursor
-6. Press **Escape** to cancel
+- **Models** — Select and download transcription engine (Parakeet or WhisperKit)
+- **Audio Devices** — Configure input/output devices
+- **Shortcuts** — Customize keyboard shortcuts and push-to-talk toggles
+- **OpenClaw** — Configure OpenClaw connection (URL, token, password, session key)
 
-**Cloud (Cmd+Option+X):**
-1. Set GEMINI_API_KEY in your .env file
-2. Press **Command+Option+X** to start/stop recording
-3. Text automatically pastes at cursor
+### Transcription Engines
 
-**Transcription engines:**
-- **Parakeet v2**: ~110x realtime, 1.69% WER, English - recommended for speed
-- **Parakeet v3**: ~210x realtime, 1.8% WER, 25 languages
-- **WhisperKit**: Various model sizes, good accuracy, more language options
-- **Gemini**: Cloud-based, best for complex audio, requires internet
-
-### Text-to-Speech
-1. Select any text in any application
-2. Press **Command+Option+S** to read the selected text aloud
-3. Press **Command+Option+S** again while reading to cancel the operation
-4. The app uses Gemini Live API for natural, streaming speech synthesis
-5. Configure audio devices via Settings for optimal playback
-
-### Screen Recording & Video Transcription
-1. Press **Command+Option+C** to start screen recording
-2. The menu bar shows "🎥 REC" while recording
-3. Press **Command+Option+C** again to stop recording
-4. The app automatically transcribes the video using Gemini 2.5 Flash
-5. Visual context improves accuracy for code, technical terms, and homophones
-6. Transcribed text pastes at your cursor position
-7. Video file is automatically deleted after successful transcription
-
-**Note:** Audio recording and screen recording are mutually exclusive - you cannot run both simultaneously.
-
-**When to use video vs audio:**
-- **Video**: Programming, code review, technical documentation, names, acronyms, specialized terminology
-- **Audio**: General speech, quick notes, casual transcription
-
-### Keyboard Shortcuts
-
-- **Command+Option+Z**: Start/stop audio recording and transcribe (WhisperKit - offline)
-- **Command+Option+X**: Start/stop audio recording and transcribe (Gemini - cloud)
-- **Command+Option+S**: Read selected text aloud / Cancel TTS playback
-- **Command+Option+C**: Start/stop screen recording and transcribe
-- **Command+Option+A**: Show transcription history window
-- **Command+Option+V**: Paste last transcription at cursor
-- **Escape**: Cancel audio recording (when recording is active)
-
-## Available Commands
-
-```bash
-# Run the main app
-swift run SuperVoiceAssistant
-
-# List all available WhisperKit models
-swift run ListModels
-
-# Test downloading a model (currently set to distil-whisper_distil-large-v3)
-swift run TestDownload
-
-# Validate downloaded models are complete
-swift run ValidateModels
-
-# Delete all downloaded models
-swift run DeleteModels
-
-# Delete a specific model
-swift run DeleteModel <model-name>
-# Example: swift run DeleteModel distil-large-v3
-
-# Test transcription with a sample audio file
-swift run TestTranscription
-
-# Test live transcription with microphone input
-swift run TestLiveTranscription
-
-# Test streaming TTS functionality
-swift run TestStreamingTTS
-
-# Test audio collection for TTS
-swift run TestAudioCollector
-
-# Test sentence splitting for TTS
-swift run TestSentenceSplitter
-
-# Test screen recording (3-second capture)
-swift run RecordScreen
-
-# Test video transcription with Gemini API
-swift run TranscribeVideo <path-to-video-file>
-# Example: swift run TranscribeVideo ~/Desktop/recording.mp4
-```
+| Engine | Speed | Accuracy | Languages | Notes |
+|---|---|---|---|---|
+| **Parakeet v2** | ~110x realtime | 1.69% WER | English | Recommended for speed |
+| **Parakeet v3** | ~210x realtime | 1.8% WER | 25 languages | Multilingual |
+| **WhisperKit** | Varies by model | Good | Many | Various model sizes |
+| **Gemini** (fallback) | Cloud-dependent | Best for complex audio | Many | Auto-fallback when local returns empty |
 
 ## Project Structure
 
-- `Sources/` - Main app code
-  - `ModelStateManager.swift` - Engine and model selection
-  - `AudioTranscriptionManager.swift` - Audio recording and transcription routing
-  - `ScreenRecorder.swift` - Screen recording with ffmpeg
-- `SharedSources/` - Shared components
-  - `ParakeetTranscriber.swift` - FluidAudio Parakeet wrapper
-  - `GeminiStreamingPlayer.swift` - Streaming TTS playback
-  - `GeminiAudioTranscriber.swift` - Gemini API transcription
-  - `VideoTranscriber.swift` - Gemini API video transcription
-- `tests/` - Test utilities
-- `tools/` - Model management utilities
+- `Sources/` — Main app code
+  - `main.swift` — App delegate, shortcuts, push-to-talk, overlay wiring
+  - `AudioTranscriptionManager.swift` — Audio recording and transcription routing
+  - `AudioTranscriptionOverlayWindow.swift` — STT recording/transcription overlay
+  - `OpenClawRecordingManager.swift` — OpenClaw voice recording manager
+  - `OpenClawOverlayWindow.swift` — OpenClaw floating overlay UI
+  - `ShortcutsSettingsViewController.swift` — Shortcuts and PTT settings
+  - `ModelStateManager.swift` — Engine and model selection
+- `SharedSources/` — Shared components
+  - `OpenClawManager.swift` — OpenClaw WebSocket connection
+  - `OpenClawResponseFilter.swift` — Response text processing
+  - `ParakeetTranscriber.swift` — FluidAudio Parakeet wrapper
+  - `GeminiStreamingPlayer.swift` — Streaming TTS playback
+  - `GeminiAudioTranscriber.swift` — Gemini API transcription (fallback)
+
+## Changes from Upstream
+
+This fork adds the following over [ykdojo/super-voice-assistant](https://github.com/ykdojo/super-voice-assistant):
+
+- **OpenClaw integration** — Voice-driven AI assistant with overlay UI and TTS responses
+- **Push-to-talk** — Double-tap-and-hold Option keys for hands-free recording
+- **Audio transcription overlay** — Visual feedback during recording and transcription
+- **Shortcut consolidation** — Removed separate Gemini audio recording shortcut, renamed to "Recording (STT)"
+- **Gemini fallback** — Automatic cloud fallback when local transcription returns empty
+- **Configurable shortcuts** — All shortcuts customizable in Settings with PTT toggles
+- **Transcription history window** — Dedicated window for browsing past transcriptions
+- **Unified settings** — Tabbed settings interface (Models, Audio, Shortcuts, OpenClaw)
+- **Kokoro TTS** — Local offline text-to-speech via FluidAudio
+- **No dock icon** — Runs as a menu bar-only app
+- **Removed** — Separate Gemini audio recording, screen recording/video transcription
 
 ## License
 

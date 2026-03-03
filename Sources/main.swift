@@ -102,7 +102,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
         loadEnvironmentVariables()
-        
+
+        // Check accessibility permissions (needed for paste via CGEvent)
+        let trusted = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        )
+        if !trusted {
+            print("⚠️ Accessibility permission not granted — paste will not work until enabled in System Settings")
+        } else {
+            print("✅ Accessibility permission granted")
+        }
+
         // Initialize streaming TTS components if API key is available
         if let apiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"], !apiKey.isEmpty {
             if #available(macOS 14.0, *) {
@@ -483,6 +493,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("OpenClaw PTT: started (double-tap-hold)")
+        PTTTonePlayer.shared.playStartTone()
         stopTranscriptionIndicator()
         recordingManager.toggleRecording()
     }
@@ -493,6 +504,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("OpenClaw PTT: released — stopping")
+        PTTTonePlayer.shared.playStopTone()
         recordingManager.toggleRecording()
     }
 
@@ -510,6 +522,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("STT PTT: started (double-tap-hold)")
+        PTTTonePlayer.shared.playStartTone()
         sttPushToTalkActive = true
         stopTranscriptionIndicator()
         audioManager.toggleRecording()
@@ -519,6 +532,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         guard audioManager.isRecording else { return }
 
         print("STT PTT: released — stopping")
+        PTTTonePlayer.shared.playStopTone()
         audioManager.toggleRecording()
     }
 

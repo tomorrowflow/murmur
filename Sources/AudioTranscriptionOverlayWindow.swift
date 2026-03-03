@@ -182,8 +182,10 @@ class AudioTranscriptionOverlayWindow {
 
     func show(state: AudioTranscriptionOverlayState) {
         DispatchQueue.main.async { [self] in
+            let wasHidden = !(panel?.isVisible ?? false)
             viewModel.show(state: state)
             ensurePanel()
+            if wasHidden { repositionPanel() }
             panel?.orderFront(nil)
         }
     }
@@ -227,14 +229,16 @@ class AudioTranscriptionOverlayWindow {
         panel.contentView = hostingView
         panel.isReleasedWhenClosed = false
 
-        // Position top-centre, just below the menu bar
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            let x = (screenFrame.width - 320) / 2 + screenFrame.minX
-            let y = screenFrame.maxY - 100 - 40
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-        }
-
         self.panel = panel
+        repositionPanel()
+    }
+
+    private func repositionPanel() {
+        guard let panel = panel, let screen = NSScreen.main else { return }
+        let screenFrame = screen.visibleFrame
+        let panelHeight = panel.frame.height
+        let x = (screenFrame.width - 320) / 2 + screenFrame.minX
+        let y = screenFrame.maxY - panelHeight - 40
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 }

@@ -51,11 +51,21 @@ def _parse_script(raw: str) -> list[dict]:
     # Try to find JSON array
     start = text.find("[")
     end = text.rfind("]")
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError(f"No JSON array found in LLM response: {text[:200]}...")
 
+    if end == -1 or end <= start:
+        # Array was truncated — try to recover by closing it
+        text = text[start:]
+        text = _repair_truncated_json(text)
+    else:
+        text = text[start : end + 1]
+
+    # Fix common LLM JSON issues
+    text = _repair_json(text)
+
     try:
-        data = json.loads(text[start : end + 1])
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {e}") from e
 
@@ -67,6 +77,31 @@ def _parse_script(raw: str) -> list[dict]:
             raise ValueError(f"Script line missing speaker/text: {item}")
 
     return data
+
+
+def _repair_json(text: str) -> str:
+    """Fix common JSON issues from LLM output."""
+    import re
+    # Remove trailing commas before ] or }
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    return text
+
+
+def _repair_truncated_json(text: str) -> str:
+    """Attempt to recover a truncated JSON array by closing open structures."""
+    import re
+    # Remove any trailing incomplete object (no closing brace)
+    # Find the last complete object (ends with })
+    last_brace = text.rfind("}")
+    if last_brace == -1:
+        raise ValueError("No complete JSON objects found in truncated response")
+
+    text = text[: last_brace + 1]
+    # Remove trailing comma if present
+    text = re.sub(r",\s*$", "", text)
+    text += "]"
+    log.warning("Repaired truncated JSON array (%d chars)", len(text))
+    return text
 
 
 def _extract_title(script: list[dict]) -> str:

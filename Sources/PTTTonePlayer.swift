@@ -20,6 +20,11 @@ class PTTTonePlayer {
         playTone(frequencies: [784], noteDuration: 0.09)
     }
 
+    /// Play a confirmation chirp (podcast interrupt received, processing started).
+    func playInterruptTone() {
+        playTone(frequencies: [660, 880, 660], noteDuration: 0.06)
+    }
+
     private func playTone(frequencies: [Double], noteDuration: Double) {
         let totalSamples = Int(sampleRate * noteDuration) * frequencies.count
         var samples = [Float]()

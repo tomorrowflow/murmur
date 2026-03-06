@@ -7,6 +7,7 @@ enum ManagerTab: Int {
     case shortcuts = 2
     case audioDevices = 3
     case openClaw = 4
+    case podcast = 5
 }
 
 class UnifiedManagerWindow: NSWindowController {
@@ -16,6 +17,7 @@ class UnifiedManagerWindow: NSWindowController {
     private var shortcutsViewController: ShortcutsSettingsViewController?
     private var audioDevicesViewController: AudioDevicesViewController?
     private var openClawViewController: OpenClawSettingsViewController?
+    private var podcastViewController: PodcastSettingsViewController?
 
     override init(window: NSWindow?) {
         let window = NSWindow(
@@ -78,6 +80,13 @@ class UnifiedManagerWindow: NSWindowController {
         openClawTab.label = "OpenClaw"
         openClawTab.image = NSImage(systemSymbolName: "network", accessibilityDescription: "OpenClaw")
         tabViewController.addTabViewItem(openClawTab)
+
+        // Podcast Tab
+        podcastViewController = PodcastSettingsViewController()
+        let podcastTab = NSTabViewItem(viewController: podcastViewController!)
+        podcastTab.label = "Podcast"
+        podcastTab.image = NSImage(systemSymbolName: "radio", accessibilityDescription: "Podcast")
+        tabViewController.addTabViewItem(podcastTab)
 
         window?.contentViewController = tabViewController
     }

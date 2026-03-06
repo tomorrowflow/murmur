@@ -1,0 +1,10 @@
+tls:
+  certificates:
+    - certFile: /certs/deepread.fm.crt
+      keyFile: /certs/deepread.fm.key
+
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/deepread.fm.crt
+        keyFile: /certs/deepread.fm.key

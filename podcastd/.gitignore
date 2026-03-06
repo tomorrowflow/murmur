@@ -1,0 +1,5 @@
+.env
+traefik/certs/*.key
+traefik/certs/*.crt
+__pycache__/
+*.pyc

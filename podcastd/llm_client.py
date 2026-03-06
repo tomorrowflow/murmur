@@ -32,7 +32,7 @@ async def _ollama_chat(system: str, user: str, model: str) -> str:
         "stream": False,
         "options": {
             "temperature": 0.8,
-            "num_predict": 4096,
+            "num_predict": 8192,
         },
     }
 

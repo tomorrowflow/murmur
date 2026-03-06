@@ -92,7 +92,12 @@ def _parse_interrupt_response(raw: str) -> dict:
     if start == -1 or end == -1:
         raise ValueError(f"No JSON object in interrupt response: {text[:200]}...")
 
-    data = json.loads(text[start : end + 1])
+    json_text = text[start : end + 1]
+    # Fix trailing commas before } or ]
+    import re
+    json_text = re.sub(r",\s*([}\]])", r"\1", json_text)
+
+    data = json.loads(json_text)
 
     if "interrupt_response" not in data:
         raise ValueError("Missing 'interrupt_response' in LLM output")

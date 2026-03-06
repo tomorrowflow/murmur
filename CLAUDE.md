@@ -57,3 +57,15 @@
 - **Cmd+Opt+A**: Show transcription history
 - **Cmd+Opt+V**: Paste last transcription at cursor
 
+## Podcast Mode
+
+Interactive podcast feature. Full spec: `docs/PODCAST_SPEC.md`
+
+- Backend: `podcastd/` — Python asyncio WebSocket service (runs on GPU server alongside ComfyUI)
+- Frontend: `Sources/PodcastManager.swift`, `Sources/PodcastOverlayWindow.swift`
+- Audio: ComfyUI + VibeVoice node (wildminder/ComfyUI-VibeVoice), 3090 GPU
+- Pattern: PodcastManager mirrors OpenClawManager; PodcastOverlayWindow mirrors OpenClawOverlayWindow
+- Protocol: all WebSocket messages are JSON with a `type` field — see spec §3.2
+- Voice seeds are fixed after calibration — never randomise in production
+- Host selection on interrupts is handled by the LLM, not by code — see spec §6.3
+- Test podcastd without Murmur: `wscat -c wss://podcastd.internal.domain` — see spec §12

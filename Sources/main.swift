@@ -57,6 +57,7 @@ extension KeyboardShortcuts.Name {
 
     static let pasteLastTranscription = Self("pasteLastTranscription")
     static let openclawRecording = Self("openclawRecording")
+    static let podcastToggle = Self("podcastToggle")
 }
 
 enum OptionDoubleTapState {
@@ -66,7 +67,7 @@ enum OptionDoubleTapState {
     case recording
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate {
     var statusItem: NSStatusItem!
     var settingsWindow: SettingsWindowController?
     private var unifiedWindow: UnifiedManagerWindow?
@@ -97,6 +98,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var rightOptionFirstPressTime: TimeInterval = 0
     private var rightOptionFirstReleaseTime: TimeInterval = 0
     private var rightOptionResetTimer: Timer?
+    private var podcastManager: PodcastManager?
+    private var podcastOverlay: PodcastOverlayWindow?
     private var sttPushToTalkActive = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1017,6 +1020,102 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     func openClawTTSDidFinish() {
         openClawOverlay?.ttsFinished()
+    }
+
+    // MARK: - PodcastManagerDelegate
+
+    func podcastDidChangeState(_ state: PodcastState) {
+        podcastOverlay?.updateState(state)
+
+        switch state {
+        case .playing:
+            startWaveformAnimation()
+        case .complete, .error, .idle:
+            stopWaveformAnimation()
+        default:
+            break
+        }
+    }
+
+    func podcastDidUpdateTranscript(_ lines: [ScriptLine]) {
+        podcastOverlay?.updateTranscript(lines)
+    }
+
+    func podcastDidUpdateTitle(_ title: String) {
+        podcastOverlay?.updateTitle(title)
+    }
+
+    func podcastDidError(_ message: String) {
+        stopWaveformAnimation()
+        let notification = NSUserNotification()
+        notification.title = "Podcast Error"
+        notification.informativeText = message
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+
+    // MARK: - Podcast Helpers
+
+    private func ensurePodcastManager() -> PodcastManager {
+        if podcastManager == nil {
+            let manager = PodcastManager()
+            manager.delegate = self
+            podcastManager = manager
+        }
+        return podcastManager!
+    }
+
+    private func ensurePodcastOverlay() -> PodcastOverlayWindow {
+        if podcastOverlay == nil {
+            podcastOverlay = PodcastOverlayWindow()
+            podcastOverlay?.onStop = { [weak self] in
+                self?.podcastManager?.stopSession()
+                self?.stopWaveformAnimation()
+            }
+        }
+        return podcastOverlay!
+    }
+
+    func togglePodcast() {
+        let manager = ensurePodcastManager()
+        if manager.isSessionActive {
+            manager.stopSession()
+            podcastOverlay?.dismiss()
+            stopWaveformAnimation()
+        } else {
+            // Get selected text as content for the podcast
+            guard let selectedText = getSelectedTextViaAccessibility(), !selectedText.isEmpty else {
+                let notification = NSUserNotification()
+                notification.title = "No Text Selected"
+                notification.informativeText = "Select text (URL, article, or content) to start a podcast"
+                NSUserNotificationCenter.default.deliver(notification)
+                return
+            }
+
+            let overlay = ensurePodcastOverlay()
+            overlay.show(state: .connecting)
+
+            // Detect content type
+            let contentType = selectedText.hasPrefix("http") ? "url" : "text"
+            manager.startSession(contentType: contentType, content: selectedText)
+        }
+    }
+
+    func startPodcastInterrupt() {
+        guard let manager = podcastManager, manager.isSessionActive else { return }
+
+        manager.pausePlayback()
+        PTTTonePlayer.shared.playStartTone()
+
+        // Reuse existing audio recording for transcription
+        // Record via the audio manager, then on completion send as interrupt
+        stopTranscriptionIndicator()
+
+        podcastOverlay?.updateState(.interrupted)
+    }
+
+    func stopPodcastInterrupt() {
+        // Called when Left Option PTT is released during podcast interrupt
+        PTTTonePlayer.shared.playInterruptTone()
     }
 
 }

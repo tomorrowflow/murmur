@@ -158,6 +158,38 @@ All messages are JSON with a `type` field.
 | `ERROR` | `{code, message}` | Error with details |
 | `PONG` | `{}` | Keepalive reply |
 
+### 3.2.1 Payload Format Notes (Server Implementation)
+
+> **Important for podcastd implementation.** The Murmur client parses these fields exactly as documented below. Deviations will cause silent failures.
+
+**`INGEST`** — `content_type` values the client sends:
+- `"url"` — when the selected text starts with `http`
+- `"text"` — all other selected text (articles, email bodies, etc.)
+- `"pdf"` — future: base64-encoded PDF bytes (Phase 5)
+
+**`CHUNK_READY` and `INTERRUPT_READY`** — the `transcript` field must be an array of objects:
+```json
+{
+  "transcript": [
+    {"speaker": "Alex", "text": "The feedback loop is the key insight."},
+    {"speaker": "Jordan", "text": "Wait, are you saying it compounds?"}
+  ]
+}
+```
+The client uses `speaker` and `text` fields to render the overlay transcript. Missing or malformed `transcript` is tolerated (audio still plays) but the overlay will show no text.
+
+**`CHUNK_READY`** — the `audio_url` field can be:
+- A full URL (`https://podcastd.internal.domain/audio/chunk_0.wav`) — used as-is
+- A bare filename (`chunk_0.wav`) — the client prepends `{audioBaseURL}/audio/`
+
+**`SESSION_CREATED`** — `total_chunks` is used for progress tracking. If the script is revised after an interrupt, send `SCRIPT_UPDATED` with the new `remaining_chunks` count so the client updates its total.
+
+**`ERROR`** — include a `code` field for programmatic handling. Suggested codes:
+- `INGEST_FAILED` — content fetch/parse failed
+- `LLM_ERROR` — script generation failed
+- `AUDIO_ERROR` — ComfyUI/VibeVoice failed
+- `SESSION_NOT_FOUND` — invalid session_id
+
 ### 3.3 Session State Machine
 
 ```

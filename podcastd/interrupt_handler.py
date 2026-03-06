@@ -60,6 +60,7 @@ async def handle_interrupt(session: PodcastSession, question: str) -> tuple[str,
         interrupt_lines,
         seed=cfg.VOICE_SEED_A,
         model=cfg.INTERRUPT_MODEL,
+        session_id=session.session_id,
     )
 
     # Splice revised script into remaining chunks

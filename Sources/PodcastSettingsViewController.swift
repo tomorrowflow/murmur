@@ -43,6 +43,18 @@ struct PodcastSettingsView: View {
                     .labelsHidden()
                 }
 
+                Section("Features") {
+                    Toggle(isOn: $viewModel.webSearchEnabled) {
+                        HStack {
+                            Text("Web Search on Interrupt")
+                                .frame(width: 200, alignment: .leading)
+                            Text("Enrich interrupt answers with live web results")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
                 Section("Status") {
                     HStack(spacing: 8) {
                         Circle()
@@ -76,6 +88,7 @@ class PodcastSettingsViewModel: ObservableObject {
     @Published var audioBaseURL: String = ""
     @Published var hostAName: String = ""
     @Published var hostBName: String = ""
+    @Published var webSearchEnabled: Bool = false
     @Published var statusText: String = "Not configured"
     @Published var statusColor: Color = .gray
 
@@ -85,6 +98,7 @@ class PodcastSettingsViewModel: ObservableObject {
         audioBaseURL = defaults.string(forKey: "podcast.audioBaseURL") ?? ""
         hostAName = defaults.string(forKey: "podcast.hostAName") ?? ""
         hostBName = defaults.string(forKey: "podcast.hostBName") ?? ""
+        webSearchEnabled = defaults.bool(forKey: "podcast.webSearchEnabled")
         refreshStatus()
     }
 
@@ -94,6 +108,7 @@ class PodcastSettingsViewModel: ObservableObject {
         defaults.set(audioBaseURL, forKey: "podcast.audioBaseURL")
         defaults.set(hostAName, forKey: "podcast.hostAName")
         defaults.set(hostBName, forKey: "podcast.hostBName")
+        defaults.set(webSearchEnabled, forKey: "podcast.webSearchEnabled")
         refreshStatus()
     }
 

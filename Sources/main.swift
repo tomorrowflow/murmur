@@ -1123,6 +1123,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 self?.podcastManager?.stopSession()
                 self?.stopWaveformAnimation()
             }
+            podcastOverlay?.viewModel.onWebSearchToggled = { [weak self] enabled in
+                self?.podcastManager?.webSearchEnabled = enabled
+            }
         }
         return podcastOverlay!
     }

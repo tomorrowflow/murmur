@@ -63,16 +63,17 @@ async def handle_interrupt(session: PodcastSession, question: str) -> tuple[str,
         session_id=session.session_id,
     )
 
-    # Splice revised script into remaining chunks
-    if revised:
-        remaining_start = session.current_chunk_index + 1
-        new_chunks = split_into_chunks(revised)
-        session.chunks = session.chunks[:remaining_start] + new_chunks
-        # Invalidate prefetched audio for replaced chunks
-        session.chunk_audio_files = {
-            k: v for k, v in session.chunk_audio_files.items() if k < remaining_start
-        }
-        log.info("Script revised: %d new chunks replacing remaining", len(new_chunks))
+    # Splice revised script into remaining chunks.
+    # Always replace everything after the current chunk — even if revised is empty,
+    # we need to invalidate stale prefetched audio.
+    remaining_start = session.current_chunk_index + 1
+    new_chunks = split_into_chunks(revised) if revised else []
+    session.chunks = session.chunks[:remaining_start] + new_chunks
+    # Invalidate all prefetched audio for replaced chunks
+    session.chunk_audio_files = {
+        k: v for k, v in session.chunk_audio_files.items() if k < remaining_start
+    }
+    log.info("Script revised: %d new chunks from index %d", len(new_chunks), remaining_start)
 
     session.interrupt_history[-1]["response"] = interrupt_lines
     session.state = SessionState.INTERRUPT_READY

@@ -8,7 +8,7 @@ from pathlib import Path
 import websockets
 from aiohttp import web
 
-from audio_generator import generate_audio
+from audio_generator import cancel_session_prompts, generate_audio
 from chunk_manager import split_into_chunks
 from config import cfg
 from ingest import ingest_email, ingest_pdf, ingest_url
@@ -130,7 +130,7 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
 
         # Generate first chunk audio (serialised via GPU lock)
         async with gpu_lock:
-            audio_file = await generate_audio(session.chunks[0])
+            audio_file = await generate_audio(session.chunks[0], session_id=session.session_id)
         session.chunk_audio_files[0] = audio_file
         session.state = SessionState.READY
 
@@ -195,7 +195,7 @@ async def _handle_next_chunk(websocket, session: PodcastSession) -> None:
         # Generate on demand (prefetch missed or failed)
         log.info("On-demand generation for chunk %d", next_idx)
         async with gpu_lock:
-            audio_file = await generate_audio(session.chunks[next_idx])
+            audio_file = await generate_audio(session.chunks[next_idx], session_id=session.session_id)
         session.chunk_audio_files[next_idx] = audio_file
 
     session.current_chunk_index = next_idx
@@ -273,7 +273,7 @@ async def _prefetch_chunk(session: PodcastSession, chunk_idx: int) -> None:
         if chunk_idx >= len(session.chunks):
             return
         async with gpu_lock:
-            audio_file = await generate_audio(session.chunks[chunk_idx])
+            audio_file = await generate_audio(session.chunks[chunk_idx], session_id=session.session_id)
         session.chunk_audio_files[chunk_idx] = audio_file
         log.info("Prefetched chunk %d: %s", chunk_idx, audio_file)
     except asyncio.CancelledError:
@@ -307,6 +307,8 @@ async def _send_error(websocket, code: str, message: str) -> None:
 
 def _cleanup_session(session_id: str) -> None:
     _cancel_prefetches(session_id)
+    # Cancel any queued/running ComfyUI GPU jobs for this session
+    asyncio.create_task(cancel_session_prompts(session_id))
     session = sessions.pop(session_id, None)
     if session:
         log.info("Cleaned up session %s", session_id)

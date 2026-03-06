@@ -9,6 +9,9 @@ from config import cfg
 
 log = logging.getLogger(__name__)
 
+# Track in-flight ComfyUI prompt IDs per session for cleanup
+active_prompts: dict[str, set[str]] = {}  # session_id → {prompt_id, ...}
+
 # Model name mapping: config names → actual ComfyUI model names
 MODEL_MAP = {
     "Large": "VibeVoice-Large-Q8",
@@ -28,6 +31,7 @@ async def generate_audio(
     chunk: list[dict],
     seed: int | None = None,
     model: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Generate audio for a script chunk via ComfyUI VibeVoice.
 
@@ -39,10 +43,39 @@ async def generate_audio(
 
     workflow = _build_workflow(text, seed, model)
     prompt_id = await _post_workflow(workflow)
-    filename = await _poll_until_complete(prompt_id)
+
+    # Track prompt for cleanup on session cancel
+    if session_id:
+        active_prompts.setdefault(session_id, set()).add(prompt_id)
+
+    try:
+        filename = await _poll_until_complete(prompt_id)
+    finally:
+        if session_id:
+            active_prompts.get(session_id, set()).discard(prompt_id)
 
     log.info("Audio generated: %s (seed=%d, model=%s)", filename, seed, model)
     return filename
+
+
+async def cancel_session_prompts(session_id: str) -> None:
+    """Cancel all queued/running ComfyUI prompts for a session."""
+    prompt_ids = active_prompts.pop(session_id, set())
+    if not prompt_ids:
+        return
+
+    log.info("Cancelling %d ComfyUI prompts for session %s", len(prompt_ids), session_id)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Delete queued prompts
+            await client.post(
+                f"{cfg.COMFYUI_BASE_URL}/queue",
+                json={"delete": list(prompt_ids)},
+            )
+            # Interrupt currently running prompt (if it belongs to this session)
+            await client.post(f"{cfg.COMFYUI_BASE_URL}/interrupt")
+    except Exception:
+        log.exception("Failed to cancel ComfyUI prompts")
 
 
 def _build_workflow(text: str, seed: int, model: str) -> dict:

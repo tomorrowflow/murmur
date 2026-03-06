@@ -18,7 +18,7 @@ enum PodcastState: Equatable {
     case ingesting
     case buffering
     case playing
-    case interrupted
+    case listening        // user is recording an interrupt question
     case processingInterrupt
     case complete
     case error(String)
@@ -30,7 +30,7 @@ enum PodcastState: Equatable {
         case .ingesting: return "Generating Script"
         case .buffering: return "Buffering"
         case .playing: return "Playing"
-        case .interrupted: return "Interrupted"
+        case .listening: return "Listening"
         case .processingInterrupt: return "Processing"
         case .complete: return "Complete"
         case .error: return "Error"
@@ -73,6 +73,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var title: String = ""
     private var transcript: [ScriptLine] = []
     private var prefetchedAudioURL: URL?
+    private var prefetchedTranscriptLines: [ScriptLine] = []
     private var player: AVAudioPlayer?
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession!
@@ -164,7 +165,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         guard let sessionId = sessionId, isSessionActive else { return }
 
         pausePlayback()
-        state = .interrupted
+        // State transitions: listening (while recording) → processingInterrupt (after transcription)
+        // The caller (main.swift) sets .listening when PTT starts; we go to .processingInterrupt here
+        state = .processingInterrupt
 
         sendJSON([
             "type": "INTERRUPT",
@@ -256,26 +259,30 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         case "CHUNK_READY":
             let chunkIndex = json["chunk_index"] as? Int ?? 0
             guard let audioURL = json["audio_url"] as? String else { return }
+            NSLog("Podcast: CHUNK_READY chunk_index=\(chunkIndex), currentChunkIndex=\(currentChunkIndex), state=\(state.displayName)")
 
             // Parse transcript lines from the chunk
+            let lines: [ScriptLine]
             if let transcriptData = json["transcript"] as? [[String: Any]] {
-                let lines = transcriptData.compactMap { dict -> ScriptLine? in
+                lines = transcriptData.compactMap { dict -> ScriptLine? in
                     guard let speaker = dict["speaker"] as? String,
                           let text = dict["text"] as? String else { return nil }
                     return ScriptLine(speaker: speaker, text: text)
                 }
+            } else {
+                lines = []
+            }
 
-                if chunkIndex == currentChunkIndex {
-                    // This is the chunk we need to play now
+            if state == .buffering || player == nil || !(player?.isPlaying ?? false) {
+                // We need audio now — play immediately
+                if !lines.isEmpty {
                     transcript.append(contentsOf: lines)
                     delegate?.podcastDidUpdateTranscript(transcript)
-                    downloadAndPlay(audioURL: audioURL, chunkIndex: chunkIndex)
-                } else {
-                    // This is a prefetched chunk — store for later
-                    prefetchAudio(audioURL: audioURL, lines: lines)
                 }
-            } else {
                 downloadAndPlay(audioURL: audioURL, chunkIndex: chunkIndex)
+            } else {
+                // Currently playing — prefetch for later
+                prefetchAudio(audioURL: audioURL, lines: lines)
             }
 
         case "INTERRUPT_PROCESSING":
@@ -393,6 +400,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 try data.write(to: tempFile)
                 await MainActor.run {
                     self.prefetchedAudioURL = tempFile
+                    self.prefetchedTranscriptLines = lines
                     self.isDownloadingPrefetch = false
                     NSLog("Podcast: prefetched next chunk")
                 }
@@ -418,14 +426,24 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard isSessionActive else { return }
 
+        NSLog("Podcast: chunk \(currentChunkIndex) finished playing")
+
         // Check if we have a prefetched chunk ready
         if let prefetchURL = prefetchedAudioURL {
             prefetchedAudioURL = nil
             currentChunkIndex += 1
 
+            // Add prefetched transcript lines
+            if !prefetchedTranscriptLines.isEmpty {
+                transcript.append(contentsOf: prefetchedTranscriptLines)
+                delegate?.podcastDidUpdateTranscript(transcript)
+                prefetchedTranscriptLines = []
+            }
+
             do {
                 let data = try Data(contentsOf: prefetchURL)
                 try? FileManager.default.removeItem(at: prefetchURL)
+                NSLog("Podcast: playing prefetched chunk \(currentChunkIndex)")
                 playAudioData(data, chunkIndex: currentChunkIndex)
             } catch {
                 NSLog("Podcast: failed to play prefetched audio: \(error)")
@@ -434,9 +452,11 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             }
         } else if currentChunkIndex + 1 >= totalChunks {
             // No more chunks
+            NSLog("Podcast: all chunks played, session complete")
             state = .complete
         } else {
             // Waiting for prefetch to complete
+            NSLog("Podcast: waiting for next chunk (prefetch not ready)")
             state = .buffering
         }
     }
@@ -472,6 +492,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             try? FileManager.default.removeItem(at: prefetchURL)
             prefetchedAudioURL = nil
         }
+        prefetchedTranscriptLines = []
 
         state = .idle
     }

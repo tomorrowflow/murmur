@@ -116,22 +116,25 @@ struct PodcastOverlayView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .playing, .complete:
-                    transcriptView
-
-                case .interrupted, .processingInterrupt:
-                    VStack(spacing: 8) {
+                    VStack(spacing: 0) {
                         transcriptView
-
-                        if viewModel.state == .processingInterrupt {
-                            HStack(spacing: 6) {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                Text("Hosts are thinking...")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.orange)
-                            }
-                            .padding(.bottom, 6)
+                        if viewModel.state == .playing {
+                            pttHint
                         }
+                    }
+
+                case .listening:
+                    VStack(spacing: 0) {
+                        transcriptView
+                        Divider()
+                        listeningIndicator
+                    }
+
+                case .processingInterrupt:
+                    VStack(spacing: 0) {
+                        transcriptView
+                        Divider()
+                        processingIndicator
                     }
 
                 case .error(let msg):
@@ -147,25 +150,16 @@ struct PodcastOverlayView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // PTT hint
-            if viewModel.state == .playing {
-                Divider()
-                Text("Double-tap Left Option to ask a question")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary.opacity(0.7))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-            }
         }
         .frame(width: 380, height: dynamicHeight)
     }
+
+    // MARK: - Transcript
 
     private var transcriptView: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    // Show last few lines for context
                     let visibleLines = Array(viewModel.transcript.suffix(6))
                     ForEach(visibleLines) { line in
                         HStack(alignment: .top, spacing: 6) {
@@ -194,6 +188,51 @@ struct PodcastOverlayView: View {
         }
     }
 
+    // MARK: - Listening / Processing indicators
+
+    private var listeningIndicator: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "mic.fill")
+                .foregroundColor(.red)
+                .font(.system(size: 16))
+                .symbolEffect(.pulse)
+            Text("Listening...")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.red.opacity(0.05))
+    }
+
+    private var processingIndicator: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Hosts are thinking...")
+                .font(.system(size: 12))
+                .foregroundColor(.orange)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.05))
+    }
+
+    private var pttHint: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Text("Double-tap Left Option to ask a question")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary.opacity(0.7))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+        }
+    }
+
+    // MARK: - Helpers
+
     private func speakerColor(_ name: String) -> Color {
         if name == viewModel.activeSpeaker {
             return .accentColor
@@ -206,8 +245,8 @@ struct PodcastOverlayView: View {
         case .idle: return 0
         case .connecting, .ingesting, .buffering: return 100
         case .error: return 120
-        case .playing, .complete: return 240
-        case .interrupted, .processingInterrupt: return 270
+        case .playing, .complete: return 260
+        case .listening, .processingInterrupt: return 290
         }
     }
 
@@ -232,7 +271,7 @@ struct PodcastOverlayView: View {
         case .ingesting: return ("Scripting", .orange)
         case .buffering: return ("Buffering", .orange)
         case .playing: return ("Playing", .green)
-        case .interrupted: return ("Interrupted", .red)
+        case .listening: return ("Listening", .red)
         case .processingInterrupt: return ("Processing", .orange)
         case .complete: return ("Complete", .blue)
         case .error: return ("Error", .red)
@@ -300,7 +339,7 @@ class PodcastOverlayWindow {
         let hostingView = NSHostingView(rootView: PodcastOverlayView(viewModel: viewModel))
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 260),
             styleMask: [.nonactivatingPanel, .titled, .hudWindow, .utilityWindow],
             backing: .buffered,
             defer: false

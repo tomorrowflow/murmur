@@ -100,6 +100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var rightOptionResetTimer: Timer?
     private var podcastManager: PodcastManager?
     private var podcastOverlay: PodcastOverlayWindow?
+    private var podcastInterruptActive = false
     private var sttPushToTalkActive = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -151,7 +152,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             (.a, .showHistory),
             (.s, .readSelectedText),
             (.v, .pasteLastTranscription),
-            (.o, .openclawRecording)
+            (.o, .openclawRecording),
+            (.p, .podcastToggle)
         ]
         for (key, name) in defaults {
             if KeyboardShortcuts.getShortcut(for: name) == nil {
@@ -218,6 +220,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 self.stopTranscriptionIndicator()
             }
             recordingManager.toggleRecording()
+        }
+
+        KeyboardShortcuts.onKeyUp(for: .podcastToggle) { [weak self] in
+            self?.togglePodcast()
         }
 
         // Set up audio manager
@@ -388,8 +394,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     firstPressTime: &self.leftOptionFirstPressTime,
                     firstReleaseTime: &self.leftOptionFirstReleaseTime,
                     resetTimer: &self.leftOptionResetTimer,
-                    onStart: { self.startOpenClawPushToTalk() },
-                    onStop: { self.stopOpenClawPushToTalk() },
+                    onStart: {
+                        if self.podcastManager?.isSessionActive == true {
+                            self.startPodcastInterrupt()
+                        } else {
+                            self.startOpenClawPushToTalk()
+                        }
+                    },
+                    onStop: {
+                        if self.podcastInterruptActive {
+                            self.stopPodcastInterrupt()
+                        } else {
+                            self.stopOpenClawPushToTalk()
+                        }
+                    },
                     onReset: { self.resetLeftOptionState() }
                 )
             } else if event.keyCode == rightOptionKeyCode && UserDefaults.standard.object(forKey: "ptt.stt.enabled") as? Bool ?? true {
@@ -917,6 +935,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func transcriptionDidComplete(text: String) {
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
+
+        // Route to podcast interrupt if active
+        if podcastInterruptActive {
+            podcastInterruptActive = false
+            print("Podcast interrupt: transcribed question: \"\(text)\"")
+            podcastManager?.sendInterrupt(question: text)
+            podcastOverlay?.updateState(.processingInterrupt)
+            return
+        }
+
         let shouldSendReturn = sttPushToTalkActive && (UserDefaults.standard.object(forKey: "ptt.stt.sendReturn") as? Bool ?? true)
         sttPushToTalkActive = false
         pasteTextAtCursor(text)
@@ -940,12 +968,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func transcriptionDidFail(error: String) {
+        if podcastInterruptActive {
+            podcastInterruptActive = false
+            podcastManager?.resumePlayback()
+            podcastOverlay?.updateState(.playing)
+        }
         stopTranscriptionIndicator()
         ensureAudioOverlay().showError(error)
         showTranscriptionError(error)
     }
 
     func recordingWasCancelled() {
+        if podcastInterruptActive {
+            podcastInterruptActive = false
+            podcastManager?.resumePlayback()
+            podcastOverlay?.updateState(.playing)
+        }
         sttPushToTalkActive = false
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
@@ -964,6 +1002,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func recordingWasSkippedDueToSilence() {
+        if podcastInterruptActive {
+            podcastInterruptActive = false
+            podcastManager?.resumePlayback()
+            podcastOverlay?.updateState(.playing)
+        }
         sttPushToTalkActive = false
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
@@ -1101,21 +1144,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func startPodcastInterrupt() {
-        guard let manager = podcastManager, manager.isSessionActive else { return }
+        guard let manager = podcastManager, manager.isSessionActive else {
+            resetLeftOptionState()
+            return
+        }
 
+        if audioManager.isRecording || openClawRecordingManager?.isRecording == true {
+            print("Podcast interrupt: blocked - another recording is active")
+            resetLeftOptionState()
+            return
+        }
+
+        print("Podcast interrupt: started (double-tap-hold)")
         manager.pausePlayback()
         PTTTonePlayer.shared.playStartTone()
-
-        // Reuse existing audio recording for transcription
-        // Record via the audio manager, then on completion send as interrupt
-        stopTranscriptionIndicator()
-
+        podcastInterruptActive = true
         podcastOverlay?.updateState(.interrupted)
+
+        // Start recording via the existing audio manager
+        stopTranscriptionIndicator()
+        audioManager.toggleRecording()
     }
 
     func stopPodcastInterrupt() {
-        // Called when Left Option PTT is released during podcast interrupt
+        guard audioManager.isRecording else { return }
+
+        print("Podcast interrupt: released — stopping")
         PTTTonePlayer.shared.playInterruptTone()
+        audioManager.toggleRecording()
+        // transcriptionDidComplete will route to podcastManager.sendInterrupt
     }
 
 }

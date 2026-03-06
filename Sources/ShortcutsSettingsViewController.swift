@@ -16,6 +16,7 @@ struct ShortcutsSettingsView: View {
                     shortcutRow("Paste Last Transcription", for: .pasteLastTranscription)
                     shortcutRow("Show History", for: .showHistory)
                     shortcutRow("OpenClaw Interface", for: .openclawRecording)
+                    shortcutRow("Podcast (Start/Stop)", for: .podcastToggle)
                 }
 
                 Section("Push-to-Talk (Double-Tap & Hold)") {
@@ -80,6 +81,7 @@ struct ShortcutsSettingsView: View {
         KeyboardShortcuts.setShortcut(.init(.v, modifiers: [.command, .option]), for: .pasteLastTranscription)
         KeyboardShortcuts.setShortcut(.init(.a, modifiers: [.command, .option]), for: .showHistory)
         KeyboardShortcuts.setShortcut(.init(.o, modifiers: [.command, .option]), for: .openclawRecording)
+        KeyboardShortcuts.setShortcut(.init(.p, modifiers: [.command, .option]), for: .podcastToggle)
         openClawPTTEnabled = true
         sttPTTEnabled = true
         sttPTTSendReturn = true

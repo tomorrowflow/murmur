@@ -223,7 +223,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         KeyboardShortcuts.onKeyUp(for: .podcastToggle) { [weak self] in
+            NSLog("Podcast: Cmd+Opt+P pressed")
             self?.togglePodcast()
+        }
+
+        // Log current podcast shortcut binding
+        if let shortcut = KeyboardShortcuts.getShortcut(for: .podcastToggle) {
+            print("Podcast shortcut registered: \(shortcut)")
+        } else {
+            print("Podcast shortcut: NOT SET — setting default now")
+            KeyboardShortcuts.setShortcut(.init(.p, modifiers: [.command, .option]), for: .podcastToggle)
         }
 
         // Set up audio manager
@@ -497,19 +506,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private func startOpenClawPushToTalk() {
         if audioManager.isRecording {
             print("OpenClaw PTT: blocked - audio recording is active")
-            resetLeftOptionState()
+            DispatchQueue.main.async { self.resetLeftOptionState() }
             return
         }
 
         guard let recordingManager = openClawRecordingManager else {
             print("OpenClaw PTT: not configured")
-            resetLeftOptionState()
+            DispatchQueue.main.async { self.resetLeftOptionState() }
             return
         }
 
         if recordingManager.isRecording || recordingManager.isProcessing {
             print("OpenClaw PTT: already recording/processing")
-            resetLeftOptionState()
+            DispatchQueue.main.async { self.resetLeftOptionState() }
             return
         }
 
@@ -532,13 +541,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private func startSTTPushToTalk() {
         if openClawRecordingManager?.isRecording == true || openClawRecordingManager?.isProcessing == true {
             print("STT PTT: blocked - OpenClaw recording is active")
-            resetRightOptionState()
+            DispatchQueue.main.async { self.resetRightOptionState() }
             return
         }
 
         if audioManager.isRecording {
             print("STT PTT: already recording")
-            resetRightOptionState()
+            DispatchQueue.main.async { self.resetRightOptionState() }
             return
         }
 
@@ -1121,15 +1130,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func togglePodcast() {
         let manager = ensurePodcastManager()
         if manager.isSessionActive {
+            print("Podcast: stopping session")
             manager.stopSession()
             podcastOverlay?.dismiss()
             stopWaveformAnimation()
         } else {
-            // Get selected text as content for the podcast
-            guard let selectedText = getSelectedTextViaAccessibility(), !selectedText.isEmpty else {
+            // Try selected text first, fall back to clipboard
+            var content = getSelectedTextViaAccessibility() ?? ""
+            if content.isEmpty {
+                content = NSPasteboard.general.string(forType: .string) ?? ""
+                if !content.isEmpty {
+                    NSLog("Podcast: using clipboard content (\(content.count) chars)")
+                }
+            } else {
+                NSLog("Podcast: using selected text (\(content.count) chars)")
+            }
+
+            guard !content.isEmpty else {
+                NSLog("Podcast: no content — neither selection nor clipboard")
                 let notification = NSUserNotification()
-                notification.title = "No Text Selected"
-                notification.informativeText = "Select text (URL, article, or content) to start a podcast"
+                notification.title = "No Content"
+                notification.informativeText = "Select text or copy a URL/article to clipboard, then press Cmd+Opt+P"
                 NSUserNotificationCenter.default.deliver(notification)
                 return
             }
@@ -1138,20 +1159,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             overlay.show(state: .connecting)
 
             // Detect content type
-            let contentType = selectedText.hasPrefix("http") ? "url" : "text"
-            manager.startSession(contentType: contentType, content: selectedText)
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let contentType = trimmed.hasPrefix("http") ? "url" : "text"
+            let preview = String(trimmed.prefix(200))
+            NSLog("Podcast: starting session (type=\(contentType), length=\(content.count))")
+            NSLog("Podcast: content preview: \(preview)")
+            manager.startSession(contentType: contentType, content: content)
         }
     }
 
     func startPodcastInterrupt() {
         guard let manager = podcastManager, manager.isSessionActive else {
-            resetLeftOptionState()
+            DispatchQueue.main.async { self.resetLeftOptionState() }
             return
         }
 
         if audioManager.isRecording || openClawRecordingManager?.isRecording == true {
             print("Podcast interrupt: blocked - another recording is active")
-            resetLeftOptionState()
+            DispatchQueue.main.async { self.resetLeftOptionState() }
             return
         }
 
@@ -1159,7 +1184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         manager.pausePlayback()
         PTTTonePlayer.shared.playStartTone()
         podcastInterruptActive = true
-        podcastOverlay?.updateState(.interrupted)
+        podcastOverlay?.updateState(.listening)
 
         // Start recording via the existing audio manager
         stopTranscriptionIndicator()

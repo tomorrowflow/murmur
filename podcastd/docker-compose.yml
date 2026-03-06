@@ -1,0 +1,63 @@
+services:
+  podcastd:
+    build: .
+    container_name: podcastd
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Mount ComfyUI output dir read-only so podcastd can serve audio files
+      - /home/frogger/ComfyUI-Easy-Install-docker/data/output:/comfyui_output:ro
+    networks:
+      - proxy
+      - comfyui-easy-install-docker_default
+    ports:
+      - "8765:8765"
+      - "8766:8766"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      # Traefik WebSocket service (port 8765)
+      - "traefik.enable=true"
+      # Traefik HTTP service (port 8766) — audio files + health (higher priority)
+      - "traefik.http.routers.podcastd-http.rule=Host(`podcastd.deepread.fm`) && (PathPrefix(`/audio`) || PathPrefix(`/health`))"
+      - "traefik.http.routers.podcastd-http.entrypoints=websecure"
+      - "traefik.http.routers.podcastd-http.tls=true"
+      - "traefik.http.routers.podcastd-http.priority=20"
+      - "traefik.http.routers.podcastd-http.service=podcastd-http"
+      - "traefik.http.services.podcastd-http.loadbalancer.server.port=8766"
+      # Traefik WebSocket service (port 8765) — catch-all for WS connections
+      - "traefik.http.routers.podcastd-ws.rule=Host(`podcastd.deepread.fm`)"
+      - "traefik.http.routers.podcastd-ws.entrypoints=websecure"
+      - "traefik.http.routers.podcastd-ws.tls=true"
+      - "traefik.http.routers.podcastd-ws.priority=10"
+      - "traefik.http.routers.podcastd-ws.service=podcastd-ws"
+      - "traefik.http.services.podcastd-ws.loadbalancer.server.port=8765"
+
+  traefik:
+    image: traefik:v3.3
+    container_name: traefik-deepread
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=proxy"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--providers.file.filename=/etc/traefik/dynamic.yml"
+    ports:
+      - "443:443"
+      - "80:80"
+      - "8082:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./traefik/certs:/certs:ro
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    name: proxy
+  comfyui-easy-install-docker_default:
+    external: true

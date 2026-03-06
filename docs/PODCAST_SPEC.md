@@ -140,7 +140,7 @@ All messages are JSON with a `type` field.
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `INGEST` | `{content_type, content, subject?}` | Start new session |
+| `INGEST` | `{content_type, content, subject?, web_search?}` | Start new session |
 | `NEXT_CHUNK` | `{session_id}` | Request next audio chunk |
 | `INTERRUPT` | `{session_id, question}` | User interrupted with voice question |
 | `STOP` | `{session_id}` | End session, clean up audio files |
@@ -166,6 +166,12 @@ All messages are JSON with a `type` field.
 - `"url"` — when the selected text starts with `http`
 - `"text"` — all other selected text (articles, email bodies, etc.)
 - `"pdf"` — future: base64-encoded PDF bytes (Phase 5)
+
+**`INGEST`** — `web_search` (boolean, optional, default `false`):
+- When `true`, interrupt questions are enriched with live web search results via the Ollama Web Search API before being sent to the LLM. This lets the hosts reference current facts, data, and sources when answering the listener's question.
+- When `false` or omitted, interrupt responses are generated purely from the original content and conversation context.
+- Controlled by the user via a toggle in the Podcast settings UI or per-session in the podcast start dialog.
+- Requires `OLLAMA_API_KEY` to be set in the podcastd `.env` file (free key from https://ollama.com/settings/keys).
 
 **`CHUNK_READY` and `INTERRUPT_READY`** — the `transcript` field must be an array of objects:
 ```json

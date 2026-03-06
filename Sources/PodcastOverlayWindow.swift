@@ -8,9 +8,11 @@ class PodcastOverlayViewModel: ObservableObject {
     @Published var title: String = ""
     @Published var transcript: [ScriptLine] = []
     @Published var activeSpeaker: String = ""
+    @Published var webSearchEnabled: Bool = UserDefaults.standard.bool(forKey: "podcast.webSearchEnabled")
 
     var onDismiss: (() -> Void)?
     var onStop: (() -> Void)?
+    var onWebSearchToggled: ((Bool) -> Void)?
 
     func update(state: PodcastState) {
         self.state = state
@@ -223,11 +225,28 @@ struct PodcastOverlayView: View {
     private var pttHint: some View {
         VStack(spacing: 0) {
             Divider()
-            Text("Double-tap Left Option to ask a question")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary.opacity(0.7))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
+            HStack {
+                Text("Double-tap Left Option to ask a question")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.7))
+                Spacer()
+                Toggle(isOn: Binding(
+                    get: { viewModel.webSearchEnabled },
+                    set: { newValue in
+                        viewModel.webSearchEnabled = newValue
+                        viewModel.onWebSearchToggled?(newValue)
+                    }
+                )) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 10))
+                        .foregroundColor(viewModel.webSearchEnabled ? .accentColor : .secondary.opacity(0.5))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help("Web search on interrupt")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
         }
     }
 

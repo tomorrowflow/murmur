@@ -95,6 +95,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         let name = UserDefaults.standard.string(forKey: "podcast.hostBName")
         return (name?.isEmpty ?? true) ? "Jordan" : name!
     }
+    var webSearchEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "podcast.webSearchEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "podcast.webSearchEnabled") }
+    }
 
     override init() {
         super.init()
@@ -130,11 +134,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             var payload: [String: Any] = [
                 "type": "INGEST",
                 "content_type": contentType,
-                "content": content
+                "content": content,
+                "web_search": self.webSearchEnabled
             ]
             if let subject = subject {
                 payload["subject"] = subject
             }
+            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled)")
             self.sendJSON(payload)
             self.state = .ingesting
         }

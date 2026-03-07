@@ -91,14 +91,14 @@ struct PodcastSettingsView: View {
                         Text("VibeVoice Model")
                             .frame(width: 120, alignment: .leading)
                         Picker("", selection: $viewModel.selectedModel) {
-                            Text("Large Q8 (~12 GB) — Best quality").tag("large-fp")
+                            Text("Large (~19 GB) — Best quality").tag("large-fp")
+                            Text("Large Q8 (~12 GB) — Great quality").tag("large-q8")
                             Text("Large Q4 (~7 GB) — Good quality").tag("large-q4")
-                            Text("1.5B (~6 GB) — Faster").tag("1.5b-fp")
-                            Text("1.5B Q4 (~4 GB) — Fastest").tag("1.5b-q4")
+                            Text("1.5B (~6 GB) — Fastest").tag("1.5b-fp")
                         }
                         .labelsHidden()
                     }
-                    Text("Pre-quantized Large checkpoints (Q8/Q4). 1.5B Q4 uses dynamic LLM quantization.")
+                    Text("Larger models produce better quality but take longer and use more VRAM.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }

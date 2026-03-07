@@ -9,7 +9,7 @@ import websockets
 
 from aiohttp import web
 
-from audio_generator import cancel_session_prompts, generate_audio, resolve_preset
+from audio_generator import cancel_session_prompts, generate_audio, interrupt_comfyui, resolve_preset
 from chunk_manager import split_into_chunks
 from config import cfg
 from ingest import ingest_email, ingest_pdf, ingest_url
@@ -35,6 +35,9 @@ prefetch_tasks: dict[str, asyncio.Task] = {}
 # Track background work tasks (chunk delivery, interrupt) per session
 # so we can cancel them on disconnect
 work_tasks: dict[str, list[asyncio.Task]] = {}
+
+# Guard against duplicate NEXT_CHUNK — only one delivery in-flight per session
+chunk_delivery_active: set[str] = set()
 
 
 # ---------- Safe Send ----------
@@ -78,8 +81,10 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
                     sid = msg.get("session_id")
                     s = sessions.get(sid)
                     if s:
-                        # Non-blocking: spawn background task for chunk delivery
-                        _spawn_work(sid, _deliver_next_chunk(websocket, s))
+                        if sid in chunk_delivery_active:
+                            log.info("Ignoring duplicate NEXT_CHUNK for session %s", sid)
+                        else:
+                            _spawn_work(sid, _deliver_next_chunk(websocket, s))
                     else:
                         await _safe_send(websocket, {"type": "ERROR", "code": "NO_SESSION", "message": "Session not found"})
 
@@ -203,13 +208,23 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
 
 async def _deliver_next_chunk(websocket, session: PodcastSession) -> None:
     """Deliver next chunk — runs as a background task so message loop stays free."""
+    sid = session.session_id
+    chunk_delivery_active.add(sid)
+    try:
+        await _deliver_next_chunk_inner(websocket, session)
+    finally:
+        chunk_delivery_active.discard(sid)
+
+
+async def _deliver_next_chunk_inner(websocket, session: PodcastSession) -> None:
+    sid = session.session_id
     next_idx = session.current_chunk_index + 1
 
     if next_idx >= len(session.chunks):
         session.state = SessionState.COMPLETE
         await _safe_send(websocket, {
             "type": "CHUNK_READY",
-            "session_id": session.session_id,
+            "session_id": sid,
             "chunk_index": next_idx,
             "audio_url": "",
             "transcript": [],
@@ -220,12 +235,16 @@ async def _deliver_next_chunk(websocket, session: PodcastSession) -> None:
     session.state = SessionState.PLAYING
 
     # Wait for in-flight prefetch if one exists for this chunk
-    prefetch_key = f"{session.session_id}:{next_idx}"
+    prefetch_key = f"{sid}:{next_idx}"
     if prefetch_key in prefetch_tasks:
         task = prefetch_tasks.pop(prefetch_key)
         if not task.done():
             log.info("Waiting for prefetch of chunk %d...", next_idx)
             await task
+
+    # Bail out if session was cleaned up while we were waiting
+    if sid not in sessions:
+        return
 
     # Check if audio is ready (from prefetch or previous generation)
     if next_idx in session.chunk_audio_files:
@@ -235,22 +254,27 @@ async def _deliver_next_chunk(websocket, session: PodcastSession) -> None:
         log.info("On-demand generation for chunk %d", next_idx)
         chunk_model, chunk_quantize = resolve_preset(session.model_preset)
         await _safe_send(websocket, {
-            "type": "PROGRESS", "session_id": session.session_id,
+            "type": "PROGRESS", "session_id": sid,
             "stage": "audio_generating", "percent": -1,
             "message": f"Generating audio (chunk {next_idx + 1}/{len(session.chunks)})...",
         })
         async with gpu_lock:
+            if sid not in sessions:
+                return  # session gone while waiting for lock
             audio_file = await generate_audio(
                 session.chunks[next_idx], model=chunk_model,
-                quantize_llm=chunk_quantize, session_id=session.session_id,
+                quantize_llm=chunk_quantize, session_id=sid,
             )
         session.chunk_audio_files[next_idx] = audio_file
+
+    if sid not in sessions:
+        return
 
     session.current_chunk_index = next_idx
 
     await _safe_send(websocket, {
         "type": "CHUNK_READY",
-        "session_id": session.session_id,
+        "session_id": sid,
         "chunk_index": next_idx,
         "audio_url": audio_file,
         "transcript": session.chunks[next_idx],
@@ -277,7 +301,12 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
 
     try:
         async with gpu_lock:
+            if session.session_id not in sessions:
+                return  # session gone while waiting for lock
             audio_file, response_lines = await handle_interrupt(session, question)
+
+        if session.session_id not in sessions:
+            return
 
         if not await _safe_send(websocket, {
             "type": "INTERRUPT_READY",
@@ -358,6 +387,8 @@ async def _prefetch_chunk(session: PodcastSession, chunk_idx: int) -> None:
             return
         chunk_model, chunk_quantize = resolve_preset(session.model_preset)
         async with gpu_lock:
+            if session.session_id not in sessions:
+                return  # session gone while waiting for lock
             audio_file = await generate_audio(
                 session.chunks[chunk_idx], model=chunk_model,
                 quantize_llm=chunk_quantize, session_id=session.session_id,
@@ -383,11 +414,14 @@ def _cancel_prefetches(session_id: str) -> None:
 
 
 def _cleanup_session(session_id: str) -> None:
+    # Remove session first so in-flight tasks see it's gone and bail out
+    session = sessions.pop(session_id, None)
+    chunk_delivery_active.discard(session_id)
     _cancel_prefetches(session_id)
     _cancel_work_tasks(session_id)
-    # Cancel any queued/running ComfyUI GPU jobs for this session
+    # Cancel queued prompts AND interrupt the currently running GPU job
     asyncio.create_task(cancel_session_prompts(session_id))
-    session = sessions.pop(session_id, None)
+    asyncio.create_task(interrupt_comfyui())
     if session:
         log.info("Cleaned up session %s", session_id)
 

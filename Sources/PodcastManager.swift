@@ -7,6 +7,9 @@ protocol PodcastManagerDelegate: AnyObject {
     func podcastDidChangeState(_ state: PodcastState)
     func podcastDidUpdateTranscript(_ lines: [ScriptLine])
     func podcastDidUpdateTitle(_ title: String)
+    func podcastDidActivateLine(_ lineId: UUID)
+    func podcastDidUpdateProgress(stage: String, percent: Int, message: String?)
+    func podcastDidUpdateChunkProgress(current: Int, total: Int)
     func podcastDidError(_ message: String)
 }
 
@@ -42,6 +45,11 @@ struct ScriptLine: Identifiable, Equatable {
     let id = UUID()
     let speaker: String
     let text: String
+    var isInterruptMarker: Bool = false
+
+    static func interruptMarker(question: String) -> ScriptLine {
+        ScriptLine(speaker: "", text: question, isInterruptMarker: true)
+    }
 }
 
 // MARK: - PodcastManager
@@ -79,6 +87,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var urlSession: URLSession!
     private var keepaliveTimer: Timer?
     private var isDownloadingPrefetch = false
+    private var isPlayingInterruptResponse = false
+    private var lineAdvanceTimers: [Timer] = []
+    private var currentChunkLines: [ScriptLine] = []
+    private(set) var activeLineId: UUID?
 
     // Settings (from UserDefaults)
     private var podcastdURL: String {
@@ -94,6 +106,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     var hostBName: String {
         let name = UserDefaults.standard.string(forKey: "podcast.hostBName")
         return (name?.isEmpty ?? true) ? "Jordan" : name!
+    }
+    var selectedModel: String {
+        UserDefaults.standard.string(forKey: "podcast.model") ?? "large-q4"
     }
     var webSearchEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "podcast.webSearchEnabled") }
@@ -135,12 +150,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 "type": "INGEST",
                 "content_type": contentType,
                 "content": content,
-                "web_search": self.webSearchEnabled
+                "web_search": self.webSearchEnabled,
+                "model": self.selectedModel
             ]
             if let subject = subject {
                 payload["subject"] = subject
             }
-            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled)")
+            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled) model=\(self.selectedModel)")
             self.sendJSON(payload)
             self.state = .ingesting
         }
@@ -161,18 +177,49 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     func pausePlayback() {
         player?.pause()
+        cancelLineAdvanceTimers()
     }
 
     func resumePlayback() {
         player?.play()
     }
 
-    func sendInterrupt(question: String) {
-        guard let sessionId = sessionId, isSessionActive else { return }
-
+    /// Called when the user starts recording an interrupt (double-tap).
+    /// Stops playback, freezes transcript, and discards stale prefetch.
+    func beginInterrupt() {
         pausePlayback()
-        // State transitions: listening (while recording) → processingInterrupt (after transcription)
-        // The caller (main.swift) sets .listening when PTT starts; we go to .processingInterrupt here
+
+        // Discard stale prefetch — server will invalidate all chunks after current
+        if let prefetchURL = prefetchedAudioURL {
+            try? FileManager.default.removeItem(at: prefetchURL)
+            prefetchedAudioURL = nil
+        }
+        prefetchedTranscriptLines = []
+        isDownloadingPrefetch = false
+
+        // Truncate transcript: keep up to the active line, drop the rest
+        if let currentActiveId = activeLineId,
+           let activeIndex = transcript.firstIndex(where: { $0.id == currentActiveId }) {
+            transcript = Array(transcript.prefix(through: activeIndex))
+            delegate?.podcastDidUpdateTranscript(transcript)
+        }
+    }
+
+    /// Called after the user's question has been transcribed.
+    func sendInterrupt(question: String) {
+        guard let sessionId = sessionId, isSessionActive else {
+            NSLog("Podcast: sendInterrupt blocked — sessionId=\(sessionId ?? "nil"), isActive=\(isSessionActive)")
+            return
+        }
+
+        NSLog("Podcast: sending INTERRUPT question=\"\(question)\" session=\(sessionId)")
+
+        // Insert interrupt marker
+        let marker = ScriptLine.interruptMarker(question: question)
+        transcript.append(marker)
+        delegate?.podcastDidUpdateTranscript(transcript)
+        delegate?.podcastDidActivateLine(marker.id)
+
         state = .processingInterrupt
 
         sendJSON([
@@ -180,8 +227,6 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             "session_id": sessionId,
             "question": question
         ])
-
-        state = .processingInterrupt
     }
 
     // MARK: - WebSocket Connection
@@ -218,9 +263,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 NSLog("Podcast: WebSocket error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     if self.isSessionActive {
-                        self.state = .error("Connection lost: \(error.localizedDescription)")
                         self.delegate?.podcastDidError("Connection lost")
                     }
+                    self.disconnect()
+                    self.state = .error("Connection lost: \(error.localizedDescription)")
                 }
             }
         }
@@ -256,6 +302,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             totalChunks = json["total_chunks"] as? Int ?? 0
             currentChunkIndex = 0
             delegate?.podcastDidUpdateTitle(title)
+            delegate?.podcastDidUpdateChunkProgress(current: 0, total: totalChunks)
             state = .buffering
             NSLog("Podcast: session created (id=\(sessionId ?? "?"), chunks=\(totalChunks))")
 
@@ -266,6 +313,12 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             let chunkIndex = json["chunk_index"] as? Int ?? 0
             guard let audioURL = json["audio_url"] as? String else { return }
             NSLog("Podcast: CHUNK_READY chunk_index=\(chunkIndex), currentChunkIndex=\(currentChunkIndex), state=\(state.displayName)")
+
+            // Ignore stale chunks that arrive during/after interrupt processing
+            if state == .processingInterrupt || state == .listening {
+                NSLog("Podcast: ignoring CHUNK_READY during interrupt (state=\(state.displayName))")
+                return
+            }
 
             // Parse transcript lines from the chunk
             let lines: [ScriptLine]
@@ -283,6 +336,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 // We need audio now — play immediately
                 if !lines.isEmpty {
                     transcript.append(contentsOf: lines)
+                    currentChunkLines = lines
                     delegate?.podcastDidUpdateTranscript(transcript)
                 }
                 downloadAndPlay(audioURL: audioURL, chunkIndex: chunkIndex)
@@ -304,9 +358,11 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                     return ScriptLine(speaker: speaker, text: text)
                 }
                 transcript.append(contentsOf: lines)
+                currentChunkLines = lines
                 delegate?.podcastDidUpdateTranscript(transcript)
             }
 
+            isPlayingInterruptResponse = true
             downloadAndPlay(audioURL: audioURL, chunkIndex: -1) // -1 = interrupt response
 
         case "SCRIPT_UPDATED":
@@ -321,6 +377,12 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             NSLog("Podcast: server error [\(code)] \(message)")
             state = .error(message)
             delegate?.podcastDidError(message)
+
+        case "PROGRESS":
+            let stage = json["stage"] as? String ?? ""
+            let percent = json["percent"] as? Int ?? -1
+            let message = json["message"] as? String
+            delegate?.podcastDidUpdateProgress(stage: stage, percent: percent, message: message)
 
         case "PONG":
             break
@@ -371,6 +433,12 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             player?.prepareToPlay()
             player?.play()
             state = .playing
+            if chunkIndex >= 0 {
+                delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
+            }
+
+            // Schedule line-by-line advancement through the current chunk
+            scheduleLineAdvancement(duration: player?.duration ?? 0)
 
             // Request next chunk while playing (prefetch)
             if chunkIndex >= 0 {
@@ -384,6 +452,39 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             state = .error("Playback failed")
             delegate?.podcastDidError("Audio playback failed")
         }
+    }
+
+    private func scheduleLineAdvancement(duration: TimeInterval) {
+        cancelLineAdvanceTimers()
+        let lines = currentChunkLines
+        guard !lines.isEmpty, duration > 0 else { return }
+
+        // Distribute time proportionally by word count
+        let wordCounts = lines.map { max(Double($0.text.split(separator: " ").count), 1.0) }
+        let totalWords = wordCounts.reduce(0, +)
+
+        var elapsed: TimeInterval = 0
+        for (i, line) in lines.enumerated() {
+            let lineId = line.id
+            let delay = elapsed
+            let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                self?.activeLineId = lineId
+                self?.delegate?.podcastDidActivateLine(lineId)
+            }
+            lineAdvanceTimers.append(timer)
+            elapsed += (wordCounts[i] / totalWords) * duration
+        }
+
+        // Activate first line immediately
+        if let first = lines.first {
+            activeLineId = first.id
+            delegate?.podcastDidActivateLine(first.id)
+        }
+    }
+
+    private func cancelLineAdvanceTimers() {
+        lineAdvanceTimers.forEach { $0.invalidate() }
+        lineAdvanceTimers.removeAll()
     }
 
     private func prefetchAudio(audioURL: String, lines: [ScriptLine]) {
@@ -432,6 +533,15 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard isSessionActive else { return }
 
+        // After interrupt response finishes, request next chunk from revised script
+        if isPlayingInterruptResponse {
+            isPlayingInterruptResponse = false
+            NSLog("Podcast: interrupt response finished, requesting next chunk from revised script")
+            state = .buffering
+            requestNextChunk()
+            return
+        }
+
         NSLog("Podcast: chunk \(currentChunkIndex) finished playing")
 
         // Check if we have a prefetched chunk ready
@@ -442,6 +552,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             // Add prefetched transcript lines
             if !prefetchedTranscriptLines.isEmpty {
                 transcript.append(contentsOf: prefetchedTranscriptLines)
+                currentChunkLines = prefetchedTranscriptLines
                 delegate?.podcastDidUpdateTranscript(transcript)
                 prefetchedTranscriptLines = []
             }
@@ -486,6 +597,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private func reset() {
         disconnect()
         player?.stop()
+        cancelLineAdvanceTimers()
+        currentChunkLines = []
+        isPlayingInterruptResponse = false
         player = nil
         sessionId = nil
         currentChunkIndex = 0

@@ -933,12 +933,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     
     func audioLevelDidUpdate(db: Float) {
         updateStatusBarWithLevel(db: db)
-        ensureAudioOverlay().show(state: .listening)
+        if !podcastInterruptActive {
+            ensureAudioOverlay().show(state: .listening)
+        }
     }
 
     func transcriptionDidStart() {
         startTranscriptionIndicator()
-        ensureAudioOverlay().show(state: .transcribing)
+        if !podcastInterruptActive {
+            ensureAudioOverlay().show(state: .transcribing)
+        }
     }
 
     func transcriptionDidComplete(text: String) {
@@ -977,13 +981,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func transcriptionDidFail(error: String) {
+        let wasPodcastInterrupt = podcastInterruptActive
         if podcastInterruptActive {
             podcastInterruptActive = false
             podcastManager?.resumePlayback()
             podcastOverlay?.updateState(.playing)
         }
         stopTranscriptionIndicator()
-        ensureAudioOverlay().showError(error)
+        if !wasPodcastInterrupt {
+            ensureAudioOverlay().showError(error)
+        }
         showTranscriptionError(error)
     }
 
@@ -1097,6 +1104,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         podcastOverlay?.updateTitle(title)
     }
 
+    func podcastDidActivateLine(_ lineId: UUID) {
+        podcastOverlay?.activateLine(lineId)
+    }
+
+    func podcastDidUpdateProgress(stage: String, percent: Int, message: String?) {
+        podcastOverlay?.updateProgress(message: message ?? stage, percent: percent)
+    }
+
+    func podcastDidUpdateChunkProgress(current: Int, total: Int) {
+        podcastOverlay?.updateChunkProgress(current: current, total: total)
+    }
+
     func podcastDidError(_ message: String) {
         stopWaveformAnimation()
         let notification = NSUserNotification()
@@ -1184,7 +1203,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("Podcast interrupt: started (double-tap-hold)")
-        manager.pausePlayback()
+        manager.beginInterrupt()
         PTTTonePlayer.shared.playStartTone()
         podcastInterruptActive = true
         podcastOverlay?.updateState(.listening)

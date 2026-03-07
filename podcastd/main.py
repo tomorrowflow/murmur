@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import websockets
+
 from aiohttp import web
 
 from audio_generator import cancel_session_prompts, generate_audio
@@ -31,6 +32,22 @@ gpu_lock = asyncio.Lock()
 # Track in-flight prefetch tasks per session so we can await them
 prefetch_tasks: dict[str, asyncio.Task] = {}
 
+# Track background work tasks (chunk delivery, interrupt) per session
+# so we can cancel them on disconnect
+work_tasks: dict[str, list[asyncio.Task]] = {}
+
+
+# ---------- Safe Send ----------
+
+
+async def _safe_send(websocket, data: dict) -> bool:
+    """Send JSON to websocket, return False if connection is dead."""
+    try:
+        await websocket.send(json.dumps(data))
+        return True
+    except websockets.ConnectionClosed:
+        return False
+
 
 # ---------- WebSocket Server ----------
 
@@ -44,7 +61,7 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
-                await _send_error(websocket, "PARSE_ERROR", "Invalid JSON")
+                await _safe_send(websocket, {"type": "ERROR", "code": "PARSE_ERROR", "message": "Invalid JSON"})
                 continue
 
             msg_type = msg.get("type")
@@ -52,7 +69,7 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
 
             try:
                 if msg_type == "PING":
-                    await websocket.send(json.dumps({"type": "PONG"}))
+                    await _safe_send(websocket, {"type": "PONG"})
 
                 elif msg_type == "INGEST":
                     session = await _handle_ingest(websocket, msg)
@@ -61,18 +78,24 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
                     sid = msg.get("session_id")
                     s = sessions.get(sid)
                     if s:
-                        await _handle_next_chunk(websocket, s)
+                        # Non-blocking: spawn background task for chunk delivery
+                        _spawn_work(sid, _deliver_next_chunk(websocket, s))
                     else:
-                        await _send_error(websocket, "NO_SESSION", "Session not found")
+                        await _safe_send(websocket, {"type": "ERROR", "code": "NO_SESSION", "message": "Session not found"})
 
                 elif msg_type == "INTERRUPT":
                     sid = msg.get("session_id")
                     question = msg.get("question", "")
                     s = sessions.get(sid)
                     if s and question:
-                        await _handle_interrupt(websocket, s, question)
+                        # Cancel ALL in-flight work (prefetch + on-demand chunk delivery)
+                        # before starting interrupt, so nothing holds the gpu_lock
+                        _cancel_prefetches(sid)
+                        _cancel_work_tasks(sid)
+                        # Non-blocking: spawn background task for interrupt
+                        _spawn_work(sid, _handle_interrupt(websocket, s, question))
                     else:
-                        await _send_error(websocket, "BAD_REQUEST", "Missing session or question")
+                        await _safe_send(websocket, {"type": "ERROR", "code": "BAD_REQUEST", "message": "Missing session or question"})
 
                 elif msg_type == "STOP":
                     sid = msg.get("session_id")
@@ -82,11 +105,11 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
                         log.info("Session stopped: %s", sid)
 
                 else:
-                    await _send_error(websocket, "UNKNOWN_TYPE", f"Unknown message type: {msg_type}")
+                    await _safe_send(websocket, {"type": "ERROR", "code": "UNKNOWN_TYPE", "message": f"Unknown message type: {msg_type}"})
 
             except Exception as e:
                 log.exception("Error handling %s", msg_type)
-                await _send_error(websocket, "HANDLER_ERROR", str(e))
+                await _safe_send(websocket, {"type": "ERROR", "code": "HANDLER_ERROR", "message": str(e)})
 
     except websockets.ConnectionClosed:
         log.info("Client disconnected")
@@ -134,21 +157,21 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
         session.chunk_audio_files[0] = audio_file
         session.state = SessionState.READY
 
-        await websocket.send(json.dumps({
+        await _safe_send(websocket, {
             "type": "SESSION_CREATED",
             "session_id": session.session_id,
             "title": title,
             "total_chunks": len(session.chunks),
-        }))
+        })
 
         # Send first chunk immediately
-        await websocket.send(json.dumps({
+        await _safe_send(websocket, {
             "type": "CHUNK_READY",
             "session_id": session.session_id,
             "chunk_index": 0,
             "audio_url": audio_file,
             "transcript": session.chunks[0],
-        }))
+        })
 
         # Start prefetching chunk 1 in background
         if len(session.chunks) > 1:
@@ -159,22 +182,23 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
     except Exception as e:
         log.exception("Ingest failed")
         session.state = SessionState.ERROR
-        await _send_error(websocket, "INGEST_FAILED", str(e))
+        await _safe_send(websocket, {"type": "ERROR", "code": "INGEST_FAILED", "message": str(e)})
         return session
 
 
-async def _handle_next_chunk(websocket, session: PodcastSession) -> None:
+async def _deliver_next_chunk(websocket, session: PodcastSession) -> None:
+    """Deliver next chunk — runs as a background task so message loop stays free."""
     next_idx = session.current_chunk_index + 1
 
     if next_idx >= len(session.chunks):
         session.state = SessionState.COMPLETE
-        await websocket.send(json.dumps({
+        await _safe_send(websocket, {
             "type": "CHUNK_READY",
             "session_id": session.session_id,
             "chunk_index": next_idx,
             "audio_url": "",
             "transcript": [],
-        }))
+        })
         return
 
     session.mark_chunk_delivered(session.current_chunk_index)
@@ -200,13 +224,13 @@ async def _handle_next_chunk(websocket, session: PodcastSession) -> None:
 
     session.current_chunk_index = next_idx
 
-    await websocket.send(json.dumps({
+    await _safe_send(websocket, {
         "type": "CHUNK_READY",
         "session_id": session.session_id,
         "chunk_index": next_idx,
         "audio_url": audio_file,
         "transcript": session.chunks[next_idx],
-    }))
+    })
 
     # Prefetch the chunk after next
     prefetch_idx = next_idx + 1
@@ -215,33 +239,37 @@ async def _handle_next_chunk(websocket, session: PodcastSession) -> None:
 
 
 async def _handle_interrupt(websocket, session: PodcastSession, question: str) -> None:
-    # Cancel any in-flight prefetch — GPU is needed for interrupt response
-    _cancel_prefetches(session.session_id)
+    """Handle interrupt — runs as a background task so message loop stays free."""
+    # Delete all queued ComfyUI prompts and kill the running one.
+    # cancel_session_prompts does both /queue delete + /interrupt.
+    await cancel_session_prompts(session.session_id)
 
-    await websocket.send(json.dumps({
+    if not await _safe_send(websocket, {
         "type": "INTERRUPT_PROCESSING",
         "session_id": session.session_id,
         "state": "processing",
-    }))
+    }):
+        return  # connection dead, no point continuing
 
     try:
         async with gpu_lock:
             audio_file, response_lines = await handle_interrupt(session, question)
 
-        await websocket.send(json.dumps({
+        if not await _safe_send(websocket, {
             "type": "INTERRUPT_READY",
             "session_id": session.session_id,
             "audio_url": audio_file,
             "transcript": response_lines,
-        }))
+        }):
+            return
 
         # Notify about revised script
         remaining = len(session.chunks) - session.current_chunk_index - 1
-        await websocket.send(json.dumps({
+        await _safe_send(websocket, {
             "type": "SCRIPT_UPDATED",
             "session_id": session.session_id,
             "remaining_chunks": remaining,
-        }))
+        })
 
         session.state = SessionState.PLAYING
 
@@ -252,8 +280,40 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
 
     except Exception as e:
         log.exception("Interrupt handling failed")
-        await _send_error(websocket, "INTERRUPT_FAILED", str(e))
+        await _safe_send(websocket, {"type": "ERROR", "code": "INTERRUPT_FAILED", "message": str(e)})
         session.state = SessionState.PLAYING
+
+
+# ---------- Background Work Management ----------
+
+
+def _spawn_work(session_id: str, coro) -> asyncio.Task:
+    """Spawn a background task for session work (chunk delivery, interrupt)."""
+    task = asyncio.create_task(coro)
+    work_tasks.setdefault(session_id, []).append(task)
+    task.add_done_callback(lambda t: _remove_work_task(session_id, t))
+    return task
+
+
+def _remove_work_task(session_id: str, task: asyncio.Task) -> None:
+    tasks = work_tasks.get(session_id)
+    if tasks:
+        try:
+            tasks.remove(task)
+        except ValueError:
+            pass
+    if task.done() and not task.cancelled():
+        exc = task.exception()
+        if exc:
+            log.error("Background task failed for session %s: %s", session_id, exc)
+
+
+def _cancel_work_tasks(session_id: str) -> None:
+    tasks = work_tasks.pop(session_id, [])
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+            log.info("Cancelled work task for session %s", session_id)
 
 
 # ---------- Prefetch Management ----------
@@ -294,19 +354,9 @@ def _cancel_prefetches(session_id: str) -> None:
 # ---------- Helpers ----------
 
 
-async def _send_error(websocket, code: str, message: str) -> None:
-    try:
-        await websocket.send(json.dumps({
-            "type": "ERROR",
-            "code": code,
-            "message": message,
-        }))
-    except Exception:
-        pass  # connection may already be closed
-
-
 def _cleanup_session(session_id: str) -> None:
     _cancel_prefetches(session_id)
+    _cancel_work_tasks(session_id)
     # Cancel any queued/running ComfyUI GPU jobs for this session
     asyncio.create_task(cancel_session_prompts(session_id))
     session = sessions.pop(session_id, None)

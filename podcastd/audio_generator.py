@@ -12,11 +12,16 @@ log = logging.getLogger(__name__)
 # Track in-flight ComfyUI prompt IDs per session for cleanup
 active_prompts: dict[str, set[str]] = {}  # session_id → {prompt_id, ...}
 
-# Model name mapping: config names → actual ComfyUI model names
-MODEL_MAP = {
-    "Large": "VibeVoice-Large-Q8",
-    "1.5B": "VibeVoice7b-low-vram",
+# Client preset key → (comfyui_model_dir, quantize_llm)
+# large-fp/large-q4 use pre-quantized checkpoints, so quantize_llm = "full precision"
+# 1.5b-q4 uses dynamic 4-bit quantization (no pre-quantized checkpoint exists)
+MODEL_PRESETS: dict[str, tuple[str, str]] = {
+    "large-fp": ("VibeVoice-Large-Q8", "full precision"),
+    "large-q4": ("VibeVoice7b-low-vram", "full precision"),
+    "1.5b-fp": ("VibeVoice-1.5B", "full precision"),
+    "1.5b-q4": ("VibeVoice-1.5B", "4bit"),
 }
+DEFAULT_PRESET = "large-q4"
 
 
 def format_for_vibevoice(chunk: list[dict]) -> str:
@@ -27,21 +32,29 @@ def format_for_vibevoice(chunk: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def resolve_preset(preset: str | None) -> tuple[str, str]:
+    """Resolve a preset key to (comfyui_model, quantize_llm)."""
+    return MODEL_PRESETS.get(preset or DEFAULT_PRESET, MODEL_PRESETS[DEFAULT_PRESET])
+
+
 async def generate_audio(
     chunk: list[dict],
     seed: int | None = None,
     model: str | None = None,
+    quantize_llm: str | None = None,
     session_id: str | None = None,
 ) -> str:
     """Generate audio for a script chunk via ComfyUI VibeVoice.
 
     Returns the output filename (available at ComfyUI's output dir).
+    model/quantize_llm can be passed directly or resolved from a preset.
     """
     seed = seed or cfg.VOICE_SEED_A
     model = model or cfg.CHUNK_MODEL
+    quantize_llm = quantize_llm or "full precision"
     text = format_for_vibevoice(chunk)
 
-    workflow = _build_workflow(text, seed, model)
+    workflow = _build_workflow(text, seed, model, quantize_llm)
     prompt_id = await _post_workflow(workflow)
 
     # Track prompt for cleanup on session cancel
@@ -92,7 +105,7 @@ async def cancel_session_prompts(session_id: str) -> None:
         log.exception("Failed to cancel ComfyUI prompts")
 
 
-def _build_workflow(text: str, seed: int, model: str) -> dict:
+def _build_workflow(text: str, seed: int, model: str, quantize_llm: str = "full precision") -> dict:
     """Build the ComfyUI API workflow payload.
 
     Nodes:
@@ -101,7 +114,7 @@ def _build_workflow(text: str, seed: int, model: str) -> dict:
       1 → VibeVoiceMultipleSpeakersNode (voice-cloned from reference samples)
       2 → SaveAudio
     """
-    comfyui_model = MODEL_MAP.get(model, model)
+    comfyui_model = model
 
     return {
         "prompt": {
@@ -123,7 +136,7 @@ def _build_workflow(text: str, seed: int, model: str) -> dict:
                     "text": text,
                     "model": comfyui_model,
                     "attention_type": "auto",
-                    "quantize_llm": "full precision",
+                    "quantize_llm": quantize_llm,
                     "free_memory_after_generate": False,
                     "diffusion_steps": 20,
                     "seed": seed,

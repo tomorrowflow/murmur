@@ -14,13 +14,20 @@ class PodcastOverlayViewModel: ObservableObject {
     @Published var progressPercent: Int = -1
     @Published var chunkProgress: String = ""
 
+    @Published var isPaused: Bool = false
+
     var onDismiss: (() -> Void)?
     var onStop: (() -> Void)?
+    var onPlayPause: (() -> Void)?
     var onWebSearchToggled: ((Bool) -> Void)?
     var onExportMarkdown: (() -> Void)?
 
     func update(state: PodcastState) {
         self.state = state
+        // Reset pause when state changes away from playing (e.g. interrupt, buffering)
+        if state != .playing {
+            isPaused = false
+        }
     }
 
     func updateTitle(_ title: String) {
@@ -88,6 +95,17 @@ struct PodcastOverlayView: View {
                 stateBadge
 
                 if viewModel.state == .playing || viewModel.state == .complete {
+                    Button(action: {
+                        viewModel.isPaused.toggle()
+                        viewModel.onPlayPause?()
+                    }) {
+                        Image(systemName: viewModel.isPaused ? "play.fill" : "pause.fill")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 13))
+                    }
+                    .buttonStyle(.plain)
+                    .help(viewModel.isPaused ? "Resume" : "Pause")
+
                     Button(action: { viewModel.onExportMarkdown?() }) {
                         Image(systemName: "arrow.down.doc")
                             .foregroundColor(.secondary)
@@ -232,8 +250,17 @@ struct PodcastOverlayView: View {
             .onChange(of: viewModel.activeLineId) { lineId in
                 if let lineId = lineId {
                     withAnimation(.easeOut(duration: 0.3)) {
-                        // Anchor to top third of scroll area
                         proxy.scrollTo(lineId, anchor: .top)
+                    }
+                }
+            }
+            .onChange(of: viewModel.transcript.count) { _ in
+                // When transcript changes (e.g. interrupt marker added),
+                // scroll to the last interrupt marker so it sits at the top
+                if let lastMarker = viewModel.transcript.last(where: { $0.isInterruptMarker }),
+                   viewModel.state == .processingInterrupt || viewModel.state == .listening {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(lastMarker.id, anchor: .top)
                     }
                 }
             }
@@ -368,6 +395,9 @@ struct PodcastOverlayView: View {
         case .ingesting: return ("Scripting", .orange)
         case .buffering: return ("Buffering", .orange)
         case .playing:
+            if viewModel.isPaused {
+                return ("Paused", .yellow)
+            }
             let label = viewModel.chunkProgress.isEmpty ? "Playing" : "Playing \(viewModel.chunkProgress)"
             return (label, .green)
         case .listening: return ("Listening", .red)
@@ -384,6 +414,7 @@ class PodcastOverlayWindow {
     private var panel: NSPanel?
     let viewModel = PodcastOverlayViewModel()
     var onStop: (() -> Void)?
+    var onPlayPause: (() -> Void)?
 
     init() {
         viewModel.onDismiss = { [weak self] in
@@ -391,6 +422,9 @@ class PodcastOverlayWindow {
         }
         viewModel.onStop = { [weak self] in
             self?.onStop?()
+        }
+        viewModel.onPlayPause = { [weak self] in
+            self?.onPlayPause?()
         }
         viewModel.onExportMarkdown = { [weak self] in
             self?.exportMarkdown()
@@ -461,6 +495,15 @@ class PodcastOverlayWindow {
             let savePanel = NSSavePanel()
             savePanel.allowedContentTypes = [.init(filenameExtension: "md")!]
             savePanel.nameFieldStringValue = "\(viewModel.title).md"
+            savePanel.level = .floating + 1
+            // Center on screen
+            if let screen = NSScreen.main {
+                let screenFrame = screen.frame
+                let panelSize = NSSize(width: 500, height: 300)
+                let x = screenFrame.midX - panelSize.width / 2
+                let y = screenFrame.midY - panelSize.height / 2
+                savePanel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: panelSize), display: true)
+            }
             savePanel.begin { response in
                 if response == .OK, let url = savePanel.url {
                     try? md.write(to: url, atomically: true, encoding: .utf8)

@@ -39,7 +39,19 @@ public class AudioDeviceManager: ObservableObject {
     }
 
     deinit {
-        NotificationCenter.default.removeObserver(self)
+        if let block = listenerBlock {
+            var devicesAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &devicesAddr,
+                nil,
+                block
+            )
+        }
     }
     
     private func loadPreferences() {
@@ -56,24 +68,48 @@ public class AudioDeviceManager: ObservableObject {
         userDefaults.set(selectedOutputDeviceUID, forKey: outputDeviceKey)
     }
     
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+
     private func setupNotifications() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleDeviceChange),
-            name: .AVAudioEngineConfigurationChange,
-            object: nil
+        // Use CoreAudio property listener — much more reliable than AVAudioEngine
+        // notifications for detecting Bluetooth / AirPods connections
+        var devicesAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.refreshDeviceList()
+            }
+        }
+        listenerBlock = block
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &devicesAddr,
+            nil,
+            block
         )
     }
     
-    @objc private func handleDeviceChange() {
-        DispatchQueue.main.async { [weak self] in
-            self?.refreshDeviceList()
-        }
-    }
-    
     public func refreshDeviceList() {
-        availableInputDevices = [AudioDevice.systemDefault] + getAllAudioDevices().filter { $0.isInput }
-        availableOutputDevices = [AudioDevice.systemDefault] + getAllAudioDevices().filter { $0.isOutput }
+        let allDevices = getAllAudioDevices()
+        availableInputDevices = [AudioDevice.systemDefault] + allDevices.filter { $0.isInput }
+        availableOutputDevices = [AudioDevice.systemDefault] + allDevices.filter { $0.isOutput }
+
+        // Fall back to system default if selected device was removed
+        if !useSystemDefaultInput,
+           let uid = selectedInputDeviceUID,
+           !allDevices.contains(where: { $0.uid == uid && $0.isInput }) {
+            useSystemDefaultInput = true
+            savePreferences()
+        }
+        if !useSystemDefaultOutput,
+           let uid = selectedOutputDeviceUID,
+           !allDevices.contains(where: { $0.uid == uid && $0.isOutput }) {
+            useSystemDefaultOutput = true
+            savePreferences()
+        }
     }
     
     private func getAllAudioDevices() -> [AudioDevice] {
@@ -124,10 +160,32 @@ public class AudioDeviceManager: ObservableObject {
         let name = getDeviceName(deviceID: deviceID) ?? "Unknown Device"
         let isInput = hasInputChannels(deviceID: deviceID)
         let isOutput = hasOutputChannels(deviceID: deviceID)
-        
+
         guard !uid.isEmpty && (isInput || isOutput) else { return nil }
-        
+
+        // Filter out virtual aggregate devices (e.g. CADefaultDeviceAggregate)
+        // that macOS creates internally — they don't appear in System Settings
+        let transport = getTransportType(deviceID: deviceID)
+        if transport == kAudioDeviceTransportTypeAggregate {
+            return nil
+        }
+
         return AudioDevice(uid: uid, name: name, isInput: isInput, isOutput: isOutput)
+    }
+
+    private func getTransportType(deviceID: AudioDeviceID) -> UInt32 {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transportType: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID, &propertyAddress, 0, nil, &dataSize, &transportType
+        )
+        guard status == noErr else { return 0 }
+        return transportType
     }
     
     private func getDeviceUID(deviceID: AudioDeviceID) -> String? {

@@ -184,10 +184,22 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         player?.play()
     }
 
+    /// Cancel an in-progress interrupt and resume podcast flow.
+    /// Used when the user's recording fails or is cancelled.
+    func cancelInterrupt() {
+        isPlayingInterruptResponse = false
+        state = .buffering
+        requestNextChunk()
+    }
+
     /// Called when the user starts recording an interrupt (double-tap).
     /// Stops playback, freezes transcript, and discards stale prefetch.
     func beginInterrupt() {
-        pausePlayback()
+        // Stop (not pause) — we never resume this audio
+        player?.stop()
+        player = nil
+        cancelLineAdvanceTimers()
+        state = .listening
 
         // Discard stale prefetch — server will invalidate all chunks after current
         if let prefetchURL = prefetchedAudioURL {
@@ -367,8 +379,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
         case "SCRIPT_UPDATED":
             if let remaining = json["remaining_chunks"] as? Int {
-                totalChunks = currentChunkIndex + remaining
-                NSLog("Podcast: script updated, \(remaining) chunks remaining")
+                totalChunks = currentChunkIndex + 1 + remaining
+                NSLog("Podcast: script updated, \(remaining) chunks remaining, totalChunks=\(totalChunks)")
+                delegate?.podcastDidUpdateChunkProgress(current: currentChunkIndex + 1, total: totalChunks)
             }
 
         case "ERROR":

@@ -58,6 +58,20 @@ async def generate_audio(
     return filename
 
 
+async def interrupt_comfyui() -> None:
+    """Interrupt the currently running ComfyUI job immediately.
+
+    POST /interrupt stops whatever is on the GPU right now.
+    Use this when a user interrupt arrives to free the GPU fast.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(f"{cfg.COMFYUI_BASE_URL}/interrupt")
+        log.info("Sent /interrupt to ComfyUI")
+    except Exception:
+        log.exception("Failed to interrupt ComfyUI")
+
+
 async def cancel_session_prompts(session_id: str) -> None:
     """Cancel all queued/running ComfyUI prompts for a session."""
     prompt_ids = active_prompts.pop(session_id, set())
@@ -158,7 +172,12 @@ async def _poll_until_complete(prompt_id: str, timeout: float = 300) -> str:
             history = resp.json()
 
             if prompt_id in history:
-                outputs = history[prompt_id].get("outputs", {})
+                entry = history[prompt_id]
+                # Check if the prompt was interrupted
+                status = entry.get("status", {})
+                if status.get("status_str") == "error" or not entry.get("outputs"):
+                    raise RuntimeError(f"ComfyUI prompt {prompt_id} was interrupted or failed")
+                outputs = entry.get("outputs", {})
                 for node_id, node_out in outputs.items():
                     if "audio" in node_out:
                         return node_out["audio"][0]["filename"]

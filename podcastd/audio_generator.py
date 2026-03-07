@@ -14,13 +14,13 @@ log = logging.getLogger(__name__)
 active_prompts: dict[str, set[str]] = {}  # session_id → {prompt_id, ...}
 
 # Client preset key → (comfyui_model_dir, quantize_llm)
-# large-fp/large-q4 use pre-quantized checkpoints, so quantize_llm = "full precision"
-# 1.5b-q4 uses dynamic 4-bit quantization (no pre-quantized checkpoint exists)
+# All models use "full precision" for quantize_llm since they are either
+# full-precision checkpoints or pre-quantized (Q8/Q4) checkpoints.
 MODEL_PRESETS: dict[str, tuple[str, str]] = {
-    "large-fp": ("VibeVoice-Large-Q8", "full precision"),
+    "large-fp": ("VibeVoice-Large", "full precision"),
+    "large-q8": ("VibeVoice-Large-Q8", "full precision"),
     "large-q4": ("VibeVoice7b-low-vram", "full precision"),
     "1.5b-fp": ("VibeVoice-1.5B", "full precision"),
-    "1.5b-q4": ("VibeVoice-1.5B", "4bit"),
 }
 DEFAULT_PRESET = "large-q4"
 

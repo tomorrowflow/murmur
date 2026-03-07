@@ -196,14 +196,13 @@ The client uses `speaker` and `text` fields to render the overlay transcript. Mi
 
 | Preset Key | ComfyUI Model Dir | `quantize_llm` | ~VRAM | Use Case |
 |---|---|---|---|---|
-| `large-fp` | `VibeVoice-Large-Q8` | `full precision` | ~12 GB | Best quality, slowest (pre-quantized Q8 checkpoint) |
+| `large-fp` | `VibeVoice-Large` | `full precision` | ~19 GB | Best quality, slowest (full precision) |
+| `large-q8` | `VibeVoice-Large-Q8` | `full precision` | ~12 GB | Great quality (pre-quantized Q8 checkpoint) |
 | `large-q4` | `VibeVoice7b-low-vram` | `full precision` | ~7 GB | Good quality, moderate speed (pre-quantized Q4 checkpoint) |
-| `1.5b-fp` | `VibeVoice-1.5B` | `full precision` | ~6 GB | Good quality, faster |
-| `1.5b-q4` | `VibeVoice-1.5B` | `4bit` | ~4 GB | Fast, lowest VRAM (dynamic LLM quantization) |
+| `1.5b-fp` | `VibeVoice-1.5B` | `full precision` | ~6 GB | Fastest, good quality |
 
 - Server-side `MODEL_PRESETS` maps these keys to `(comfyui_model, quantize_llm)` tuples for the ComfyUI workflow.
-- `large-fp` and `large-q4` use pre-quantized checkpoints (Q8 and Q4 respectively), so `quantize_llm` is `"full precision"` — the quantization is already baked in.
-- `1.5b-q4` uses the full `VibeVoice-1.5B` model with dynamic 4-bit quantization via the node's `quantize_llm` parameter (no pre-quantized 1.5B-Q4 checkpoint exists).
+- All presets use `quantize_llm: "full precision"` — the Large Q8 and Q4 variants have quantization already baked into the checkpoint.
 - If the key is not recognized, fall back to `large-q4`.
 
 **`PROGRESS`** — real-time generation progress updates:

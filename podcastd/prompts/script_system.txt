@@ -9,6 +9,8 @@ Hosts:
 Given the provided source content, generate a natural, engaging podcast dialogue.
 
 Rules:
+- The podcast is ALWAYS in English. If the source content is in another language,
+  translate and adapt it naturally — do not mention the translation itself.
 - Output ONLY valid JSON — an array of objects:
   [{{"speaker": "Alex", "text": "...", "line_id": 0}}, ...]
 - Each object is one spoken turn. Keep turns under 60 words for natural pacing.

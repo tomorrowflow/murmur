@@ -43,6 +43,23 @@ struct PodcastSettingsView: View {
                     .labelsHidden()
                 }
 
+                Section("Model") {
+                    HStack(spacing: 8) {
+                        Text("VibeVoice Model")
+                            .frame(width: 120, alignment: .leading)
+                        Picker("", selection: $viewModel.selectedModel) {
+                            Text("Large — Full Precision").tag("large-fp")
+                            Text("Large — Q4").tag("large-q4")
+                            Text("1.5B — Full Precision").tag("1.5b-fp")
+                            Text("1.5B — Q4").tag("1.5b-q4")
+                        }
+                        .labelsHidden()
+                    }
+                    Text("Larger models produce better quality but take longer. Q4 reduces VRAM usage.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+
                 Section("Features") {
                     Toggle(isOn: $viewModel.webSearchEnabled) {
                         HStack {
@@ -88,6 +105,7 @@ class PodcastSettingsViewModel: ObservableObject {
     @Published var audioBaseURL: String = ""
     @Published var hostAName: String = ""
     @Published var hostBName: String = ""
+    @Published var selectedModel: String = "large-q4"
     @Published var webSearchEnabled: Bool = false
     @Published var statusText: String = "Not configured"
     @Published var statusColor: Color = .gray
@@ -98,6 +116,7 @@ class PodcastSettingsViewModel: ObservableObject {
         audioBaseURL = defaults.string(forKey: "podcast.audioBaseURL") ?? ""
         hostAName = defaults.string(forKey: "podcast.hostAName") ?? ""
         hostBName = defaults.string(forKey: "podcast.hostBName") ?? ""
+        selectedModel = defaults.string(forKey: "podcast.model") ?? "large-q4"
         webSearchEnabled = defaults.bool(forKey: "podcast.webSearchEnabled")
         refreshStatus()
     }
@@ -108,6 +127,7 @@ class PodcastSettingsViewModel: ObservableObject {
         defaults.set(audioBaseURL, forKey: "podcast.audioBaseURL")
         defaults.set(hostAName, forKey: "podcast.hostAName")
         defaults.set(hostBName, forKey: "podcast.hostBName")
+        defaults.set(selectedModel, forKey: "podcast.model")
         defaults.set(webSearchEnabled, forKey: "podcast.webSearchEnabled")
         refreshStatus()
     }

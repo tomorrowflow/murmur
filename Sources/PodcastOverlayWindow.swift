@@ -8,11 +8,16 @@ class PodcastOverlayViewModel: ObservableObject {
     @Published var title: String = ""
     @Published var transcript: [ScriptLine] = []
     @Published var activeSpeaker: String = ""
+    @Published var activeLineId: UUID?
     @Published var webSearchEnabled: Bool = UserDefaults.standard.bool(forKey: "podcast.webSearchEnabled")
+    @Published var progressMessage: String = ""
+    @Published var progressPercent: Int = -1
+    @Published var chunkProgress: String = ""
 
     var onDismiss: (() -> Void)?
     var onStop: (() -> Void)?
     var onWebSearchToggled: ((Bool) -> Void)?
+    var onExportMarkdown: (() -> Void)?
 
     func update(state: PodcastState) {
         self.state = state
@@ -29,17 +34,37 @@ class PodcastOverlayViewModel: ObservableObject {
         }
     }
 
+    func activateLine(_ lineId: UUID) {
+        self.activeLineId = lineId
+        if let line = transcript.first(where: { $0.id == lineId }) {
+            self.activeSpeaker = line.speaker
+        }
+    }
+
+    func updateProgress(message: String, percent: Int) {
+        self.progressMessage = message
+        self.progressPercent = percent
+    }
+
+    func updateChunkProgress(current: Int, total: Int) {
+        if total > 0 {
+            self.chunkProgress = "\(current)/\(total)"
+        } else {
+            self.chunkProgress = ""
+        }
+    }
+
     func dismiss() {
+        onStop?()
         state = .idle
         transcript = []
         title = ""
         activeSpeaker = ""
+        activeLineId = nil
+        progressMessage = ""
+        progressPercent = -1
+        chunkProgress = ""
         onDismiss?()
-    }
-
-    func stop() {
-        onStop?()
-        dismiss()
     }
 }
 
@@ -62,13 +87,15 @@ struct PodcastOverlayView: View {
 
                 stateBadge
 
-                Button(action: { viewModel.stop() }) {
-                    Image(systemName: "stop.circle.fill")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: 14))
+                if viewModel.state == .playing || viewModel.state == .complete {
+                    Button(action: { viewModel.onExportMarkdown?() }) {
+                        Image(systemName: "arrow.down.doc")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 13))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Export transcript as Markdown")
                 }
-                .buttonStyle(.plain)
-                .help("Stop podcast")
 
                 Button(action: { viewModel.dismiss() }) {
                     Image(systemName: "xmark.circle.fill")
@@ -76,6 +103,7 @@ struct PodcastOverlayView: View {
                         .font(.system(size: 14))
                 }
                 .buttonStyle(.plain)
+                .help("Stop and close")
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 6)
@@ -100,22 +128,10 @@ struct PodcastOverlayView: View {
                     EmptyView()
 
                 case .connecting, .ingesting:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text(viewModel.state == .connecting ? "Connecting..." : "Generating script...")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    progressContent(defaultMessage: viewModel.state == .connecting ? "Connecting..." : "Generating script...")
 
                 case .buffering:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Buffering...")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    progressContent(defaultMessage: "Buffering...")
 
                 case .playing, .complete:
                     VStack(spacing: 0) {
@@ -160,34 +176,96 @@ struct PodcastOverlayView: View {
 
     private var transcriptView: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    let visibleLines = Array(viewModel.transcript.suffix(6))
-                    ForEach(visibleLines) { line in
-                        HStack(alignment: .top, spacing: 6) {
-                            Text(line.speaker)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(speakerColor(line.speaker))
-                                .frame(width: 50, alignment: .trailing)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(viewModel.transcript) { line in
+                        if line.isInterruptMarker {
+                            // Interrupt marker
+                            HStack(spacing: 6) {
+                                Rectangle()
+                                    .fill(Color.orange.opacity(0.5))
+                                    .frame(height: 1)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "hand.raised.fill")
+                                        .font(.system(size: 9))
+                                    Text(line.text)
+                                        .font(.system(size: 10, weight: .medium))
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                }
+                                .foregroundColor(.orange)
+                                .layoutPriority(1)
+                                Rectangle()
+                                    .fill(Color.orange.opacity(0.5))
+                                    .frame(height: 1)
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 4)
+                            .id(line.id)
+                        } else {
+                            let isActive = line.id == viewModel.activeLineId
+                            let isPast = isPastLine(line)
+                            HStack(alignment: .top, spacing: 6) {
+                                Text(line.speaker)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(isActive ? speakerColor(line.speaker) : (isPast ? .secondary.opacity(0.4) : .secondary.opacity(0.6)))
+                                    .frame(width: 50, alignment: .trailing)
 
-                            Text(line.text)
-                                .font(.system(size: 12))
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(line.text)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(isActive ? .primary : (isPast ? .secondary.opacity(0.45) : .primary.opacity(0.7)))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.vertical, 2)
+                            .padding(.horizontal, 4)
+                            .background(isActive ? Color.accentColor.opacity(0.1) : Color.clear)
+                            .cornerRadius(4)
+                            .id(line.id)
                         }
-                        .id(line.id)
                     }
                 }
-                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 8)
             }
-            .onChange(of: viewModel.transcript.count) { _ in
-                if let last = viewModel.transcript.last {
-                    withAnimation {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+            .onChange(of: viewModel.activeLineId) { lineId in
+                if let lineId = lineId {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        // Anchor to top third of scroll area
+                        proxy.scrollTo(lineId, anchor: .top)
                     }
                 }
             }
         }
+    }
+
+    private func isPastLine(_ line: ScriptLine) -> Bool {
+        guard let activeId = viewModel.activeLineId,
+              let activeIndex = viewModel.transcript.firstIndex(where: { $0.id == activeId }),
+              let lineIndex = viewModel.transcript.firstIndex(where: { $0.id == line.id }) else {
+            return false
+        }
+        return lineIndex < activeIndex
+    }
+
+    // MARK: - Progress Content
+
+    private func progressContent(defaultMessage: String) -> some View {
+        VStack(spacing: 8) {
+            if viewModel.progressPercent >= 0 {
+                ProgressView(value: Double(viewModel.progressPercent), total: 100)
+                    .controlSize(.small)
+                    .frame(width: 200)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Text(viewModel.progressMessage.isEmpty ? defaultMessage : viewModel.progressMessage)
+                .foregroundColor(.secondary)
+                .font(.system(size: 12))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Listening / Processing indicators
@@ -264,8 +342,8 @@ struct PodcastOverlayView: View {
         case .idle: return 0
         case .connecting, .ingesting, .buffering: return 100
         case .error: return 120
-        case .playing, .complete: return 260
-        case .listening, .processingInterrupt: return 290
+        case .playing, .complete: return 300
+        case .listening, .processingInterrupt: return 330
         }
     }
 
@@ -289,7 +367,9 @@ struct PodcastOverlayView: View {
         case .connecting: return ("Connecting", .orange)
         case .ingesting: return ("Scripting", .orange)
         case .buffering: return ("Buffering", .orange)
-        case .playing: return ("Playing", .green)
+        case .playing:
+            let label = viewModel.chunkProgress.isEmpty ? "Playing" : "Playing \(viewModel.chunkProgress)"
+            return (label, .green)
         case .listening: return ("Listening", .red)
         case .processingInterrupt: return ("Processing", .orange)
         case .complete: return ("Complete", .blue)
@@ -311,6 +391,9 @@ class PodcastOverlayWindow {
         }
         viewModel.onStop = { [weak self] in
             self?.onStop?()
+        }
+        viewModel.onExportMarkdown = { [weak self] in
+            self?.exportMarkdown()
         }
     }
 
@@ -346,6 +429,46 @@ class PodcastOverlayWindow {
         }
     }
 
+    func activateLine(_ lineId: UUID) {
+        DispatchQueue.main.async { [self] in
+            viewModel.activateLine(lineId)
+        }
+    }
+
+    func updateProgress(message: String, percent: Int) {
+        DispatchQueue.main.async { [self] in
+            viewModel.updateProgress(message: message, percent: percent)
+        }
+    }
+
+    func updateChunkProgress(current: Int, total: Int) {
+        DispatchQueue.main.async { [self] in
+            viewModel.updateChunkProgress(current: current, total: total)
+        }
+    }
+
+    func exportMarkdown() {
+        DispatchQueue.main.async { [self] in
+            var md = "# Podcast: \(viewModel.title)\n\n"
+            for line in viewModel.transcript {
+                if line.isInterruptMarker {
+                    md += "\n---\n*Interrupt: \(line.text)*\n---\n\n"
+                } else {
+                    md += "**\(line.speaker):** \(line.text)\n\n"
+                }
+            }
+
+            let savePanel = NSSavePanel()
+            savePanel.allowedContentTypes = [.init(filenameExtension: "md")!]
+            savePanel.nameFieldStringValue = "\(viewModel.title).md"
+            savePanel.begin { response in
+                if response == .OK, let url = savePanel.url {
+                    try? md.write(to: url, atomically: true, encoding: .utf8)
+                }
+            }
+        }
+    }
+
     func dismiss() {
         DispatchQueue.main.async { [self] in
             viewModel.dismiss()
@@ -365,6 +488,7 @@ class PodcastOverlayWindow {
         )
 
         panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
@@ -385,8 +509,8 @@ class PodcastOverlayWindow {
         guard let panel = panel, let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
         let panelHeight = panel.frame.height
-        // Position top-right, below menu bar
-        let x = screenFrame.maxX - 380 - 20
+        // Center horizontally, top of screen (same position as OpenClaw overlay)
+        let x = (screenFrame.width - 380) / 2 + screenFrame.minX
         let y = screenFrame.maxY - panelHeight - 40
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }

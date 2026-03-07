@@ -140,7 +140,7 @@ All messages are JSON with a `type` field.
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `INGEST` | `{content_type, content, subject?, web_search?}` | Start new session |
+| `INGEST` | `{content_type, content, subject?, web_search?, model?}` | Start new session |
 | `NEXT_CHUNK` | `{session_id}` | Request next audio chunk |
 | `INTERRUPT` | `{session_id, question}` | User interrupted with voice question |
 | `STOP` | `{session_id}` | End session, clean up audio files |
@@ -155,6 +155,7 @@ All messages are JSON with a `type` field.
 | `INTERRUPT_PROCESSING` | `{session_id, state: "processing"}` | Working on interrupt |
 | `INTERRUPT_READY` | `{session_id, audio_url, transcript}` | Interrupt response ready |
 | `SCRIPT_UPDATED` | `{session_id, remaining_chunks}` | LLM revised remaining script |
+| `PROGRESS` | `{session_id, stage, percent, message}` | Generation progress update |
 | `ERROR` | `{code, message}` | Error with details |
 | `PONG` | `{}` | Keepalive reply |
 
@@ -189,6 +190,34 @@ The client uses `speaker` and `text` fields to render the overlay transcript. Mi
 - A bare filename (`chunk_0.wav`) — the client prepends `{audioBaseURL}/audio/`
 
 **`SESSION_CREATED`** — `total_chunks` is used for progress tracking. If the script is revised after an interrupt, send `SCRIPT_UPDATED` with the new `remaining_chunks` count so the client updates its total.
+
+**`INGEST`** — `model` (string, optional, default `"large-q4"`):
+- Selects the VibeVoice model preset for audio generation. Valid values:
+
+| Preset Key | ComfyUI Model | Quantization | VRAM | Use Case |
+|---|---|---|---|---|
+| `large-fp` | `VibeVoice-Large` | Full precision | ~17 GB | Best quality, slowest |
+| `large-q4` | `VibeVoice-Large` | Q4 (LLM only) | ~8 GB | Good quality, moderate speed |
+| `1.5b-fp` | `VibeVoice-1.5B` | Full precision | ~6 GB | Good quality, faster |
+| `1.5b-q4` | `VibeVoice-1.5B` | Q4 (LLM only) | ~4 GB | Fast, lowest VRAM |
+
+- Server-side `MODEL_MAP` should map these keys to `(model_name, quantize_llm)` tuples for the ComfyUI workflow.
+- If the key is not recognized, fall back to the server's default model config.
+
+**`PROGRESS`** — real-time generation progress updates:
+```json
+{
+  "type": "PROGRESS",
+  "session_id": "...",
+  "stage": "scripting",
+  "percent": -1,
+  "message": "Generating script..."
+}
+```
+- `stage`: one of `"scripting"`, `"audio_generating"`, `"downloading"`
+- `percent`: `-1` = indeterminate (client shows spinner), `0-100` = determinate (client shows progress bar)
+- `message`: human-readable status string displayed in the overlay
+- Server should emit PROGRESS before each major operation (LLM call, ComfyUI generation, etc.)
 
 **`ERROR`** — include a `code` field for programmatic handling. Suggested codes:
 - `INGEST_FAILED` — content fetch/parse failed

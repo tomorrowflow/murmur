@@ -164,7 +164,33 @@ struct PodcastOverlayView: View {
                     progressContent(defaultMessage: viewModel.state == .connecting ? "Connecting..." : "Generating script...")
 
                 case .buffering:
-                    progressContent(defaultMessage: "Buffering...")
+                    if !viewModel.transcript.isEmpty {
+                        // Mid-session buffering — show transcript with progress at bottom
+                        VStack(spacing: 0) {
+                            transcriptView
+                            Divider()
+                            HStack(spacing: 8) {
+                                if viewModel.progressPercent >= 0 {
+                                    ProgressView(value: Double(viewModel.progressPercent), total: 100)
+                                        .controlSize(.small)
+                                        .frame(width: 100)
+                                } else {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                                Text(viewModel.progressMessage.isEmpty ? "Buffering..." : viewModel.progressMessage)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                        }
+                    } else {
+                        progressContent(defaultMessage: "Buffering...")
+                    }
 
                 case .playing, .complete:
                     VStack(spacing: 0) {
@@ -185,7 +211,7 @@ struct PodcastOverlayView: View {
                     VStack(spacing: 0) {
                         transcriptView
                         Divider()
-                        processingIndicator
+                        interruptProgressIndicator
                     }
 
                 case .error(let msg):
@@ -342,6 +368,30 @@ struct PodcastOverlayView: View {
         .background(Color.orange.opacity(0.05))
     }
 
+    private var interruptProgressIndicator: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 8) {
+                if viewModel.progressPercent >= 0 {
+                    ProgressView(value: Double(viewModel.progressPercent), total: 100)
+                        .controlSize(.small)
+                        .frame(width: 100)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(viewModel.progressMessage.isEmpty ? "Hosts are thinking..." : viewModel.progressMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.05))
+    }
+
     private var pttHint: some View {
         VStack(spacing: 0) {
             Divider()
@@ -382,7 +432,8 @@ struct PodcastOverlayView: View {
     private var dynamicHeight: CGFloat {
         switch viewModel.state {
         case .idle: return 0
-        case .connecting, .ingesting, .buffering: return 100
+        case .connecting, .ingesting: return 100
+        case .buffering: return viewModel.transcript.isEmpty ? 100 : 330
         case .error: return 120
         case .playing, .complete: return 300
         case .listening, .processingInterrupt: return 330

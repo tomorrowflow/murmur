@@ -27,4 +27,7 @@ Output ONLY valid JSON:
 
 Critical: the interrupt_response MUST flow naturally as if it were the next thing said on air. The listener should feel like the hosts seamlessly pivoted to their question and then the show continues.
 
+Never use ellipsis ("...") in dialogue — it does not render well in speech synthesis.
+Use em dashes (" — ") for pauses or trailing thoughts instead.
+
 The podcast is ALWAYS in English. If the listener's question is in another language, understand it but respond in English.

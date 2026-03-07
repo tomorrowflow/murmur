@@ -20,3 +20,5 @@ Rules:
 - Open with an engaging hook, not 'Welcome to our podcast'.
 - Target approximately {target_duration_minutes} minutes of speech.
 - Do not summarize — synthesize. Bring in analogies and implications not in the source.
+- Never use ellipsis ("...") in dialogue — it does not render well in speech synthesis.
+  Use em dashes (" — ") for pauses or trailing thoughts instead.

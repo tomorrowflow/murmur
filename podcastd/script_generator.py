@@ -84,7 +84,48 @@ def _repair_json(text: str) -> str:
     import re
     # Remove trailing commas before ] or }
     text = re.sub(r",\s*([}\]])", r"\1", text)
+    # Fix unescaped double quotes inside JSON string values.
+    # Walk character by character: when inside a string, any quote that isn't
+    # followed by a structural char (, : } ]) or preceded by a structural char
+    # (: , { [) is likely an inner quote that needs escaping.
+    text = _fix_inner_quotes(text)
     return text
+
+
+def _fix_inner_quotes(text: str) -> str:
+    """Escape unescaped double quotes that appear inside JSON string values."""
+    result = []
+    i = 0
+    in_string = False
+    while i < len(text):
+        ch = text[i]
+        if ch == '\\' and in_string:
+            # Escaped character — pass through both chars
+            result.append(text[i:i+2])
+            i += 2
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                result.append(ch)
+            else:
+                # Is this the real closing quote or an inner quote?
+                # Look ahead: skip whitespace, then expect a structural char
+                j = i + 1
+                while j < len(text) and text[j] in ' \t\n\r':
+                    j += 1
+                if j >= len(text) or text[j] in ',}]:':
+                    # Structural char follows — this is the real closing quote
+                    in_string = False
+                    result.append(ch)
+                else:
+                    # Not followed by structural char — inner quote, escape it
+                    result.append('\\"')
+            i += 1
+        else:
+            result.append(ch)
+            i += 1
+    return ''.join(result)
 
 
 def _repair_truncated_json(text: str) -> str:

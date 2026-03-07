@@ -40,6 +40,24 @@ work_tasks: dict[str, list[asyncio.Task]] = {}
 chunk_delivery_active: set[str] = set()
 
 
+# ---------- Progress Reporting ----------
+
+
+def _make_progress_cb(websocket, session_id: str, chunk_label: str):
+    """Return a callback that sends PROGRESS messages with diffusion step info."""
+    def on_progress(step: int, max_steps: int, elapsed: float):
+        pct = int(step / max_steps * 100) if max_steps else -1
+        msg = f"Generating audio ({chunk_label}) — step {step}/{max_steps} ({elapsed:.0f}s)"
+        asyncio.create_task(_safe_send(websocket, {
+            "type": "PROGRESS",
+            "session_id": session_id,
+            "stage": "audio_generating",
+            "percent": pct,
+            "message": msg,
+        }))
+    return on_progress
+
+
 # ---------- Safe Send ----------
 
 
@@ -169,10 +187,12 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             "stage": "audio_generating", "percent": -1,
             "message": f"Generating audio (chunk 1/{len(session.chunks)})...",
         })
+        progress_cb = _make_progress_cb(websocket, session.session_id, f"chunk 1/{len(session.chunks)}")
         async with gpu_lock:
             audio_file = await generate_audio(
                 session.chunks[0], model=chunk_model,
                 quantize_llm=chunk_quantize, session_id=session.session_id,
+                on_progress=progress_cb,
             )
         session.chunk_audio_files[0] = audio_file
         session.state = SessionState.READY
@@ -258,12 +278,14 @@ async def _deliver_next_chunk_inner(websocket, session: PodcastSession) -> None:
             "stage": "audio_generating", "percent": -1,
             "message": f"Generating audio (chunk {next_idx + 1}/{len(session.chunks)})...",
         })
+        progress_cb = _make_progress_cb(websocket, sid, f"chunk {next_idx + 1}/{len(session.chunks)}")
         async with gpu_lock:
             if sid not in sessions:
                 return  # session gone while waiting for lock
             audio_file = await generate_audio(
                 session.chunks[next_idx], model=chunk_model,
                 quantize_llm=chunk_quantize, session_id=sid,
+                on_progress=progress_cb,
             )
         session.chunk_audio_files[next_idx] = audio_file
 
@@ -300,10 +322,11 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
         return  # connection dead, no point continuing
 
     try:
+        progress_cb = _make_progress_cb(websocket, session.session_id, "interrupt")
         async with gpu_lock:
             if session.session_id not in sessions:
                 return  # session gone while waiting for lock
-            audio_file, response_lines = await handle_interrupt(session, question)
+            audio_file, response_lines = await handle_interrupt(session, question, on_progress=progress_cb)
 
         if session.session_id not in sessions:
             return

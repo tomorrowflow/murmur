@@ -9,7 +9,7 @@ import websockets
 
 from aiohttp import web
 
-from audio_generator import cancel_session_prompts, generate_audio
+from audio_generator import cancel_session_prompts, generate_audio, resolve_preset
 from chunk_manager import split_into_chunks
 from config import cfg
 from ingest import ingest_email, ingest_pdf, ingest_url
@@ -127,6 +127,9 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
     content = msg.get("content", "")
     subject = msg.get("subject", "")
     session.web_search_enabled = msg.get("web_search", False)
+    session.model_preset = msg.get("model", "large-q4")
+
+    chunk_model, chunk_quantize = resolve_preset(session.model_preset)
 
     try:
         # Ingest content
@@ -145,6 +148,10 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
         session.state = SessionState.SCRIPTING
 
         # Generate script
+        await _safe_send(websocket, {
+            "type": "PROGRESS", "session_id": session.session_id,
+            "stage": "scripting", "percent": -1, "message": "Generating script...",
+        })
         title, script = await generate_script(text)
         session.title = title
         session.original_script = script
@@ -152,8 +159,16 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
         session.state = SessionState.GENERATING
 
         # Generate first chunk audio (serialised via GPU lock)
+        await _safe_send(websocket, {
+            "type": "PROGRESS", "session_id": session.session_id,
+            "stage": "audio_generating", "percent": -1,
+            "message": f"Generating audio (chunk 1/{len(session.chunks)})...",
+        })
         async with gpu_lock:
-            audio_file = await generate_audio(session.chunks[0], session_id=session.session_id)
+            audio_file = await generate_audio(
+                session.chunks[0], model=chunk_model,
+                quantize_llm=chunk_quantize, session_id=session.session_id,
+            )
         session.chunk_audio_files[0] = audio_file
         session.state = SessionState.READY
 
@@ -218,8 +233,17 @@ async def _deliver_next_chunk(websocket, session: PodcastSession) -> None:
     else:
         # Generate on demand (prefetch missed or failed)
         log.info("On-demand generation for chunk %d", next_idx)
+        chunk_model, chunk_quantize = resolve_preset(session.model_preset)
+        await _safe_send(websocket, {
+            "type": "PROGRESS", "session_id": session.session_id,
+            "stage": "audio_generating", "percent": -1,
+            "message": f"Generating audio (chunk {next_idx + 1}/{len(session.chunks)})...",
+        })
         async with gpu_lock:
-            audio_file = await generate_audio(session.chunks[next_idx], session_id=session.session_id)
+            audio_file = await generate_audio(
+                session.chunks[next_idx], model=chunk_model,
+                quantize_llm=chunk_quantize, session_id=session.session_id,
+            )
         session.chunk_audio_files[next_idx] = audio_file
 
     session.current_chunk_index = next_idx
@@ -332,8 +356,12 @@ async def _prefetch_chunk(session: PodcastSession, chunk_idx: int) -> None:
     try:
         if chunk_idx >= len(session.chunks):
             return
+        chunk_model, chunk_quantize = resolve_preset(session.model_preset)
         async with gpu_lock:
-            audio_file = await generate_audio(session.chunks[chunk_idx], session_id=session.session_id)
+            audio_file = await generate_audio(
+                session.chunks[chunk_idx], model=chunk_model,
+                quantize_llm=chunk_quantize, session_id=session.session_id,
+            )
         session.chunk_audio_files[chunk_idx] = audio_file
         log.info("Prefetched chunk %d: %s", chunk_idx, audio_file)
     except asyncio.CancelledError:

@@ -34,6 +34,7 @@ class PodcastSession:
 
     # Options (set per session from INGEST message)
     web_search_enabled: bool = False
+    model_preset: str = "large-q4"
 
     # History for interrupt context
     delivered_lines: list[dict] = field(default_factory=list)

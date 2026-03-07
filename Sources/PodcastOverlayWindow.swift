@@ -21,6 +21,7 @@ class PodcastOverlayViewModel: ObservableObject {
     var onPlayPause: (() -> Void)?
     var onWebSearchToggled: ((Bool) -> Void)?
     var onExportMarkdown: (() -> Void)?
+    var onExportAudio: (() -> Void)?
 
     func update(state: PodcastState) {
         self.state = state
@@ -105,6 +106,20 @@ struct PodcastOverlayView: View {
                     }
                     .buttonStyle(.plain)
                     .help(viewModel.isPaused ? "Resume" : "Pause")
+                }
+
+                // Export buttons — always visible once playing, audio greyed out until complete
+                if viewModel.state == .playing || viewModel.state == .complete
+                    || viewModel.state == .buffering || viewModel.state == .listening
+                    || viewModel.state == .processingInterrupt {
+                    Button(action: { viewModel.onExportAudio?() }) {
+                        Image(systemName: "waveform.circle")
+                            .foregroundColor(viewModel.state == .complete ? .secondary : .secondary.opacity(0.3))
+                            .font(.system(size: 13))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.state != .complete)
+                    .help("Download full audio")
 
                     Button(action: { viewModel.onExportMarkdown?() }) {
                         Image(systemName: "arrow.down.doc")
@@ -415,6 +430,7 @@ class PodcastOverlayWindow {
     let viewModel = PodcastOverlayViewModel()
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
+    var onExportAudio: (() -> Void)?
 
     init() {
         viewModel.onDismiss = { [weak self] in
@@ -428,6 +444,9 @@ class PodcastOverlayWindow {
         }
         viewModel.onExportMarkdown = { [weak self] in
             self?.exportMarkdown()
+        }
+        viewModel.onExportAudio = { [weak self] in
+            self?.onExportAudio?()
         }
     }
 

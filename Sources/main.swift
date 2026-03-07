@@ -8,6 +8,7 @@ import Combine
 import ApplicationServices
 import Foundation
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // Find the app icon from either .app bundle Resources or the source directory
 func appIconImage() -> NSImage? {
@@ -1144,11 +1145,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     manager.resumePlayback()
                 }
             }
+            podcastOverlay?.onExportAudio = { [weak self] in
+                self?.exportPodcastAudio()
+            }
             podcastOverlay?.viewModel.onWebSearchToggled = { [weak self] enabled in
                 self?.podcastManager?.webSearchEnabled = enabled
             }
         }
         return podcastOverlay!
+    }
+
+    private func exportPodcastAudio() {
+        guard let audioData = podcastManager?.combinedAudioData() else {
+            NSLog("Podcast: no audio data to export")
+            return
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.wav]
+        let title = podcastOverlay?.viewModel.title ?? "Podcast"
+        savePanel.nameFieldStringValue = "\(title).wav"
+        savePanel.level = .floating + 1
+        if let screen = NSScreen.main {
+            let screenFrame = screen.frame
+            let panelSize = NSSize(width: 500, height: 300)
+            let x = screenFrame.midX - panelSize.width / 2
+            let y = screenFrame.midY - panelSize.height / 2
+            savePanel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: panelSize), display: true)
+        }
+        savePanel.begin { response in
+            if response == .OK, let url = savePanel.url {
+                do {
+                    try audioData.write(to: url)
+                    NSLog("Podcast: exported audio to \(url.path)")
+                } catch {
+                    NSLog("Podcast: failed to export audio: \(error)")
+                }
+            }
+        }
     }
 
     func togglePodcast() {

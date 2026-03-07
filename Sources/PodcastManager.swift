@@ -91,6 +91,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var lineAdvanceTimers: [Timer] = []
     private var currentChunkLines: [ScriptLine] = []
     private(set) var activeLineId: UUID?
+    private var audioSegments: [Data] = []  // collected audio for full download
 
     // Settings (from UserDefaults)
     private var podcastdURL: String {
@@ -441,6 +442,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     private func playAudioData(_ data: Data, chunkIndex: Int) {
         do {
+            // Collect audio segment for full download
+            audioSegments.append(data)
+
             player = try AVAudioPlayer(data: data)
             player?.delegate = self
             player?.prepareToPlay()
@@ -591,6 +595,85 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
     }
 
+    // MARK: - Audio Export
+
+    /// Combine all collected audio segments into a single WAV file.
+    func combinedAudioData() -> Data? {
+        guard !audioSegments.isEmpty else { return nil }
+
+        // Single segment — return as-is
+        if audioSegments.count == 1 { return audioSegments[0] }
+
+        // Extract PCM data from each WAV segment, skipping headers.
+        // Standard WAV header is 44 bytes; we find "data" chunk to be safe.
+        var pcmChunks: [Data] = []
+        var sampleRate: UInt32 = 0
+        var numChannels: UInt16 = 0
+        var bitsPerSample: UInt16 = 0
+
+        for (i, segment) in audioSegments.enumerated() {
+            guard segment.count > 44 else { continue }
+
+            if i == 0 {
+                // Read format from first segment
+                sampleRate = segment.withUnsafeBytes { $0.load(fromByteOffset: 24, as: UInt32.self) }
+                numChannels = segment.withUnsafeBytes { $0.load(fromByteOffset: 22, as: UInt16.self) }
+                bitsPerSample = segment.withUnsafeBytes { $0.load(fromByteOffset: 34, as: UInt16.self) }
+            }
+
+            // Find "data" marker to locate PCM start
+            if let dataOffset = findDataChunkOffset(in: segment) {
+                let pcmStart = dataOffset + 8 // skip "data" + size
+                if pcmStart < segment.count {
+                    pcmChunks.append(segment[pcmStart...])
+                }
+            } else {
+                // Fallback: assume 44-byte header
+                pcmChunks.append(segment[44...])
+            }
+        }
+
+        guard !pcmChunks.isEmpty, sampleRate > 0 else { return nil }
+
+        let totalPCMSize = pcmChunks.reduce(0) { $0 + $1.count }
+        let byteRate = UInt32(numChannels) * sampleRate * UInt32(bitsPerSample) / 8
+        let blockAlign = UInt16(numChannels) * bitsPerSample / 8
+
+        // Build WAV header
+        var wav = Data()
+        wav.append(contentsOf: "RIFF".utf8)
+        wav.append(UInt32(36 + totalPCMSize).littleEndianBytes)
+        wav.append(contentsOf: "WAVE".utf8)
+        wav.append(contentsOf: "fmt ".utf8)
+        wav.append(UInt32(16).littleEndianBytes)          // fmt chunk size
+        wav.append(UInt16(1).littleEndianBytes)           // PCM format
+        wav.append(numChannels.littleEndianBytes)
+        wav.append(sampleRate.littleEndianBytes)
+        wav.append(byteRate.littleEndianBytes)
+        wav.append(blockAlign.littleEndianBytes)
+        wav.append(bitsPerSample.littleEndianBytes)
+        wav.append(contentsOf: "data".utf8)
+        wav.append(UInt32(totalPCMSize).littleEndianBytes)
+
+        for chunk in pcmChunks {
+            wav.append(chunk)
+        }
+
+        return wav
+    }
+
+    private func findDataChunkOffset(in data: Data) -> Int? {
+        let marker: [UInt8] = [0x64, 0x61, 0x74, 0x61] // "data"
+        let bytes = [UInt8](data)
+        for i in 0..<(bytes.count - 3) {
+            if bytes[i] == marker[0] && bytes[i+1] == marker[1]
+                && bytes[i+2] == marker[2] && bytes[i+3] == marker[3] {
+                return i
+            }
+        }
+        return nil
+    }
+
     // MARK: - Helpers
 
     private func sendJSON(_ object: [String: Any]) {
@@ -619,6 +702,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         totalChunks = 0
         title = ""
         transcript = []
+        audioSegments = []
         isDownloadingPrefetch = false
 
         if let prefetchURL = prefetchedAudioURL {
@@ -628,5 +712,21 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         prefetchedTranscriptLines = []
 
         state = .idle
+    }
+}
+
+// MARK: - WAV Helpers
+
+private extension UInt32 {
+    var littleEndianBytes: Data {
+        var value = self.littleEndian
+        return Data(bytes: &value, count: 4)
+    }
+}
+
+private extension UInt16 {
+    var littleEndianBytes: Data {
+        var value = self.littleEndian
+        return Data(bytes: &value, count: 2)
     }
 }

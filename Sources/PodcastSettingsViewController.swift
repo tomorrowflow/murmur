@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PodcastSettingsView: View {
     @StateObject private var viewModel = PodcastSettingsViewModel()
@@ -35,10 +36,52 @@ struct PodcastSettingsView: View {
                     .labelsHidden()
 
                     HStack(spacing: 8) {
+                        Text("Host A Voice")
+                            .frame(width: 120, alignment: .leading)
+                        Text(viewModel.speaker1VoiceStatus)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if viewModel.isUploadingSpeaker1 {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Button("Upload...") {
+                            viewModel.pickAndUploadVoiceSample(speaker: 1)
+                        }
+                        .disabled(viewModel.isUploadingSpeaker1 || viewModel.audioBaseURL.isEmpty)
+                        Button("Clear") {
+                            viewModel.clearVoiceSample(speaker: 1)
+                        }
+                        .disabled(viewModel.speaker1VoiceStatus == "Using default voice" || viewModel.audioBaseURL.isEmpty)
+                    }
+                    .labelsHidden()
+
+                    HStack(spacing: 8) {
                         Text("Host B Name")
                             .frame(width: 120, alignment: .leading)
                         TextField("", text: $viewModel.hostBName, prompt: Text("Jordan"))
                             .textFieldStyle(.roundedBorder)
+                    }
+                    .labelsHidden()
+
+                    HStack(spacing: 8) {
+                        Text("Host B Voice")
+                            .frame(width: 120, alignment: .leading)
+                        Text(viewModel.speaker2VoiceStatus)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if viewModel.isUploadingSpeaker2 {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Button("Upload...") {
+                            viewModel.pickAndUploadVoiceSample(speaker: 2)
+                        }
+                        .disabled(viewModel.isUploadingSpeaker2 || viewModel.audioBaseURL.isEmpty)
+                        Button("Clear") {
+                            viewModel.clearVoiceSample(speaker: 2)
+                        }
+                        .disabled(viewModel.speaker2VoiceStatus == "Using default voice" || viewModel.audioBaseURL.isEmpty)
                     }
                     .labelsHidden()
                 }
@@ -109,6 +152,10 @@ class PodcastSettingsViewModel: ObservableObject {
     @Published var webSearchEnabled: Bool = false
     @Published var statusText: String = "Not configured"
     @Published var statusColor: Color = .gray
+    @Published var speaker1VoiceStatus: String = "Using default voice"
+    @Published var speaker2VoiceStatus: String = "Using default voice"
+    @Published var isUploadingSpeaker1: Bool = false
+    @Published var isUploadingSpeaker2: Bool = false
 
     func load() {
         let defaults = UserDefaults.standard
@@ -119,6 +166,7 @@ class PodcastSettingsViewModel: ObservableObject {
         selectedModel = defaults.string(forKey: "podcast.model") ?? "large-q4"
         webSearchEnabled = defaults.bool(forKey: "podcast.webSearchEnabled")
         refreshStatus()
+        fetchVoiceSampleStatus()
     }
 
     func save() {
@@ -141,12 +189,103 @@ class PodcastSettingsViewModel: ObservableObject {
             statusColor = .green
         }
     }
+
+    func fetchVoiceSampleStatus() {
+        guard !audioBaseURL.isEmpty,
+              let url = URL(string: "\(audioBaseURL)/voice-samples") else { return }
+
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let data = data, error == nil,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            DispatchQueue.main.async {
+                if let s1 = json["speaker1"] as? [String: Any], s1["uploaded"] as? Bool == true {
+                    self?.speaker1VoiceStatus = s1["filename"] as? String ?? "Custom sample"
+                } else {
+                    self?.speaker1VoiceStatus = "Using default voice"
+                }
+                if let s2 = json["speaker2"] as? [String: Any], s2["uploaded"] as? Bool == true {
+                    self?.speaker2VoiceStatus = s2["filename"] as? String ?? "Custom sample"
+                } else {
+                    self?.speaker2VoiceStatus = "Using default voice"
+                }
+            }
+        }.resume()
+    }
+
+    func pickAndUploadVoiceSample(speaker: Int) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            .wav, .mp3, .aiff,
+            .init(filenameExtension: "m4a")!,
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Select a voice sample for Host \(speaker == 1 ? "A" : "B")"
+
+        guard panel.runModal() == .OK, let fileURL = panel.url else { return }
+        uploadVoiceSample(speaker: speaker, fileURL: fileURL)
+    }
+
+    func uploadVoiceSample(speaker: Int, fileURL: URL) {
+        guard !audioBaseURL.isEmpty,
+              let url = URL(string: "\(audioBaseURL)/voice-samples") else { return }
+
+        if speaker == 1 { isUploadingSpeaker1 = true } else { isUploadingSpeaker2 = true }
+
+        guard let fileData = try? Data(contentsOf: fileURL) else {
+            if speaker == 1 { isUploadingSpeaker1 = false } else { isUploadingSpeaker2 = false }
+            return
+        }
+
+        let boundary = UUID().uuidString
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        // Speaker field
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"speaker\"\r\n\r\n".data(using: .utf8)!)
+        body.append("\(speaker)\r\n".data(using: .utf8)!)
+        // Audio file
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(fileURL.lastPathComponent)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.append(fileData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                if speaker == 1 { self?.isUploadingSpeaker1 = false } else { self?.isUploadingSpeaker2 = false }
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200, error == nil {
+                    self?.fetchVoiceSampleStatus()
+                }
+            }
+        }.resume()
+    }
+
+    func clearVoiceSample(speaker: Int) {
+        guard !audioBaseURL.isEmpty,
+              let url = URL(string: "\(audioBaseURL)/voice-samples/\(speaker)") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200, error == nil {
+                    self?.fetchVoiceSampleStatus()
+                }
+            }
+        }.resume()
+    }
 }
 
 class PodcastSettingsViewController: NSViewController {
     override func loadView() {
         let hostingView = NSHostingView(rootView: PodcastSettingsView())
-        hostingView.frame = NSRect(x: 0, y: 0, width: 500, height: 350)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 500, height: 450)
         self.view = hostingView
     }
 }

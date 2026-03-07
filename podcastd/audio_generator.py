@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 import httpx
 
@@ -35,6 +36,22 @@ def format_for_vibevoice(chunk: list[dict]) -> str:
 def resolve_preset(preset: str | None) -> tuple[str, str]:
     """Resolve a preset key to (comfyui_model, quantize_llm)."""
     return MODEL_PRESETS.get(preset or DEFAULT_PRESET, MODEL_PRESETS[DEFAULT_PRESET])
+
+
+def get_voice_refs() -> tuple[str | None, str | None]:
+    """Return (speaker1_ref, speaker2_ref) filenames, checking uploads first."""
+    input_dir = Path(cfg.COMFYUI_INPUT_DIR)
+    ref1 = (
+        "podcast_voice_speaker1.wav"
+        if (input_dir / "podcast_voice_speaker1.wav").exists()
+        else cfg.VOICE_REF_SPEAKER1
+    )
+    ref2 = (
+        "podcast_voice_speaker2.wav"
+        if (input_dir / "podcast_voice_speaker2.wav").exists()
+        else cfg.VOICE_REF_SPEAKER2
+    )
+    return ref1, ref2
 
 
 async def generate_audio(
@@ -109,32 +126,32 @@ def _build_workflow(text: str, seed: int, model: str, quantize_llm: str = "full 
     """Build the ComfyUI API workflow payload.
 
     Nodes:
-      3 → LoadAudio (Carter/man → speaker 1 / Alex)
-      4 → LoadAudio (Alice/woman → speaker 2 / Jordan)
+      3 → LoadAudio (speaker 1 voice reference)
+      4 → LoadAudio (speaker 2 voice reference)
       1 → VibeVoiceMultipleSpeakersNode (voice-cloned from reference samples)
       2 → SaveAudio
     """
-    comfyui_model = model
+    ref1, ref2 = get_voice_refs()
 
     return {
         "prompt": {
             "3": {
                 "class_type": "LoadAudio",
                 "inputs": {
-                    "audio": cfg.VOICE_REF_SPEAKER1,
+                    "audio": ref1,
                 },
             },
             "4": {
                 "class_type": "LoadAudio",
                 "inputs": {
-                    "audio": cfg.VOICE_REF_SPEAKER2,
+                    "audio": ref2,
                 },
             },
             "1": {
                 "class_type": "VibeVoiceMultipleSpeakersNode",
                 "inputs": {
                     "text": text,
-                    "model": comfyui_model,
+                    "model": model,
                     "attention_type": "auto",
                     "quantize_llm": quantize_llm,
                     "free_memory_after_generate": False,

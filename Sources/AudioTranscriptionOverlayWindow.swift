@@ -217,6 +217,7 @@ class AudioTranscriptionOverlayWindow {
         )
 
         panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true

@@ -984,8 +984,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         let wasPodcastInterrupt = podcastInterruptActive
         if podcastInterruptActive {
             podcastInterruptActive = false
-            podcastManager?.resumePlayback()
-            podcastOverlay?.updateState(.playing)
+            podcastManager?.cancelInterrupt()
         }
         stopTranscriptionIndicator()
         if !wasPodcastInterrupt {
@@ -997,8 +996,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func recordingWasCancelled() {
         if podcastInterruptActive {
             podcastInterruptActive = false
-            podcastManager?.resumePlayback()
-            podcastOverlay?.updateState(.playing)
+            podcastManager?.cancelInterrupt()
         }
         sttPushToTalkActive = false
         // Ensure any processing indicator is stopped
@@ -1020,8 +1018,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func recordingWasSkippedDueToSilence() {
         if podcastInterruptActive {
             podcastInterruptActive = false
-            podcastManager?.resumePlayback()
-            podcastOverlay?.updateState(.playing)
+            podcastManager?.cancelInterrupt()
         }
         sttPushToTalkActive = false
         // Ensure any processing indicator is stopped
@@ -1118,10 +1115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     func podcastDidError(_ message: String) {
         stopWaveformAnimation()
-        let notification = NSUserNotification()
-        notification.title = "Podcast Error"
-        notification.informativeText = message
-        NSUserNotificationCenter.default.deliver(notification)
+        // Error is shown inline in the podcast overlay — no separate notification needed
     }
 
     // MARK: - Podcast Helpers
@@ -1141,6 +1135,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             podcastOverlay?.onStop = { [weak self] in
                 self?.podcastManager?.stopSession()
                 self?.stopWaveformAnimation()
+            }
+            podcastOverlay?.onPlayPause = { [weak self] in
+                guard let manager = self?.podcastManager else { return }
+                if self?.podcastOverlay?.viewModel.isPaused == true {
+                    manager.pausePlayback()
+                } else {
+                    manager.resumePlayback()
+                }
             }
             podcastOverlay?.viewModel.onWebSearchToggled = { [weak self] enabled in
                 self?.podcastManager?.webSearchEnabled = enabled

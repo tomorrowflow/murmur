@@ -58,6 +58,16 @@ class AudioDevicesViewController: NSViewController {
         inputDevicePopup.action = #selector(inputDeviceChanged)
         outputDevicePopup.target = self
         outputDevicePopup.action = #selector(outputDeviceChanged)
+
+        // Refresh device lists when dropdowns open
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(popupWillOpen),
+            name: NSPopUpButton.willPopUpNotification, object: inputDevicePopup
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(popupWillOpen),
+            name: NSPopUpButton.willPopUpNotification, object: outputDevicePopup
+        )
         
         voiceLabel.font = .boldSystemFont(ofSize: 14)
         voiceInfoLabel.font = .systemFont(ofSize: 12)
@@ -264,6 +274,10 @@ class AudioDevicesViewController: NSViewController {
         updateUIState()
     }
     
+    @objc private func popupWillOpen() {
+        deviceManager.refreshDeviceList()
+    }
+
     @objc private func inputDeviceChanged() {
         guard let uid = inputDevicePopup.selectedItem?.representedObject as? String else { return }
         deviceManager.selectedInputDeviceUID = uid

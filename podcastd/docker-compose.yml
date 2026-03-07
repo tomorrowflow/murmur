@@ -7,6 +7,8 @@ services:
     volumes:
       # Mount ComfyUI output dir read-only so podcastd can serve audio files
       - /home/frogger/ComfyUI-Easy-Install-docker/data/output:/comfyui_output:ro
+      # Mount ComfyUI input dir r/w for voice sample uploads
+      - /home/frogger/ComfyUI-Easy-Install-docker/data/input:/comfyui_input
     networks:
       - proxy
       - comfyui-easy-install-docker_default
@@ -19,7 +21,7 @@ services:
       # Traefik WebSocket service (port 8765)
       - "traefik.enable=true"
       # Traefik HTTP service (port 8766) — audio files + health (higher priority)
-      - "traefik.http.routers.podcastd-http.rule=Host(`podcastd.deepread.fm`) && (PathPrefix(`/audio`) || PathPrefix(`/health`))"
+      - "traefik.http.routers.podcastd-http.rule=Host(`podcastd.deepread.fm`) && (PathPrefix(`/audio`) || PathPrefix(`/health`) || PathPrefix(`/voice-samples`))"
       - "traefik.http.routers.podcastd-http.entrypoints=websecure"
       - "traefik.http.routers.podcastd-http.tls=true"
       - "traefik.http.routers.podcastd-http.priority=20"

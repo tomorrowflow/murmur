@@ -13,6 +13,9 @@ class Config:
     # Audio — ComfyUI output dir mounted read-only into podcastd
     AUDIO_CACHE_DIR: str = os.getenv("AUDIO_CACHE_DIR", "/comfyui_output")
 
+    # ComfyUI input dir — mounted r/w for uploading voice samples
+    COMFYUI_INPUT_DIR: str = os.getenv("COMFYUI_INPUT_DIR", "/comfyui_input")
+
     # Servers
     WS_HOST: str = os.getenv("WS_HOST", "0.0.0.0")
     WS_PORT: int = int(os.getenv("WS_PORT", "8765"))

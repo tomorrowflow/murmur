@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
+import websockets
 
 from config import cfg
+
+# Type alias for progress callbacks: (step, max_steps, elapsed_seconds)
+ProgressCallback = Callable[[int, int, float], None] | None
 
 log = logging.getLogger(__name__)
 
@@ -60,11 +66,13 @@ async def generate_audio(
     model: str | None = None,
     quantize_llm: str | None = None,
     session_id: str | None = None,
+    on_progress: ProgressCallback = None,
 ) -> str:
     """Generate audio for a script chunk via ComfyUI VibeVoice.
 
     Returns the output filename (available at ComfyUI's output dir).
     model/quantize_llm can be passed directly or resolved from a preset.
+    on_progress(step, max_steps, elapsed) is called with diffusion step updates.
     """
     seed = seed or cfg.VOICE_SEED_A
     model = model or cfg.CHUNK_MODEL
@@ -79,7 +87,7 @@ async def generate_audio(
         active_prompts.setdefault(session_id, set()).add(prompt_id)
 
     try:
-        filename = await _poll_until_complete(prompt_id)
+        filename = await _wait_for_completion(prompt_id, on_progress=on_progress)
     finally:
         if session_id:
             active_prompts.get(session_id, set()).discard(prompt_id)
@@ -190,8 +198,83 @@ async def _post_workflow(workflow: dict) -> str:
     return prompt_id
 
 
+async def _wait_for_completion(
+    prompt_id: str,
+    timeout: float = 300,
+    on_progress: ProgressCallback = None,
+) -> str:
+    """Monitor ComfyUI via WebSocket for real-time progress. Returns output filename.
+
+    Falls back to HTTP polling if the WebSocket connection fails.
+    """
+    try:
+        return await _ws_wait_for_completion(prompt_id, timeout, on_progress)
+    except Exception as ws_err:
+        log.warning("ComfyUI WS monitor failed (%s), falling back to polling", ws_err)
+        return await _poll_until_complete(prompt_id, timeout)
+
+
+async def _ws_wait_for_completion(
+    prompt_id: str,
+    timeout: float,
+    on_progress: ProgressCallback,
+) -> str:
+    """Listen on ComfyUI WebSocket for progress and completion events."""
+    ws_url = cfg.COMFYUI_BASE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+    t0 = asyncio.get_event_loop().time()
+
+    async with websockets.connect(ws_url, open_timeout=10) as ws:
+        async for raw in ws:
+            elapsed = asyncio.get_event_loop().time() - t0
+            if elapsed > timeout:
+                raise TimeoutError(f"ComfyUI prompt {prompt_id} timed out after {timeout}s")
+
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type")
+            data = msg.get("data", {})
+
+            # Progress update (diffusion steps)
+            if msg_type == "progress" and data.get("prompt_id") == prompt_id:
+                step = data.get("value", 0)
+                max_steps = data.get("max", 0)
+                if on_progress and max_steps > 0:
+                    on_progress(step, max_steps, elapsed)
+
+            # Prompt completed — fetch output from history
+            elif msg_type == "executed" and data.get("prompt_id") == prompt_id:
+                return await _fetch_output(prompt_id)
+
+            # Prompt errored
+            elif msg_type == "execution_error" and data.get("prompt_id") == prompt_id:
+                raise RuntimeError(f"ComfyUI prompt {prompt_id} failed: {data.get('exception_message', 'unknown error')}")
+
+    raise RuntimeError(f"ComfyUI WebSocket closed before prompt {prompt_id} completed")
+
+
+async def _fetch_output(prompt_id: str) -> str:
+    """Fetch the output filename from ComfyUI history after completion."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(f"{cfg.COMFYUI_BASE_URL}/history/{prompt_id}")
+        resp.raise_for_status()
+        history = resp.json()
+
+    entry = history.get(prompt_id, {})
+    status = entry.get("status", {})
+    if status.get("status_str") == "error" or not entry.get("outputs"):
+        raise RuntimeError(f"ComfyUI prompt {prompt_id} was interrupted or failed")
+    outputs = entry.get("outputs", {})
+    for node_id, node_out in outputs.items():
+        if "audio" in node_out:
+            return node_out["audio"][0]["filename"]
+    raise RuntimeError(f"No audio output found in ComfyUI result: {outputs}")
+
+
 async def _poll_until_complete(prompt_id: str, timeout: float = 300) -> str:
-    """Poll ComfyUI /history until the prompt completes. Returns output filename."""
+    """Fallback: poll ComfyUI /history until the prompt completes."""
     elapsed = 0.0
     interval = 2.0
 
@@ -203,7 +286,6 @@ async def _poll_until_complete(prompt_id: str, timeout: float = 300) -> str:
 
             if prompt_id in history:
                 entry = history[prompt_id]
-                # Check if the prompt was interrupted
                 status = entry.get("status", {})
                 if status.get("status_str") == "error" or not entry.get("outputs"):
                     raise RuntimeError(f"ComfyUI prompt {prompt_id} was interrupted or failed")

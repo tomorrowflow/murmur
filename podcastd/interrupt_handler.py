@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from audio_generator import generate_audio
+from audio_generator import ProgressCallback, generate_audio
 from chunk_manager import split_into_chunks
 from config import cfg
 from llm_client import llm_chat
@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "interrupt_system.txt").read_text()
 
 
-async def handle_interrupt(session: PodcastSession, question: str) -> tuple[str, list[dict]]:
+async def handle_interrupt(session: PodcastSession, question: str, on_progress: ProgressCallback = None) -> tuple[str, list[dict]]:
     """Process a user interrupt.
 
     Returns (audio_filename, interrupt_response_lines).
@@ -61,6 +61,7 @@ async def handle_interrupt(session: PodcastSession, question: str) -> tuple[str,
         seed=cfg.VOICE_SEED_A,
         model=cfg.INTERRUPT_MODEL,
         session_id=session.session_id,
+        on_progress=on_progress,
     )
 
     # Splice revised script into remaining chunks.
@@ -95,9 +96,9 @@ def _parse_interrupt_response(raw: str) -> dict:
         raise ValueError(f"No JSON object in interrupt response: {text[:200]}...")
 
     json_text = text[start : end + 1]
-    # Fix trailing commas before } or ]
-    import re
-    json_text = re.sub(r",\s*([}\]])", r"\1", json_text)
+    # Reuse the same JSON repair from script_generator
+    from script_generator import _repair_json
+    json_text = _repair_json(json_text)
 
     data = json.loads(json_text)
 

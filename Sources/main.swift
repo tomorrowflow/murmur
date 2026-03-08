@@ -1285,14 +1285,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("Podcast interrupt: started (double-tap-hold)")
-        manager.beginInterrupt()
+        // Play tone BEFORE stopping podcast audio — if we stop first, the audio
+        // device may not be ready for the tone (same device-wake issue as first words)
         PTTTonePlayer.shared.playStartTone()
         podcastInterruptActive = true
         podcastOverlay?.updateState(.listening)
 
-        // Start recording via the existing audio manager
-        stopTranscriptionIndicator()
-        audioManager.toggleRecording()
+        // Delay interrupt + recording start slightly so the start tone is audible
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            guard let self = self else { return }
+            manager.beginInterrupt()
+            self.stopTranscriptionIndicator()
+            self.audioManager.toggleRecording()
+        }
     }
 
     func stopPodcastInterrupt() {

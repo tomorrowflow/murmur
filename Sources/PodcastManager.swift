@@ -111,6 +111,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     var selectedModel: String {
         UserDefaults.standard.string(forKey: "podcast.model") ?? "large-q4"
     }
+    var podcastLength: String {
+        UserDefaults.standard.string(forKey: "podcast.length") ?? "auto"
+    }
     var webSearchEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "podcast.webSearchEnabled") }
         set { UserDefaults.standard.set(newValue, forKey: "podcast.webSearchEnabled") }
@@ -152,12 +155,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 "content_type": contentType,
                 "content": content,
                 "web_search": self.webSearchEnabled,
-                "model": self.selectedModel
+                "model": self.selectedModel,
+                "target_length": self.podcastLength
             ]
             if let subject = subject {
                 payload["subject"] = subject
             }
-            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled) model=\(self.selectedModel)")
+            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled) model=\(self.selectedModel) length=\(self.podcastLength)")
             self.sendJSON(payload)
             self.state = .ingesting
         }
@@ -176,6 +180,8 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         reset()
     }
 
+    var audioSegmentCount: Int { audioSegments.count }
+
     func pausePlayback() {
         player?.pause()
         cancelLineAdvanceTimers()
@@ -183,6 +189,21 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     func resumePlayback() {
         player?.play()
+    }
+
+    /// Replay the full podcast from the beginning using collected audio segments.
+    func replayFromStart() {
+        guard let data = combinedAudioData() else { return }
+        do {
+            player?.stop()
+            player = try AVAudioPlayer(data: data)
+            player?.delegate = self
+            player?.prepareToPlay()
+            player?.play()
+            state = .playing
+        } catch {
+            NSLog("Podcast: replay failed: \(error)")
+        }
     }
 
     /// Cancel an in-progress interrupt and resume podcast flow.
@@ -448,7 +469,14 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             player = try AVAudioPlayer(data: data)
             player?.delegate = self
             player?.prepareToPlay()
-            player?.play()
+
+            // For the first chunk, delay playback briefly to let the audio device
+            // wake up (prevents first words being swallowed on Bluetooth/idle devices)
+            if chunkIndex == 0 {
+                player?.play(atTime: player!.deviceCurrentTime + 0.15)
+            } else {
+                player?.play()
+            }
             state = .playing
             if chunkIndex >= 0 {
                 delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
@@ -598,95 +626,76 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     // MARK: - Audio Export
 
     /// Combine all collected audio segments into a single WAV file.
+    /// Uses AVAudioFile to decode any format (WAV, FLAC, etc.) to PCM.
     func combinedAudioData() -> Data? {
         guard !audioSegments.isEmpty else { return nil }
 
         // Single segment — return as-is
         if audioSegments.count == 1 { return audioSegments[0] }
 
-        // Extract PCM data from each WAV segment, skipping headers.
-        var pcmChunks: [Data] = []
-        var sampleRate: UInt32 = 0
-        var numChannels: UInt16 = 0
-        var bitsPerSample: UInt16 = 0
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("podcast_export_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // Decode each segment to float32 PCM buffers using AVAudioFile
+        var pcmBuffers: [AVAudioPCMBuffer] = []
+        var processingFormat: AVAudioFormat?
 
         for (i, segment) in audioSegments.enumerated() {
-            let bytes = [UInt8](segment)
-            guard bytes.count > 44 else { continue }
-
-            if i == 0 {
-                // Read format from first segment using safe byte reads
-                numChannels = readUInt16LE(bytes, offset: 22)
-                sampleRate = readUInt32LE(bytes, offset: 24)
-                bitsPerSample = readUInt16LE(bytes, offset: 34)
-            }
-
-            // Find "data" marker to locate PCM start
-            if let dataOffset = findDataChunkOffset(in: bytes) {
-                let pcmStart = dataOffset + 8 // skip "data" + 4-byte size
-                if pcmStart < bytes.count {
-                    pcmChunks.append(Data(bytes[pcmStart...]))
+            let tmpFile = tmpDir.appendingPathComponent("seg\(i).audio")
+            do {
+                try segment.write(to: tmpFile)
+                let audioFile = try AVAudioFile(forReading: tmpFile)
+                if i == 0 {
+                    processingFormat = audioFile.processingFormat
+                    NSLog("Podcast: audio format: sr=\(audioFile.processingFormat.sampleRate) ch=\(audioFile.processingFormat.channelCount)")
                 }
-            } else {
-                // Fallback: assume 44-byte header
-                pcmChunks.append(Data(bytes[44...]))
+                let frameCount = AVAudioFrameCount(audioFile.length)
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: frameCount) else {
+                    NSLog("Podcast: failed to create buffer for segment \(i)")
+                    continue
+                }
+                try audioFile.read(into: buffer)
+                pcmBuffers.append(buffer)
+            } catch {
+                NSLog("Podcast: failed to decode segment \(i): \(error)")
             }
         }
 
-        guard !pcmChunks.isEmpty, sampleRate > 0 else { return nil }
-
-        let totalPCMSize = pcmChunks.reduce(0) { $0 + $1.count }
-        let byteRate = UInt32(numChannels) * sampleRate * UInt32(bitsPerSample) / 8
-        let blockAlign = UInt16(numChannels) * bitsPerSample / 8
-
-        // Build WAV header
-        var wav = Data()
-        wav.reserveCapacity(44 + totalPCMSize)
-        wav.append(contentsOf: "RIFF".utf8)
-        wav.append(UInt32(36 + totalPCMSize).littleEndianBytes)
-        wav.append(contentsOf: "WAVE".utf8)
-        wav.append(contentsOf: "fmt ".utf8)
-        wav.append(UInt32(16).littleEndianBytes)          // fmt chunk size
-        wav.append(UInt16(1).littleEndianBytes)           // PCM format
-        wav.append(numChannels.littleEndianBytes)
-        wav.append(sampleRate.littleEndianBytes)
-        wav.append(byteRate.littleEndianBytes)
-        wav.append(blockAlign.littleEndianBytes)
-        wav.append(bitsPerSample.littleEndianBytes)
-        wav.append(contentsOf: "data".utf8)
-        wav.append(UInt32(totalPCMSize).littleEndianBytes)
-
-        for chunk in pcmChunks {
-            wav.append(chunk)
+        guard !pcmBuffers.isEmpty, let fmt = processingFormat else {
+            NSLog("Podcast: no decodable audio segments")
+            return nil
         }
 
-        return wav
-    }
+        // Write all buffers to a single WAV file
+        let outputFile = tmpDir.appendingPathComponent("combined.wav")
+        do {
+            // Use explicit 16-bit PCM interleaved settings for maximum compatibility
+            let wavSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: fmt.sampleRate,
+                AVNumberOfChannelsKey: fmt.channelCount,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
 
-    private func findDataChunkOffset(in bytes: [UInt8]) -> Int? {
-        guard bytes.count >= 4 else { return nil }
-        let d: UInt8 = 0x64, a: UInt8 = 0x61, t: UInt8 = 0x74  // "data"
-        for i in 0..<(bytes.count - 3) {
-            if bytes[i] == d && bytes[i+1] == a && bytes[i+2] == t && bytes[i+3] == a {
-                return i
+            // Scope the AVAudioFile so it closes and finalizes the WAV header before we read
+            try autoreleasepool {
+                let wavFile = try AVAudioFile(forWriting: outputFile, settings: wavSettings)
+                for buffer in pcmBuffers {
+                    try wavFile.write(from: buffer)
+                }
             }
+
+            let wavData = try Data(contentsOf: outputFile)
+            NSLog("Podcast: combined audio: \(wavData.count) bytes")
+            return wavData
+        } catch {
+            NSLog("Podcast: failed to write combined WAV: \(error)")
+            return nil
         }
-        return nil
-    }
-
-    /// Safe little-endian UInt32 read from byte array.
-    private func readUInt32LE(_ bytes: [UInt8], offset: Int) -> UInt32 {
-        guard offset + 3 < bytes.count else { return 0 }
-        return UInt32(bytes[offset])
-             | UInt32(bytes[offset+1]) << 8
-             | UInt32(bytes[offset+2]) << 16
-             | UInt32(bytes[offset+3]) << 24
-    }
-
-    /// Safe little-endian UInt16 read from byte array.
-    private func readUInt16LE(_ bytes: [UInt8], offset: Int) -> UInt16 {
-        guard offset + 1 < bytes.count else { return 0 }
-        return UInt16(bytes[offset]) | UInt16(bytes[offset+1]) << 8
     }
 
     // MARK: - Helpers
@@ -730,18 +739,3 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     }
 }
 
-// MARK: - WAV Helpers
-
-private extension UInt32 {
-    var littleEndianBytes: Data {
-        var value = self.littleEndian
-        return Data(bytes: &value, count: 4)
-    }
-}
-
-private extension UInt16 {
-    var littleEndianBytes: Data {
-        var value = self.littleEndian
-        return Data(bytes: &value, count: 2)
-    }
-}

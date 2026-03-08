@@ -153,6 +153,7 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
     subject = msg.get("subject", "")
     session.web_search_enabled = msg.get("web_search", False)
     session.model_preset = msg.get("model", "large-q4")
+    target_length = msg.get("target_length", "auto")
 
     chunk_model, chunk_quantize = resolve_preset(session.model_preset)
 
@@ -177,7 +178,7 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             "type": "PROGRESS", "session_id": session.session_id,
             "stage": "scripting", "percent": -1, "message": "Generating script...",
         })
-        title, script = await generate_script(text)
+        title, script = await generate_script(text, target_length=target_length)
         session.title = title
         session.original_script = script
         session.chunks = split_into_chunks(script)

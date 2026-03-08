@@ -16,7 +16,7 @@ struct ShortcutsSettingsView: View {
                     shortcutRow("Paste Last Transcription", for: .pasteLastTranscription)
                     shortcutRow("Show History", for: .showHistory)
                     shortcutRow("OpenClaw Interface", for: .openclawRecording)
-                    shortcutRow("Podcast (Start/Stop)", for: .podcastToggle)
+                    shortcutRow("Podcast Tool", for: .podcastToggle)
                 }
 
                 Section("Push-to-Talk (Double-Tap & Hold)") {

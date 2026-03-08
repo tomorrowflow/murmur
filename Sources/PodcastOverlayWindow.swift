@@ -97,13 +97,7 @@ struct PodcastOverlayView: View {
 
                 if viewModel.state == .playing || viewModel.state == .complete {
                     Button(action: {
-                        if viewModel.state == .complete {
-                            // Replay from start
-                            viewModel.onPlayPause?()
-                        } else {
-                            viewModel.isPaused.toggle()
-                            viewModel.onPlayPause?()
-                        }
+                        viewModel.onPlayPause?()
                     }) {
                         Image(systemName: viewModel.state == .complete || viewModel.isPaused ? "play.fill" : "pause.fill")
                             .foregroundColor(.secondary)

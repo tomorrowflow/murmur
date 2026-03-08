@@ -1162,6 +1162,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         if podcastManager == nil {
             let manager = PodcastManager()
             manager.delegate = self
+            manager.onRemotePlayPause = { [weak self] in
+                guard let manager = self?.podcastManager else { return }
+                if manager.state == .complete {
+                    manager.replayFromStart()
+                } else if manager.isPaused {
+                    manager.resumePlayback()
+                    self?.podcastOverlay?.viewModel.isPaused = false
+                } else {
+                    manager.pausePlayback()
+                    self?.podcastOverlay?.viewModel.isPaused = true
+                }
+            }
             podcastManager = manager
         }
         return podcastManager!
@@ -1178,10 +1190,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 guard let manager = self?.podcastManager else { return }
                 if manager.state == .complete {
                     manager.replayFromStart()
-                } else if self?.podcastOverlay?.viewModel.isPaused == true {
-                    manager.pausePlayback()
-                } else {
+                } else if manager.isPaused {
                     manager.resumePlayback()
+                    self?.podcastOverlay?.viewModel.isPaused = false
+                } else {
+                    manager.pausePlayback()
+                    self?.podcastOverlay?.viewModel.isPaused = true
                 }
             }
             podcastOverlay?.onExportAudio = { [weak self] in

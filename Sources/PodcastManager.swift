@@ -411,6 +411,8 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
         case "INTERRUPT_PROCESSING":
             state = .processingInterrupt
+            // Reset stale progress from previous chunk generation
+            delegate?.podcastDidUpdateProgress(stage: "interrupt", percent: -1, message: nil)
 
         case "INTERRUPT_READY":
             guard let audioURL = json["audio_url"] as? String else { return }

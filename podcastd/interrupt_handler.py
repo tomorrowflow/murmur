@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from audio_generator import ProgressCallback, generate_audio
+from audio_generator import ProgressCallback, generate_audio, resolve_preset
 from chunk_manager import split_into_chunks
 from script_generator import sanitize_dialogue
 from config import cfg
@@ -64,11 +64,13 @@ async def handle_interrupt(session: PodcastSession, question: str, on_progress: 
         if "text" in line:
             line["text"] = sanitize_dialogue(line["text"])
 
-    # Generate audio for the interrupt response using fast model
+    # Generate audio using the same model the user selected for this session
+    interrupt_model, interrupt_quantize = resolve_preset(session.model_preset)
     audio_file = await generate_audio(
         interrupt_lines,
         seed=cfg.VOICE_SEED_A,
-        model=cfg.INTERRUPT_MODEL,
+        model=interrupt_model,
+        quantize_llm=interrupt_quantize,
         session_id=session.session_id,
         on_progress=on_progress,
         host_a_name=getattr(session, "host_a_name", None),

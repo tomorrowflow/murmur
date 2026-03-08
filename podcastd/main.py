@@ -338,7 +338,13 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
         return  # connection dead, no point continuing
 
     try:
-        progress_cb = _make_progress_cb(websocket, session.session_id, "interrupt")
+        # Reset progress and show initial message while LLM generates response
+        await _safe_send(websocket, {
+            "type": "PROGRESS", "session_id": session.session_id,
+            "stage": "interrupt_scripting", "percent": -1,
+            "message": "Generating response to your question...",
+        })
+        progress_cb = _make_progress_cb(websocket, session.session_id, "response")
         async with gpu_lock:
             if session.session_id not in sessions:
                 return  # session gone while waiting for lock

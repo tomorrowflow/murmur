@@ -6,6 +6,7 @@ from pathlib import Path
 
 from audio_generator import ProgressCallback, generate_audio
 from chunk_manager import split_into_chunks
+from script_generator import sanitize_dialogue
 from config import cfg
 from llm_client import llm_chat
 from session import PodcastSession, SessionState
@@ -55,7 +56,13 @@ async def handle_interrupt(session: PodcastSession, question: str, on_progress: 
     result = _parse_interrupt_response(raw)
 
     interrupt_lines = result["interrupt_response"]
+    for line in interrupt_lines:
+        if "text" in line:
+            line["text"] = sanitize_dialogue(line["text"])
     revised = result.get("revised_remaining", [])
+    for line in revised:
+        if "text" in line:
+            line["text"] = sanitize_dialogue(line["text"])
 
     # Generate audio for the interrupt response using fast model
     audio_file = await generate_audio(

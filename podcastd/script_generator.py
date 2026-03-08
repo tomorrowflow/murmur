@@ -45,6 +45,54 @@ def _resolve_target_minutes(target_length: str, content: str) -> int:
         return 25
 
 
+def sanitize_dialogue(text: str) -> str:
+    """Clean dialogue text for reliable TTS rendering.
+
+    Handles common LLM artifacts that cause issues with VibeVoice:
+    - Curly/smart quotes → straight quotes
+    - Ellipsis (… or ...) → em dash
+    - Asterisks (emphasis markers) → removed
+    - Parenthetical stage directions → removed
+    - Excessive punctuation → normalized
+    - Unicode dashes → standard em dash
+    - Control characters → removed
+    """
+    import re
+
+    # Smart/curly quotes → straight
+    text = text.replace('\u201c', '"').replace('\u201d', '"')
+    text = text.replace('\u2018', "'").replace('\u2019', "'")
+
+    # Ellipsis character or triple dots → em dash
+    text = text.replace('\u2026', ' \u2014 ')  # … → —
+    text = re.sub(r'\.{2,}', ' \u2014 ', text)  # .. or ... → —
+
+    # Various Unicode dashes → standard em dash
+    text = text.replace('\u2013', '\u2014')  # en dash → em dash
+    text = text.replace('\u2015', '\u2014')  # horizontal bar → em dash
+
+    # Remove asterisks (LLM emphasis: *word* or **word**)
+    text = re.sub(r'\*+', '', text)
+
+    # Remove parenthetical stage directions like (laughs) (sighs) (pauses)
+    text = re.sub(r'\([^)]{1,30}\)', '', text)
+
+    # Remove hashtags and markdown headers
+    text = re.sub(r'#+\s*', '', text)
+
+    # Normalize excessive punctuation (!!!, ???, etc.)
+    text = re.sub(r'!{2,}', '!', text)
+    text = re.sub(r'\?{2,}', '?', text)
+
+    # Remove control characters (except standard whitespace)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+    # Collapse multiple spaces
+    text = re.sub(r' {2,}', ' ', text)
+
+    return text.strip()
+
+
 async def generate_script(
     content: str,
     target_length: str = "auto",
@@ -119,6 +167,8 @@ def _parse_script(raw: str) -> list[dict]:
     for item in data:
         if "speaker" not in item or "text" not in item:
             raise ValueError(f"Script line missing speaker/text: {item}")
+        # Sanitize dialogue text for TTS
+        item["text"] = sanitize_dialogue(item["text"])
 
     return data
 
@@ -126,14 +176,89 @@ def _parse_script(raw: str) -> list[dict]:
 def _repair_json(text: str) -> str:
     """Fix common JSON issues from LLM output."""
     import re
+
+    # Replace curly/smart quotes with straight quotes
+    text = text.replace('\u201c', '"').replace('\u201d', '"')  # " "
+    text = text.replace('\u2018', "'").replace('\u2019', "'")  # ' '
+
+    # Replace single-quoted JSON keys/values with double quotes
+    # Only if the text looks like it uses single quotes for JSON structure
+    # (e.g. {'speaker': 'Alex'} → {"speaker": "Alex"})
+    if text.lstrip().startswith("[{") or text.lstrip().startswith("{'"):
+        text = _single_to_double_quotes(text)
+
     # Remove trailing commas before ] or }
     text = re.sub(r",\s*([}\]])", r"\1", text)
-    # Fix unescaped double quotes inside JSON string values.
-    # Walk character by character: when inside a string, any quote that isn't
-    # followed by a structural char (, : } ]) or preceded by a structural char
-    # (: , { [) is likely an inner quote that needs escaping.
+
+    # Fix unescaped literal newlines inside JSON strings
+    text = _fix_newlines_in_strings(text)
+
+    # Fix unescaped double quotes inside JSON string values
     text = _fix_inner_quotes(text)
+
     return text
+
+
+def _single_to_double_quotes(text: str) -> str:
+    """Convert single-quoted JSON to double-quoted JSON."""
+    result = []
+    i = 0
+    in_double = False
+    in_single = False
+    while i < len(text):
+        ch = text[i]
+        if ch == '\\' and (in_double or in_single):
+            result.append(text[i:i+2])
+            i += 2
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(ch)
+        elif ch == "'" and not in_double:
+            if not in_single:
+                in_single = True
+                result.append('"')
+            else:
+                in_single = False
+                result.append('"')
+        else:
+            # Inside a single-quoted string that's now double-quoted,
+            # escape any literal double quotes
+            if in_single and ch == '"':
+                result.append('\\"')
+            else:
+                result.append(ch)
+        i += 1
+    return ''.join(result)
+
+
+def _fix_newlines_in_strings(text: str) -> str:
+    """Replace literal newlines/tabs inside JSON strings with escaped versions."""
+    result = []
+    in_string = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '\\' and in_string and i + 1 < len(text):
+            result.append(text[i:i+2])
+            i += 2
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            i += 1
+        elif in_string and ch == '\n':
+            result.append(' ')  # replace literal newline with space
+            i += 1
+        elif in_string and ch == '\t':
+            result.append(' ')
+            i += 1
+        elif in_string and ch == '\r':
+            i += 1  # skip carriage returns
+        else:
+            result.append(ch)
+            i += 1
+    return ''.join(result)
 
 
 def _fix_inner_quotes(text: str) -> str:

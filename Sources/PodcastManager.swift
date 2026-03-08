@@ -275,9 +275,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             case .failure(let error):
                 NSLog("Podcast: WebSocket error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    if self.isSessionActive {
-                        self.delegate?.podcastDidError("Connection lost")
-                    }
+                    // Ignore errors from intentional disconnects (state already .idle after reset)
+                    guard self.isSessionActive else { return }
+                    self.delegate?.podcastDidError("Connection lost")
                     self.disconnect()
                     self.state = .error("Connection lost: \(error.localizedDescription)")
                 }
@@ -605,31 +605,31 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         if audioSegments.count == 1 { return audioSegments[0] }
 
         // Extract PCM data from each WAV segment, skipping headers.
-        // Standard WAV header is 44 bytes; we find "data" chunk to be safe.
         var pcmChunks: [Data] = []
         var sampleRate: UInt32 = 0
         var numChannels: UInt16 = 0
         var bitsPerSample: UInt16 = 0
 
         for (i, segment) in audioSegments.enumerated() {
-            guard segment.count > 44 else { continue }
+            let bytes = [UInt8](segment)
+            guard bytes.count > 44 else { continue }
 
             if i == 0 {
-                // Read format from first segment
-                sampleRate = segment.withUnsafeBytes { $0.load(fromByteOffset: 24, as: UInt32.self) }
-                numChannels = segment.withUnsafeBytes { $0.load(fromByteOffset: 22, as: UInt16.self) }
-                bitsPerSample = segment.withUnsafeBytes { $0.load(fromByteOffset: 34, as: UInt16.self) }
+                // Read format from first segment using safe byte reads
+                numChannels = readUInt16LE(bytes, offset: 22)
+                sampleRate = readUInt32LE(bytes, offset: 24)
+                bitsPerSample = readUInt16LE(bytes, offset: 34)
             }
 
             // Find "data" marker to locate PCM start
-            if let dataOffset = findDataChunkOffset(in: segment) {
-                let pcmStart = dataOffset + 8 // skip "data" + size
-                if pcmStart < segment.count {
-                    pcmChunks.append(segment[pcmStart...])
+            if let dataOffset = findDataChunkOffset(in: bytes) {
+                let pcmStart = dataOffset + 8 // skip "data" + 4-byte size
+                if pcmStart < bytes.count {
+                    pcmChunks.append(Data(bytes[pcmStart...]))
                 }
             } else {
                 // Fallback: assume 44-byte header
-                pcmChunks.append(segment[44...])
+                pcmChunks.append(Data(bytes[44...]))
             }
         }
 
@@ -641,6 +641,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
         // Build WAV header
         var wav = Data()
+        wav.reserveCapacity(44 + totalPCMSize)
         wav.append(contentsOf: "RIFF".utf8)
         wav.append(UInt32(36 + totalPCMSize).littleEndianBytes)
         wav.append(contentsOf: "WAVE".utf8)
@@ -662,16 +663,30 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         return wav
     }
 
-    private func findDataChunkOffset(in data: Data) -> Int? {
-        let marker: [UInt8] = [0x64, 0x61, 0x74, 0x61] // "data"
-        let bytes = [UInt8](data)
+    private func findDataChunkOffset(in bytes: [UInt8]) -> Int? {
+        guard bytes.count >= 4 else { return nil }
+        let d: UInt8 = 0x64, a: UInt8 = 0x61, t: UInt8 = 0x74  // "data"
         for i in 0..<(bytes.count - 3) {
-            if bytes[i] == marker[0] && bytes[i+1] == marker[1]
-                && bytes[i+2] == marker[2] && bytes[i+3] == marker[3] {
+            if bytes[i] == d && bytes[i+1] == a && bytes[i+2] == t && bytes[i+3] == a {
                 return i
             }
         }
         return nil
+    }
+
+    /// Safe little-endian UInt32 read from byte array.
+    private func readUInt32LE(_ bytes: [UInt8], offset: Int) -> UInt32 {
+        guard offset + 3 < bytes.count else { return 0 }
+        return UInt32(bytes[offset])
+             | UInt32(bytes[offset+1]) << 8
+             | UInt32(bytes[offset+2]) << 16
+             | UInt32(bytes[offset+3]) << 24
+    }
+
+    /// Safe little-endian UInt16 read from byte array.
+    private func readUInt16LE(_ bytes: [UInt8], offset: Int) -> UInt16 {
+        guard offset + 1 < bytes.count else { return 0 }
+        return UInt16(bytes[offset]) | UInt16(bytes[offset+1]) << 8
     }
 
     // MARK: - Helpers

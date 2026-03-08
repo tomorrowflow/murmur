@@ -163,7 +163,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             if let subject = subject {
                 payload["subject"] = subject
             }
-            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled) model=\(self.selectedModel) length=\(self.podcastLength)")
+            NSLog("Podcast: INGEST web_search=\(self.webSearchEnabled) model=\(self.selectedModel) length=\(self.podcastLength) hostA=\(self.hostAName) hostB=\(self.hostBName)")
             self.sendJSON(payload)
             self.state = .ingesting
         }
@@ -193,18 +193,46 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         player?.play()
     }
 
+    private var isReplaying = false
+
     /// Replay the full podcast from the beginning using collected audio segments.
     func replayFromStart() {
-        guard let data = combinedAudioData() else { return }
-        do {
-            player?.stop()
-            player = try AVAudioPlayer(data: data)
-            player?.delegate = self
-            player?.prepareToPlay()
-            player?.play()
-            state = .playing
-        } catch {
-            NSLog("Podcast: replay failed: \(error)")
+        NSLog("Podcast: replaying from start (\(audioSegments.count) segments)")
+
+        // Reset chunk tracking to beginning
+        currentChunkIndex = 0
+        isReplaying = true
+        delegate?.podcastDidUpdateChunkProgress(current: 1, total: totalChunks)
+
+        // Reset line highlighting to the first transcript line
+        currentChunkLines = transcript.filter { !$0.isInterruptMarker }
+        if let first = transcript.first {
+            activeLineId = first.id
+            delegate?.podcastDidActivateLine(first.id)
+        }
+
+        // Combine and play
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self, let data = self.combinedAudioData() else { return }
+            DispatchQueue.main.async {
+                do {
+                    self.player?.stop()
+                    // Prepend silence so audio device wakes up before speech
+                    let playData = self.prependSilence(to: data) ?? data
+                    self.player = try AVAudioPlayer(data: playData)
+                    self.player?.delegate = self
+                    self.player?.prepareToPlay()
+                    self.player?.play()
+                    self.state = .playing
+
+                    // Schedule line advancement over full transcript
+                    let allLines = self.transcript.filter { !$0.isInterruptMarker }
+                    self.currentChunkLines = allLines
+                    self.scheduleLineAdvancement(duration: self.player?.duration ?? 0)
+                } catch {
+                    NSLog("Podcast: replay failed: \(error)")
+                }
+            }
         }
     }
 
@@ -468,17 +496,19 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             // Collect audio segment for full download
             audioSegments.append(data)
 
-            player = try AVAudioPlayer(data: data)
+            // For the first chunk, prepend silence so the audio device wakes up
+            // before speech begins (prevents first words being swallowed)
+            let playData: Data
+            if chunkIndex == 0, let silenced = prependSilence(to: data) {
+                playData = silenced
+            } else {
+                playData = data
+            }
+
+            player = try AVAudioPlayer(data: playData)
             player?.delegate = self
             player?.prepareToPlay()
-
-            // For the first chunk, delay playback briefly to let the audio device
-            // wake up (prevents first words being swallowed on Bluetooth/idle devices)
-            if chunkIndex == 0 {
-                player?.play(atTime: player!.deviceCurrentTime + 0.15)
-            } else {
-                player?.play()
-            }
+            player?.play()
             state = .playing
             if chunkIndex >= 0 {
                 delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
@@ -575,9 +605,68 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         ])
     }
 
+    // MARK: - Audio Helpers
+
+    /// Prepend a short silence to audio data so the audio device can wake up
+    /// before speech begins. Returns new Data with silence + original audio.
+    private func prependSilence(to audioData: Data, seconds: Double = 0.4) -> Data? {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("podcast_silence_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let srcFile = tmpDir.appendingPathComponent("src.audio")
+        try? audioData.write(to: srcFile)
+
+        guard let audioFile = try? AVAudioFile(forReading: srcFile) else { return nil }
+        let fmt = audioFile.processingFormat
+        let srcFrameCount = AVAudioFrameCount(audioFile.length)
+
+        // Create silence buffer
+        let silenceFrames = AVAudioFrameCount(fmt.sampleRate * seconds)
+        guard let silenceBuf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: silenceFrames) else { return nil }
+        silenceBuf.frameLength = silenceFrames
+        // Buffer is zero-initialized = silence
+
+        // Read source audio
+        guard let srcBuf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: srcFrameCount) else { return nil }
+        do { try audioFile.read(into: srcBuf) } catch { return nil }
+
+        // Write combined WAV
+        let outFile = tmpDir.appendingPathComponent("out.wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: fmt.sampleRate,
+            AVNumberOfChannelsKey: fmt.channelCount,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        do {
+            try autoreleasepool {
+                let wavFile = try AVAudioFile(forWriting: outFile, settings: settings)
+                try wavFile.write(from: silenceBuf)
+                try wavFile.write(from: srcBuf)
+            }
+            return try Data(contentsOf: outFile)
+        } catch {
+            NSLog("Podcast: prependSilence failed: \(error)")
+            return nil
+        }
+    }
+
     // MARK: - AVAudioPlayerDelegate
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        // Replay finished — return to complete state
+        if isReplaying {
+            isReplaying = false
+            NSLog("Podcast: replay finished")
+            state = .complete
+            return
+        }
+
         guard isSessionActive else { return }
 
         // After interrupt response finishes, request next chunk from revised script
@@ -722,6 +811,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         cancelLineAdvanceTimers()
         currentChunkLines = []
         isPlayingInterruptResponse = false
+        isReplaying = false
         player = nil
         sessionId = nil
         currentChunkIndex = 0

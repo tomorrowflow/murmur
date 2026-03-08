@@ -645,12 +645,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         let systemWide = AXUIElementCreateSystemWide()
         var focusedElement: AnyObject?
         let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        if result != .success {
+            NSLog("Accessibility: failed to get focused element (error: \(result.rawValue))")
+        }
         guard result == .success, let element = focusedElement else { return nil }
 
         var selectedText: AnyObject?
         let textResult = AXUIElementCopyAttributeValue(element as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedText)
+        if textResult != .success {
+            NSLog("Accessibility: failed to get selected text (error: \(textResult.rawValue))")
+        }
         guard textResult == .success, let text = selectedText as? String, !text.isEmpty else { return nil }
+        NSLog("Accessibility: got selected text (\(text.count) chars)")
         return text
+    }
+
+    /// Simulate Cmd+C to copy the current selection to clipboard, then read it.
+    func getSelectedTextViaCopy() -> String? {
+        // Save current clipboard content
+        let pasteboard = NSPasteboard.general
+        let previousContent = pasteboard.string(forType: .string)
+        let previousChangeCount = pasteboard.changeCount
+
+        // Simulate Cmd+C
+        let src = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true) // 'c' key
+        keyDown?.flags = .maskCommand
+        keyDown?.post(tap: .cghidEventTap)
+        let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
+        keyUp?.flags = .maskCommand
+        keyUp?.post(tap: .cghidEventTap)
+
+        // Wait briefly for the copy to complete
+        usleep(100_000) // 100ms
+
+        // Check if clipboard changed
+        if pasteboard.changeCount != previousChangeCount,
+           let text = pasteboard.string(forType: .string), !text.isEmpty {
+            NSLog("Accessibility: got selected text via Cmd+C simulation (\(text.count) chars)")
+            return text
+        }
+
+        NSLog("Accessibility: Cmd+C simulation did not produce new clipboard content")
+        return nil
     }
 
     func readSelectedText() {
@@ -1198,12 +1235,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             podcastOverlay?.dismiss()
             stopWaveformAnimation()
         } else {
-            // Try selected text first, fall back to clipboard
+            // Try selected text first via accessibility, then Cmd+C simulation, then clipboard
             var content = getSelectedTextViaAccessibility() ?? ""
+            if content.isEmpty {
+                NSLog("Podcast: accessibility API returned no text, trying Cmd+C simulation")
+                content = getSelectedTextViaCopy() ?? ""
+            }
             if content.isEmpty {
                 content = NSPasteboard.general.string(forType: .string) ?? ""
                 if !content.isEmpty {
-                    NSLog("Podcast: using clipboard content (\(content.count) chars)")
+                    NSLog("Podcast: using existing clipboard content (\(content.count) chars)")
                 }
             } else {
                 NSLog("Podcast: using selected text (\(content.count) chars)")

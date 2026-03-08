@@ -158,6 +158,9 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
     host_b_name = msg.get("host_b_name") or cfg.HOST_B_NAME
     session.host_a_name = host_a_name
     session.host_b_name = host_b_name
+    log.info("INGEST hosts: raw=%r/%r → resolved=%s/%s",
+             msg.get("host_a_name"), msg.get("host_b_name"),
+             host_a_name, host_b_name)
 
     chunk_model, chunk_quantize = resolve_preset(session.model_preset)
 

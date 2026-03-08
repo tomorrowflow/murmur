@@ -118,7 +118,7 @@ struct PodcastOverlayView: View {
                     || viewModel.state == .buffering || viewModel.state == .listening
                     || viewModel.state == .processingInterrupt {
                     Button(action: { viewModel.onExportAudio?() }) {
-                        Image(systemName: "waveform.circle")
+                        Image(systemName: "arrow.down.doc.fill")
                             .foregroundColor(viewModel.state == .complete ? .secondary : .secondary.opacity(0.3))
                             .font(.system(size: 13))
                     }

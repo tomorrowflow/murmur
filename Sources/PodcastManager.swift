@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import MediaPlayer
 
 // MARK: - Protocol
 
@@ -88,6 +89,8 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var keepaliveTimer: Timer?
     private var isDownloadingPrefetch = false
     private var isPlayingInterruptResponse = false
+    private(set) var isPaused = false
+    private var pendingPlayData: (data: Data, chunkIndex: Int)?
     private var lineAdvanceTimers: [Timer] = []
     private var currentChunkLines: [ScriptLine] = []
     private(set) var activeLineId: UUID?
@@ -119,9 +122,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "podcast.webSearchEnabled") }
     }
 
+    /// Called by the app delegate when a remote command (play/pause) is received.
+    var onRemotePlayPause: (() -> Void)?
+
     override init() {
         super.init()
         urlSession = URLSession(configuration: .default)
+        setupRemoteCommandCenter()
     }
 
     deinit {
@@ -185,12 +192,31 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     var audioSegmentCount: Int { audioSegments.count }
 
     func pausePlayback() {
+        isPaused = true
         player?.pause()
         cancelLineAdvanceTimers()
+        updateNowPlaying(paused: true)
     }
 
     func resumePlayback() {
-        player?.play()
+        isPaused = false
+
+        if let p = player, !p.isPlaying {
+            // Resume current chunk from where it was paused
+            p.play()
+            updateNowPlaying(paused: false)
+            // Re-schedule line advancement for remaining time
+            let remaining = p.duration - p.currentTime
+            if remaining > 0 {
+                scheduleLineAdvancement(duration: p.duration, hasPrependedSilence: false)
+            }
+        } else if let pending = pendingPlayData {
+            // A chunk was queued while the previous chunk had finished during pause
+            pendingPlayData = nil
+            NSLog("Podcast: resuming with queued chunk \(pending.chunkIndex)")
+            playAudioData(pending.data, chunkIndex: pending.chunkIndex, alreadyCollected: true)
+        }
+        updateNowPlaying(paused: false)
     }
 
     private var isReplaying = false
@@ -224,11 +250,12 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                     self.player?.prepareToPlay()
                     self.player?.play()
                     self.state = .playing
+                    self.updateNowPlaying()
 
                     // Schedule line advancement over full transcript
                     let allLines = self.transcript.filter { !$0.isInterruptMarker }
                     self.currentChunkLines = allLines
-                    self.scheduleLineAdvancement(duration: self.player?.duration ?? 0)
+                    self.scheduleLineAdvancement(duration: self.player?.duration ?? 0, hasPrependedSilence: true)
                 } catch {
                     NSLog("Podcast: replay failed: \(error)")
                 }
@@ -396,7 +423,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 lines = []
             }
 
-            if state == .buffering || player == nil || !(player?.isPlaying ?? false) {
+            if !isPaused && (state == .buffering || player == nil || !(player?.isPlaying ?? false)) {
                 // We need audio now — play immediately
                 if !lines.isEmpty {
                     transcript.append(contentsOf: lines)
@@ -493,11 +520,28 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
     }
 
-    private func playAudioData(_ data: Data, chunkIndex: Int) {
-        do {
-            // Collect audio segment for full download
+    private func playAudioData(_ data: Data, chunkIndex: Int, alreadyCollected: Bool = false) {
+        // Collect audio segment for full download
+        if !alreadyCollected {
             audioSegments.append(data)
+        }
 
+        // If paused, queue this chunk to play when resumed
+        if isPaused {
+            NSLog("Podcast: queuing chunk \(chunkIndex) (paused)")
+            pendingPlayData = (data: data, chunkIndex: chunkIndex)
+            currentChunkIndex = chunkIndex
+            if chunkIndex >= 0 {
+                delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
+            }
+            // Still prefetch the next chunk
+            if chunkIndex >= 0 && currentChunkIndex + 1 < totalChunks {
+                requestNextChunk()
+            }
+            return
+        }
+
+        do {
             // For the first chunk, prepend silence so the audio device wakes up
             // before speech begins (prevents first words being swallowed)
             let playData: Data
@@ -512,12 +556,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             player?.prepareToPlay()
             player?.play()
             state = .playing
+            updateNowPlaying()
             if chunkIndex >= 0 {
                 delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
             }
 
             // Schedule line-by-line advancement through the current chunk
-            scheduleLineAdvancement(duration: player?.duration ?? 0)
+            scheduleLineAdvancement(duration: player?.duration ?? 0, hasPrependedSilence: chunkIndex == 0)
 
             // Request next chunk while playing (prefetch)
             if chunkIndex >= 0 {
@@ -533,31 +578,53 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
     }
 
-    private func scheduleLineAdvancement(duration: TimeInterval) {
+    /// The duration of silence prepended to the first chunk / replay audio.
+    private let prependedSilenceDuration: TimeInterval = 0.4
+
+    private func scheduleLineAdvancement(duration: TimeInterval, hasPrependedSilence: Bool = false) {
         cancelLineAdvanceTimers()
         let lines = currentChunkLines
         guard !lines.isEmpty, duration > 0 else { return }
 
-        // Distribute time proportionally by word count
-        let wordCounts = lines.map { max(Double($0.text.split(separator: " ").count), 1.0) }
-        let totalWords = wordCounts.reduce(0, +)
-
-        var elapsed: TimeInterval = 0
+        // Estimate each line's spoken duration using character count (more accurate
+        // than word count because long words take proportionally longer to speak).
+        // Add a fixed pause at each speaker change to model the natural gap between turns.
+        let speakerChangePause: TimeInterval = 0.35
+        var weights = [Double]()
         for (i, line) in lines.enumerated() {
-            let lineId = line.id
-            let delay = elapsed
-            let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-                self?.activeLineId = lineId
-                self?.delegate?.podcastDidActivateLine(lineId)
+            // Character-based weight (minimum 10 chars to avoid near-zero weights)
+            var w = Double(max(line.text.count, 10))
+            // Add pause weight when the speaker changes
+            if i > 0 && lines[i].speaker != lines[i - 1].speaker {
+                w += speakerChangePause * 15.0 // ~15 chars ≈ 1 second of speech
             }
-            lineAdvanceTimers.append(timer)
-            elapsed += (wordCounts[i] / totalWords) * duration
+            weights.append(w)
         }
+        let totalWeight = weights.reduce(0, +)
+
+        // If we prepended silence, that time is in the duration but isn't speech.
+        // Reserve it as an initial offset so the first line starts after the silence.
+        let silenceOffset: TimeInterval = hasPrependedSilence ? prependedSilenceDuration : 0
+        let speechDuration = duration - silenceOffset
 
         // Activate first line immediately
         if let first = lines.first {
             activeLineId = first.id
             delegate?.podcastDidActivateLine(first.id)
+        }
+
+        var elapsed: TimeInterval = silenceOffset
+        for (i, line) in lines.enumerated() {
+            let lineId = line.id
+            let delay = elapsed
+            if i > 0 { // first line already activated above
+                let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                    self?.activeLineId = lineId
+                    self?.delegate?.podcastDidActivateLine(lineId)
+                }
+                lineAdvanceTimers.append(timer)
+            }
+            elapsed += (weights[i] / totalWeight) * speechDuration
         }
     }
 
@@ -666,6 +733,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             isReplaying = false
             NSLog("Podcast: replay finished")
             state = .complete
+            updateNowPlaying(paused: true)
             return
         }
 
@@ -709,6 +777,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             // No more chunks
             NSLog("Podcast: all chunks played, session complete")
             state = .complete
+            updateNowPlaying(paused: true)
         } else {
             // Waiting for prefetch to complete
             NSLog("Podcast: waiting for next chunk (prefetch not ready)")
@@ -814,6 +883,8 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         currentChunkLines = []
         isPlayingInterruptResponse = false
         isReplaying = false
+        isPaused = false
+        pendingPlayData = nil
         player = nil
         sessionId = nil
         currentChunkIndex = 0
@@ -830,6 +901,73 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         prefetchedTranscriptLines = []
 
         state = .idle
+        clearNowPlaying()
+    }
+
+    // MARK: - Now Playing Integration
+
+    private func setupRemoteCommandCenter() {
+        let center = MPRemoteCommandCenter.shared()
+
+        center.playCommand.isEnabled = true
+        center.playCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            if self.state == .complete {
+                self.onRemotePlayPause?()
+            } else {
+                self.resumePlayback()
+                self.updateNowPlaying(paused: false)
+            }
+            return .success
+        }
+
+        center.pauseCommand.isEnabled = true
+        center.pauseCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            self.pausePlayback()
+            self.updateNowPlaying(paused: true)
+            return .success
+        }
+
+        center.togglePlayPauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            self.onRemotePlayPause?()
+            return .success
+        }
+
+        center.changePlaybackPositionCommand.isEnabled = false
+        center.skipForwardCommand.isEnabled = false
+        center.skipBackwardCommand.isEnabled = false
+        center.nextTrackCommand.isEnabled = false
+        center.previousTrackCommand.isEnabled = false
+        center.seekForwardCommand.isEnabled = false
+        center.seekBackwardCommand.isEnabled = false
+    }
+
+    func updateNowPlaying(paused: Bool = false) {
+        var info = [String: Any]()
+        info[MPMediaItemPropertyTitle] = title.isEmpty ? "Podcast" : title
+        info[MPMediaItemPropertyArtist] = "Murmur"
+        info[MPNowPlayingInfoPropertyPlaybackRate] = paused ? 0.0 : 1.0
+
+        if let p = player {
+            info[MPMediaItemPropertyPlaybackDuration] = p.duration
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = p.currentTime
+        }
+
+        if totalChunks > 0 {
+            info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = currentChunkIndex
+            info[MPNowPlayingInfoPropertyPlaybackQueueCount] = totalChunks
+        }
+
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        MPNowPlayingInfoCenter.default().playbackState = paused ? .paused : .playing
+    }
+
+    private func clearNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
     }
 }
 

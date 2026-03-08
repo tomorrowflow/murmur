@@ -45,10 +45,10 @@ def _resolve_target_minutes(target_length: str, content: str) -> int:
         return 25
 
 
-async def generate_script(content: str, target_length: str = "auto") -> tuple[str, list[dict]]:
+async def generate_script(content: str, target_length: str = "auto") -> tuple[str, list[dict], int]:
     """Generate a podcast script from source content.
 
-    Returns (title, script_lines) where script_lines is a list of
+    Returns (title, script_lines, target_minutes) where script_lines is a list of
     {"speaker": str, "text": str, "line_id": int} dicts.
     """
     target_minutes = _resolve_target_minutes(target_length, content)
@@ -73,7 +73,7 @@ async def generate_script(content: str, target_length: str = "auto") -> tuple[st
         line["line_id"] = i
 
     log.info("Generated script: %d lines, title=%s", len(script), title)
-    return title, script
+    return title, script, target_minutes
 
 
 def _parse_script(raw: str) -> list[dict]:

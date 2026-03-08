@@ -14,7 +14,7 @@ from chunk_manager import split_into_chunks
 from config import cfg
 from ingest import ingest_email, ingest_pdf, ingest_url
 from interrupt_handler import handle_interrupt
-from script_generator import generate_script
+from script_generator import _resolve_target_minutes, generate_script
 from session import PodcastSession, SessionState
 
 logging.basicConfig(
@@ -174,11 +174,13 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
         session.state = SessionState.SCRIPTING
 
         # Generate script
+        target_minutes = _resolve_target_minutes(target_length, text)
         await _safe_send(websocket, {
             "type": "PROGRESS", "session_id": session.session_id,
-            "stage": "scripting", "percent": -1, "message": "Generating script...",
+            "stage": "scripting", "percent": -1,
+            "message": f"Generating script for ~{target_minutes} min podcast...",
         })
-        title, script = await generate_script(text, target_length=target_length)
+        title, script, _ = await generate_script(text, target_length=target_length)
         session.title = title
         session.original_script = script
         session.chunks = split_into_chunks(script)

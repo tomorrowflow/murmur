@@ -21,8 +21,8 @@ Your tasks:
 
 Output ONLY valid JSON:
 {{
-  "interrupt_response": [{{"speaker": "Alex"|"Jordan", "text": "..."}}, ...],
-  "revised_remaining":  [{{"speaker": "Alex"|"Jordan", "text": "..."}}, ...]
+  "interrupt_response": [{{"speaker": "{HOST_A_NAME}"|"{HOST_B_NAME}", "text": "..."}}, ...],
+  "revised_remaining":  [{{"speaker": "{HOST_A_NAME}"|"{HOST_B_NAME}", "text": "..."}}, ...]
 }}
 
 Critical: the interrupt_response MUST flow naturally as if it were the next thing said on air. The listener should feel like the hosts seamlessly pivoted to their question and then the show continues.

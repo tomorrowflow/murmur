@@ -40,9 +40,11 @@ async def handle_interrupt(session: PodcastSession, question: str, on_progress: 
         "user_question": question,
     }
 
+    host_a = getattr(session, "host_a_name", cfg.HOST_A_NAME)
+    host_b = getattr(session, "host_b_name", cfg.HOST_B_NAME)
     system = SYSTEM_PROMPT.format(
-        HOST_A_NAME=cfg.HOST_A_NAME,
-        HOST_B_NAME=cfg.HOST_B_NAME,
+        HOST_A_NAME=host_a,
+        HOST_B_NAME=host_b,
     )
     user_msg = f"Conversation context:\n\n{json.dumps(context, indent=2)}"
     if web_context:
@@ -62,6 +64,7 @@ async def handle_interrupt(session: PodcastSession, question: str, on_progress: 
         model=cfg.INTERRUPT_MODEL,
         session_id=session.session_id,
         on_progress=on_progress,
+        host_a_name=getattr(session, "host_a_name", None),
     )
 
     # Splice revised script into remaining chunks.

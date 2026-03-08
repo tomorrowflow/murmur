@@ -45,19 +45,26 @@ def _resolve_target_minutes(target_length: str, content: str) -> int:
         return 25
 
 
-async def generate_script(content: str, target_length: str = "auto") -> tuple[str, list[dict], int]:
+async def generate_script(
+    content: str,
+    target_length: str = "auto",
+    host_a_name: str | None = None,
+    host_b_name: str | None = None,
+) -> tuple[str, list[dict], int]:
     """Generate a podcast script from source content.
 
     Returns (title, script_lines, target_minutes) where script_lines is a list of
     {"speaker": str, "text": str, "line_id": int} dicts.
     """
+    host_a = host_a_name or cfg.HOST_A_NAME
+    host_b = host_b_name or cfg.HOST_B_NAME
     target_minutes = _resolve_target_minutes(target_length, content)
-    log.info("Target length: %s → %d minutes (content: %d words)",
-             target_length, target_minutes, len(content.split()))
+    log.info("Target length: %s → %d minutes (content: %d words, hosts: %s/%s)",
+             target_length, target_minutes, len(content.split()), host_a, host_b)
 
     system = SYSTEM_PROMPT.format(
-        HOST_A_NAME=cfg.HOST_A_NAME,
-        HOST_B_NAME=cfg.HOST_B_NAME,
+        HOST_A_NAME=host_a,
+        HOST_B_NAME=host_b,
         target_duration_minutes=target_minutes,
     )
 

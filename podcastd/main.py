@@ -154,6 +154,10 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
     session.web_search_enabled = msg.get("web_search", False)
     session.model_preset = msg.get("model", "large-q4")
     target_length = msg.get("target_length", "auto")
+    host_a_name = msg.get("host_a_name") or cfg.HOST_A_NAME
+    host_b_name = msg.get("host_b_name") or cfg.HOST_B_NAME
+    session.host_a_name = host_a_name
+    session.host_b_name = host_b_name
 
     chunk_model, chunk_quantize = resolve_preset(session.model_preset)
 
@@ -180,7 +184,10 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             "stage": "scripting", "percent": -1,
             "message": f"Generating script for ~{target_minutes} min podcast...",
         })
-        title, script, _ = await generate_script(text, target_length=target_length)
+        title, script, _ = await generate_script(
+            text, target_length=target_length,
+            host_a_name=host_a_name, host_b_name=host_b_name,
+        )
         session.title = title
         session.original_script = script
         session.chunks = split_into_chunks(script)
@@ -197,7 +204,7 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             audio_file = await generate_audio(
                 session.chunks[0], model=chunk_model,
                 quantize_llm=chunk_quantize, session_id=session.session_id,
-                on_progress=progress_cb,
+                on_progress=progress_cb, host_a_name=host_a_name,
             )
         session.chunk_audio_files[0] = audio_file
         session.state = SessionState.READY
@@ -291,6 +298,7 @@ async def _deliver_next_chunk_inner(websocket, session: PodcastSession) -> None:
                 session.chunks[next_idx], model=chunk_model,
                 quantize_llm=chunk_quantize, session_id=sid,
                 on_progress=progress_cb,
+                host_a_name=getattr(session, "host_a_name", None),
             )
         session.chunk_audio_files[next_idx] = audio_file
 
@@ -420,6 +428,7 @@ async def _prefetch_chunk(session: PodcastSession, chunk_idx: int) -> None:
             audio_file = await generate_audio(
                 session.chunks[chunk_idx], model=chunk_model,
                 quantize_llm=chunk_quantize, session_id=session.session_id,
+                host_a_name=getattr(session, "host_a_name", None),
             )
         session.chunk_audio_files[chunk_idx] = audio_file
         log.info("Prefetched chunk %d: %s", chunk_idx, audio_file)

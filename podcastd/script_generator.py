@@ -12,12 +12,49 @@ log = logging.getLogger(__name__)
 SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "script_system.txt").read_text()
 
 
-async def generate_script(content: str, target_minutes: int = 8) -> tuple[str, list[dict]]:
+def _resolve_target_minutes(target_length: str, content: str) -> int:
+    """Resolve the target podcast duration in minutes.
+
+    Fixed modes:
+      - "short"  → ~8 minutes
+      - "medium" → ~15 minutes
+      - "long"   → ~30 minutes
+
+    Auto mode scales with content length:
+      - < 500 words   → 5 min
+      - 500-1500      → 8 min
+      - 1500-3000     → 12 min
+      - 3000-6000     → 18 min
+      - > 6000        → 25 min
+    """
+    fixed = {"short": 8, "medium": 15, "long": 30}
+    if target_length in fixed:
+        return fixed[target_length]
+
+    # Auto: scale with content word count
+    word_count = len(content.split())
+    if word_count < 500:
+        return 5
+    elif word_count < 1500:
+        return 8
+    elif word_count < 3000:
+        return 12
+    elif word_count < 6000:
+        return 18
+    else:
+        return 25
+
+
+async def generate_script(content: str, target_length: str = "auto") -> tuple[str, list[dict]]:
     """Generate a podcast script from source content.
 
     Returns (title, script_lines) where script_lines is a list of
     {"speaker": str, "text": str, "line_id": int} dicts.
     """
+    target_minutes = _resolve_target_minutes(target_length, content)
+    log.info("Target length: %s → %d minutes (content: %d words)",
+             target_length, target_minutes, len(content.split()))
+
     system = SYSTEM_PROMPT.format(
         HOST_A_NAME=cfg.HOST_A_NAME,
         HOST_B_NAME=cfg.HOST_B_NAME,

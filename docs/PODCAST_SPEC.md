@@ -140,7 +140,7 @@ All messages are JSON with a `type` field.
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `INGEST` | `{content_type, content, subject?, web_search?, model?}` | Start new session |
+| `INGEST` | `{content_type, content, subject?, web_search?, model?, target_length?}` | Start new session |
 | `NEXT_CHUNK` | `{session_id}` | Request next audio chunk |
 | `INTERRUPT` | `{session_id, question}` | User interrupted with voice question |
 | `STOP` | `{session_id}` | End session, clean up audio files |
@@ -173,6 +173,26 @@ All messages are JSON with a `type` field.
 - When `false` or omitted, interrupt responses are generated purely from the original content and conversation context.
 - Controlled by the user via a toggle in the Podcast settings UI or per-session in the podcast start dialog.
 - Requires `OLLAMA_API_KEY` to be set in the podcastd `.env` file (free key from https://ollama.com/settings/keys).
+
+**`INGEST`** — `target_length` (string, optional, default `"auto"`):
+- Controls the target duration of the generated podcast. The server resolves this to a `target_minutes` value passed to the LLM script generation prompt.
+- Valid values:
+
+| Value | Target Duration | Description |
+|-------|----------------|-------------|
+| `"auto"` | 5-25 min (scaled) | Automatically scales with source content length. Short texts produce short podcasts, long texts produce longer ones. |
+| `"short"` | ~8 min | Concise deep-dive — typical "commute segment" format |
+| `"medium"` | ~15 min | Standard podcast episode segment |
+| `"long"` | ~30 min | Extended discussion — full episode format |
+
+- **Auto scaling logic** (based on source word count):
+  - < 500 words → 5 min
+  - 500-1500 words → 8 min
+  - 1500-3000 words → 12 min
+  - 3000-6000 words → 18 min
+  - \> 6000 words → 25 min
+- The target duration is approximate — the LLM may produce slightly more or less content. The actual runtime also depends on speech synthesis speed (~140 words/minute at the current VibeVoice settings).
+- Controlled by the user via a Picker in the Podcast settings UI (`podcast.length` UserDefaults key).
 
 **`CHUNK_READY` and `INTERRUPT_READY`** — the `transcript` field must be an array of objects:
 ```json
@@ -616,6 +636,7 @@ Floating non-activating panel (same as `OpenClawOverlayWindow`). Shows:
 | Audio base URL | `https://podcastd.internal.domain` | HTTP audio fetch base |
 | Host A name | Alex | Display name in overlay |
 | Host B name | Jordan | Display name in overlay |
+| Podcast Length | Auto | `auto`, `short` (~8 min), `medium` (~15 min), `long` (~30 min) |
 | Interrupt PTT key | Left Option | Configurable |
 
 ### 8.8 Interrupt Audio Tone

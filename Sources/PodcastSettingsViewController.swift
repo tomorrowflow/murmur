@@ -103,6 +103,23 @@ struct PodcastSettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                Section("Length") {
+                    HStack(spacing: 8) {
+                        Text("Podcast Length")
+                            .frame(width: 120, alignment: .leading)
+                        Picker("", selection: $viewModel.podcastLength) {
+                            Text("Auto (based on content)").tag("auto")
+                            Text("Short (~8 min)").tag("short")
+                            Text("Medium (~15 min)").tag("medium")
+                            Text("Long (~30 min)").tag("long")
+                        }
+                        .labelsHidden()
+                    }
+                    Text("Auto scales duration with the source content length. Fixed options target a specific runtime.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+
                 Section("Features") {
                     Toggle(isOn: $viewModel.webSearchEnabled) {
                         HStack {
@@ -149,6 +166,7 @@ class PodcastSettingsViewModel: ObservableObject {
     @Published var hostAName: String = ""
     @Published var hostBName: String = ""
     @Published var selectedModel: String = "large-q4"
+    @Published var podcastLength: String = "auto"
     @Published var webSearchEnabled: Bool = false
     @Published var statusText: String = "Not configured"
     @Published var statusColor: Color = .gray
@@ -164,6 +182,7 @@ class PodcastSettingsViewModel: ObservableObject {
         hostAName = defaults.string(forKey: "podcast.hostAName") ?? ""
         hostBName = defaults.string(forKey: "podcast.hostBName") ?? ""
         selectedModel = defaults.string(forKey: "podcast.model") ?? "large-q4"
+        podcastLength = defaults.string(forKey: "podcast.length") ?? "auto"
         webSearchEnabled = defaults.bool(forKey: "podcast.webSearchEnabled")
         refreshStatus()
         fetchVoiceSampleStatus()
@@ -176,6 +195,7 @@ class PodcastSettingsViewModel: ObservableObject {
         defaults.set(hostAName, forKey: "podcast.hostAName")
         defaults.set(hostBName, forKey: "podcast.hostBName")
         defaults.set(selectedModel, forKey: "podcast.model")
+        defaults.set(podcastLength, forKey: "podcast.length")
         defaults.set(webSearchEnabled, forKey: "podcast.webSearchEnabled")
         refreshStatus()
     }

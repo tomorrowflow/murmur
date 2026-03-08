@@ -1139,7 +1139,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             }
             podcastOverlay?.onPlayPause = { [weak self] in
                 guard let manager = self?.podcastManager else { return }
-                if self?.podcastOverlay?.viewModel.isPaused == true {
+                if manager.state == .complete {
+                    manager.replayFromStart()
+                } else if self?.podcastOverlay?.viewModel.isPaused == true {
                     manager.pausePlayback()
                 } else {
                     manager.resumePlayback()
@@ -1156,31 +1158,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     private func exportPodcastAudio() {
-        guard let audioData = podcastManager?.combinedAudioData() else {
-            NSLog("Podcast: no audio data to export")
-            return
-        }
+        let segmentCount = podcastManager?.audioSegmentCount ?? 0
+        NSLog("Podcast: preparing audio export (\(segmentCount) segments)")
 
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [.wav]
-        let title = podcastOverlay?.viewModel.title ?? "Podcast"
-        savePanel.nameFieldStringValue = "\(title).wav"
-        savePanel.level = .floating + 1
-        if let screen = NSScreen.main {
-            let screenFrame = screen.frame
-            let panelSize = NSSize(width: 500, height: 300)
-            let x = screenFrame.midX - panelSize.width / 2
-            let y = screenFrame.midY - panelSize.height / 2
-            savePanel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: panelSize), display: true)
-        }
-        savePanel.begin { response in
-            if response == .OK, let url = savePanel.url {
-                do {
-                    try audioData.write(to: url)
-                    NSLog("Podcast: exported audio to \(url.path)")
-                } catch {
-                    NSLog("Podcast: failed to export audio: \(error)")
+        // Temporarily hide podcast overlay so save panel is not obscured
+        podcastOverlay?.hidePanel()
+
+        // Combine audio off the main thread to avoid blocking UI
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let audioData = self?.podcastManager?.combinedAudioData() else {
+                NSLog("Podcast: no audio data to export")
+                DispatchQueue.main.async { self?.podcastOverlay?.showPanel() }
+                return
+            }
+            NSLog("Podcast: combined \(audioData.count) bytes, showing save panel")
+
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+
+                let savePanel = NSSavePanel()
+                savePanel.allowedContentTypes = [.wav]
+                let title = self?.podcastOverlay?.viewModel.title ?? "Podcast"
+                savePanel.nameFieldStringValue = "\(title).wav"
+
+                let response = savePanel.runModal()
+                if response == .OK, let url = savePanel.url {
+                    do {
+                        try audioData.write(to: url)
+                        NSLog("Podcast: exported audio to \(url.path)")
+                    } catch {
+                        NSLog("Podcast: failed to export audio: \(error)")
+                    }
                 }
+
+                // Re-show podcast overlay
+                self?.podcastOverlay?.showPanel()
             }
         }
     }

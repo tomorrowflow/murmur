@@ -97,15 +97,20 @@ struct PodcastOverlayView: View {
 
                 if viewModel.state == .playing || viewModel.state == .complete {
                     Button(action: {
-                        viewModel.isPaused.toggle()
-                        viewModel.onPlayPause?()
+                        if viewModel.state == .complete {
+                            // Replay from start
+                            viewModel.onPlayPause?()
+                        } else {
+                            viewModel.isPaused.toggle()
+                            viewModel.onPlayPause?()
+                        }
                     }) {
-                        Image(systemName: viewModel.isPaused ? "play.fill" : "pause.fill")
+                        Image(systemName: viewModel.state == .complete || viewModel.isPaused ? "play.fill" : "pause.fill")
                             .foregroundColor(.secondary)
                             .font(.system(size: 13))
                     }
                     .buttonStyle(.plain)
-                    .help(viewModel.isPaused ? "Resume" : "Pause")
+                    .help(viewModel.state == .complete ? "Replay" : (viewModel.isPaused ? "Resume" : "Pause"))
                 }
 
                 // Export buttons — always visible once playing, audio greyed out until complete
@@ -588,6 +593,18 @@ class PodcastOverlayWindow {
     func dismiss() {
         DispatchQueue.main.async { [self] in
             viewModel.dismiss()
+        }
+    }
+
+    func hidePanel() {
+        DispatchQueue.main.async { [self] in
+            panel?.orderOut(nil)
+        }
+    }
+
+    func showPanel() {
+        DispatchQueue.main.async { [self] in
+            panel?.orderFront(nil)
         }
     }
 

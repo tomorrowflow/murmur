@@ -44,10 +44,12 @@ chunk_delivery_active: set[str] = set()
 
 
 def _make_progress_cb(websocket, session_id: str, chunk_label: str):
-    """Return a callback that sends PROGRESS messages with diffusion step info."""
-    def on_progress(step: int, max_steps: int, elapsed: float):
-        pct = int(step / max_steps * 100) if max_steps else -1
-        msg = f"Generating audio ({chunk_label}) — step {step}/{max_steps} ({elapsed:.0f}s)"
+    """Return a callback that sends PROGRESS messages during audio generation."""
+    def on_progress(elapsed: float, estimated_total: float):
+        pct = min(int(elapsed / estimated_total * 100), 99) if estimated_total > 0 else -1
+        remaining = max(0, estimated_total - elapsed)
+        msg = f"Generating audio ({chunk_label}) — {elapsed:.0f}s / ~{estimated_total:.0f}s (~{remaining:.0f}s remaining)"
+        log.info("Progress: %s (pct=%d)", msg, pct)
         asyncio.create_task(_safe_send(websocket, {
             "type": "PROGRESS",
             "session_id": session_id,

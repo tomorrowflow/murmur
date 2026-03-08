@@ -173,6 +173,7 @@ struct PodcastOverlayView: View {
                                 if viewModel.progressPercent >= 0 {
                                     ProgressView(value: Double(viewModel.progressPercent), total: 100)
                                         .controlSize(.small)
+                                        .tint(.blue)
                                         .frame(width: 100)
                                 } else {
                                     ProgressView()
@@ -324,6 +325,7 @@ struct PodcastOverlayView: View {
             if viewModel.progressPercent >= 0 {
                 ProgressView(value: Double(viewModel.progressPercent), total: 100)
                     .controlSize(.small)
+                    .tint(.blue)
                     .frame(width: 200)
             } else {
                 ProgressView()
@@ -374,6 +376,7 @@ struct PodcastOverlayView: View {
                 if viewModel.progressPercent >= 0 {
                     ProgressView(value: Double(viewModel.progressPercent), total: 100)
                         .controlSize(.small)
+                        .tint(.orange)
                         .frame(width: 100)
                 } else {
                     ProgressView()

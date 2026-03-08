@@ -49,10 +49,11 @@ def estimate_generation_time(text: str, model: str) -> float:
     return len(text) * rate + _OVERHEAD_SECS
 
 
-def format_for_vibevoice(chunk: list[dict]) -> str:
+def format_for_vibevoice(chunk: list[dict], host_a_name: str | None = None) -> str:
+    host_a = host_a_name or cfg.HOST_A_NAME
     lines = []
     for turn in chunk:
-        tag = "[1]:" if turn["speaker"] == cfg.HOST_A_NAME else "[2]:"
+        tag = "[1]:" if turn["speaker"] == host_a else "[2]:"
         lines.append(f"{tag} {turn['text']}")
     return "\n".join(lines)
 
@@ -85,6 +86,7 @@ async def generate_audio(
     quantize_llm: str | None = None,
     session_id: str | None = None,
     on_progress: ProgressCallback = None,
+    host_a_name: str | None = None,
 ) -> str:
     """Generate audio for a script chunk via ComfyUI VibeVoice.
 
@@ -95,7 +97,7 @@ async def generate_audio(
     seed = seed or cfg.VOICE_SEED_A
     model = model or cfg.CHUNK_MODEL
     quantize_llm = quantize_llm or "full precision"
-    text = format_for_vibevoice(chunk)
+    text = format_for_vibevoice(chunk, host_a_name=host_a_name)
     estimated_secs = estimate_generation_time(text, model)
 
     workflow = _build_workflow(text, seed, model, quantize_llm)

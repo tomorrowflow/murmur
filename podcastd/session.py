@@ -35,6 +35,8 @@ class PodcastSession:
     # Options (set per session from INGEST message)
     web_search_enabled: bool = False
     model_preset: str = "large-q4"
+    host_a_name: str = ""
+    host_b_name: str = ""
 
     # History for interrupt context
     delivered_lines: list[dict] = field(default_factory=list)

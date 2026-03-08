@@ -156,7 +156,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 "content": content,
                 "web_search": self.webSearchEnabled,
                 "model": self.selectedModel,
-                "target_length": self.podcastLength
+                "target_length": self.podcastLength,
+                "host_a_name": self.hostAName,
+                "host_b_name": self.hostBName
             ]
             if let subject = subject {
                 payload["subject"] = subject

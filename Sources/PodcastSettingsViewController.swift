@@ -1,3 +1,4 @@
+import AVFoundation
 import Cocoa
 import SwiftUI
 import UniformTypeIdentifiers
@@ -49,6 +50,12 @@ struct PodcastSettingsView: View {
                             viewModel.pickAndUploadVoiceSample(speaker: 1)
                         }
                         .disabled(viewModel.isUploadingSpeaker1 || viewModel.audioBaseURL.isEmpty)
+                        Button(action: { viewModel.togglePlayVoiceSample(speaker: 1) }) {
+                            Image(systemName: viewModel.playingSpeaker == 1 ? "stop.fill" : "play.fill")
+                                .font(.system(size: 11))
+                        }
+                        .disabled(viewModel.speaker1VoiceStatus == "Using default voice" || viewModel.audioBaseURL.isEmpty)
+                        .help(viewModel.playingSpeaker == 1 ? "Stop" : "Play sample")
                         Button("Clear") {
                             viewModel.clearVoiceSample(speaker: 1)
                         }
@@ -78,6 +85,12 @@ struct PodcastSettingsView: View {
                             viewModel.pickAndUploadVoiceSample(speaker: 2)
                         }
                         .disabled(viewModel.isUploadingSpeaker2 || viewModel.audioBaseURL.isEmpty)
+                        Button(action: { viewModel.togglePlayVoiceSample(speaker: 2) }) {
+                            Image(systemName: viewModel.playingSpeaker == 2 ? "stop.fill" : "play.fill")
+                                .font(.system(size: 11))
+                        }
+                        .disabled(viewModel.speaker2VoiceStatus == "Using default voice" || viewModel.audioBaseURL.isEmpty)
+                        .help(viewModel.playingSpeaker == 2 ? "Stop" : "Play sample")
                         Button("Clear") {
                             viewModel.clearVoiceSample(speaker: 2)
                         }
@@ -160,7 +173,7 @@ struct PodcastSettingsView: View {
     }
 }
 
-class PodcastSettingsViewModel: ObservableObject {
+class PodcastSettingsViewModel: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var wsURL: String = ""
     @Published var audioBaseURL: String = ""
     @Published var hostAName: String = ""
@@ -174,6 +187,8 @@ class PodcastSettingsViewModel: ObservableObject {
     @Published var speaker2VoiceStatus: String = "Using default voice"
     @Published var isUploadingSpeaker1: Bool = false
     @Published var isUploadingSpeaker2: Bool = false
+    @Published var playingSpeaker: Int? = nil
+    private var samplePlayer: AVAudioPlayer?
 
     func load() {
         let defaults = UserDefaults.standard
@@ -289,6 +304,9 @@ class PodcastSettingsViewModel: ObservableObject {
         guard !audioBaseURL.isEmpty,
               let url = URL(string: "\(audioBaseURL)/voice-samples/\(speaker)") else { return }
 
+        // Stop playback if clearing the currently playing sample
+        if playingSpeaker == speaker { stopSamplePlayback() }
+
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
 
@@ -299,6 +317,53 @@ class PodcastSettingsViewModel: ObservableObject {
                 }
             }
         }.resume()
+    }
+
+    func togglePlayVoiceSample(speaker: Int) {
+        // If already playing this speaker, stop
+        if playingSpeaker == speaker {
+            stopSamplePlayback()
+            return
+        }
+
+        // Stop any current playback
+        stopSamplePlayback()
+
+        guard !audioBaseURL.isEmpty,
+              let url = URL(string: "\(audioBaseURL)/voice-samples/\(speaker)/audio") else { return }
+
+        playingSpeaker = speaker
+
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            guard let data = data, error == nil,
+                  let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                DispatchQueue.main.async { self?.playingSpeaker = nil }
+                return
+            }
+            DispatchQueue.main.async {
+                do {
+                    self?.samplePlayer = try AVAudioPlayer(data: data)
+                    self?.samplePlayer?.delegate = self
+                    self?.samplePlayer?.play()
+                } catch {
+                    NSLog("Voice sample playback failed: \(error)")
+                    self?.playingSpeaker = nil
+                }
+            }
+        }.resume()
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async {
+            self.playingSpeaker = nil
+            self.samplePlayer = nil
+        }
+    }
+
+    private func stopSamplePlayback() {
+        samplePlayer?.stop()
+        samplePlayer = nil
+        playingSpeaker = nil
     }
 }
 

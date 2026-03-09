@@ -555,6 +555,19 @@ async def handle_delete_voice_sample(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_play_voice_sample(request: web.Request) -> web.Response:
+    """GET /voice-samples/{speaker}/audio — stream the uploaded voice sample."""
+    speaker = request.match_info["speaker"]
+    if speaker not in ("1", "2"):
+        return web.Response(status=400, text="speaker must be '1' or '2'")
+
+    filepath = Path(cfg.COMFYUI_INPUT_DIR) / f"podcast_voice_speaker{speaker}.wav"
+    if not filepath.exists():
+        return web.Response(status=404, text="No voice sample uploaded")
+
+    return web.FileResponse(filepath)
+
+
 def create_http_app() -> web.Application:
     app = web.Application(client_max_size=50 * 1024 * 1024)
     app.router.add_get("/health", handle_health)
@@ -562,6 +575,7 @@ def create_http_app() -> web.Application:
     app.router.add_post("/voice-samples", handle_upload_voice_sample)
     app.router.add_get("/voice-samples", handle_get_voice_samples)
     app.router.add_delete("/voice-samples/{speaker}", handle_delete_voice_sample)
+    app.router.add_get("/voice-samples/{speaker}/audio", handle_play_voice_sample)
     return app
 
 

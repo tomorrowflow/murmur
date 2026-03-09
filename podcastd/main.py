@@ -484,8 +484,14 @@ async def handle_health(request: web.Request) -> web.Response:
 
 async def handle_audio(request: web.Request) -> web.Response:
     filename = request.match_info["filename"]
-    filepath = Path(cfg.AUDIO_CACHE_DIR) / filename
 
+    # Check MP3 cache first (writable dir for converted files)
+    mp3_path = Path(cfg.MP3_CACHE_DIR) / filename
+    if mp3_path.exists():
+        return web.FileResponse(mp3_path)
+
+    # Fall back to ComfyUI output dir (WAV originals)
+    filepath = Path(cfg.AUDIO_CACHE_DIR) / filename
     if not filepath.exists():
         # Check subdirectories (ComfyUI may use audio/ prefix)
         alt = Path(cfg.AUDIO_CACHE_DIR) / "audio" / filename

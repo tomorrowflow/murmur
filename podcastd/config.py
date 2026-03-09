@@ -12,6 +12,8 @@ class Config:
 
     # Audio — ComfyUI output dir mounted read-only into podcastd
     AUDIO_CACHE_DIR: str = os.getenv("AUDIO_CACHE_DIR", "/comfyui_output")
+    # Writable dir for MP3 conversions (AUDIO_CACHE_DIR may be read-only)
+    MP3_CACHE_DIR: str = os.getenv("MP3_CACHE_DIR", "/tmp/podcast_mp3")
 
     # ComfyUI input dir — mounted r/w for uploading voice samples
     COMFYUI_INPUT_DIR: str = os.getenv("COMFYUI_INPUT_DIR", "/comfyui_input")

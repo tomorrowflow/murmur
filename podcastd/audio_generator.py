@@ -169,6 +169,9 @@ async def cancel_session_prompts(session_id: str) -> None:
 async def _convert_to_mp3(wav_filename: str, bitrate: str = "128k") -> str:
     """Convert a WAV file in AUDIO_CACHE_DIR to MP3. Returns the MP3 filename.
 
+    MP3 files are written to MP3_CACHE_DIR (writable) since AUDIO_CACHE_DIR
+    (ComfyUI output) may be mounted read-only.
+
     Falls back to the original WAV if ffmpeg is not available or conversion fails.
     """
     cache_dir = Path(cfg.AUDIO_CACHE_DIR)
@@ -179,8 +182,10 @@ async def _convert_to_mp3(wav_filename: str, bitrate: str = "128k") -> str:
         if alt.exists():
             wav_path = alt
 
+    mp3_dir = Path(cfg.MP3_CACHE_DIR)
+    mp3_dir.mkdir(parents=True, exist_ok=True)
     mp3_filename = Path(wav_filename).with_suffix(".mp3").name
-    mp3_path = wav_path.parent / mp3_filename
+    mp3_path = mp3_dir / mp3_filename
 
     try:
         proc = await asyncio.create_subprocess_exec(

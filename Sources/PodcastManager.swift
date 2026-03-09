@@ -684,7 +684,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let srcFile = tmpDir.appendingPathComponent("src.audio")
+        let srcFile = tmpDir.appendingPathComponent("src.mp3")
         try? audioData.write(to: srcFile)
 
         guard let audioFile = try? AVAudioFile(forReading: srcFile) else { return nil }
@@ -804,7 +804,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         var processingFormat: AVAudioFormat?
 
         for (i, segment) in audioSegments.enumerated() {
-            let tmpFile = tmpDir.appendingPathComponent("seg\(i).audio")
+            let tmpFile = tmpDir.appendingPathComponent("seg\(i).mp3")
             do {
                 try segment.write(to: tmpFile)
                 let audioFile = try AVAudioFile(forReading: tmpFile)

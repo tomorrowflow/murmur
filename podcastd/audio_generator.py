@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -124,8 +125,11 @@ async def generate_audio(
         if ws:
             await ws.close()
 
-    log.info("Audio generated: %s (seed=%d, model=%s)", filename, seed, model)
-    return filename
+    # Convert WAV → MP3 to reduce file size for network transfer
+    mp3_filename = await _convert_to_mp3(filename)
+
+    log.info("Audio generated: %s (seed=%d, model=%s)", mp3_filename, seed, model)
+    return mp3_filename
 
 
 async def interrupt_comfyui() -> None:
@@ -160,6 +164,49 @@ async def cancel_session_prompts(session_id: str) -> None:
             await client.post(f"{cfg.COMFYUI_BASE_URL}/interrupt")
     except Exception:
         log.exception("Failed to cancel ComfyUI prompts")
+
+
+async def _convert_to_mp3(wav_filename: str, bitrate: str = "128k") -> str:
+    """Convert a WAV file in AUDIO_CACHE_DIR to MP3. Returns the MP3 filename.
+
+    Falls back to the original WAV if ffmpeg is not available or conversion fails.
+    """
+    cache_dir = Path(cfg.AUDIO_CACHE_DIR)
+    wav_path = cache_dir / wav_filename
+    # ComfyUI may place files in an audio/ subdirectory
+    if not wav_path.exists():
+        alt = cache_dir / "audio" / wav_filename
+        if alt.exists():
+            wav_path = alt
+
+    mp3_filename = Path(wav_filename).with_suffix(".mp3").name
+    mp3_path = wav_path.parent / mp3_filename
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", str(wav_path),
+            "-b:a", bitrate, "-map_metadata", "-1",
+            str(mp3_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            log.warning("ffmpeg conversion failed (rc=%d): %s", proc.returncode, stderr.decode()[:200])
+            return wav_filename
+        wav_size = wav_path.stat().st_size
+        mp3_size = mp3_path.stat().st_size
+        log.info("Converted %s → %s (%.1f MB → %.1f KB, %.0f%% smaller)",
+                 wav_filename, mp3_filename,
+                 wav_size / 1_048_576, mp3_size / 1024,
+                 (1 - mp3_size / wav_size) * 100)
+        return mp3_filename
+    except FileNotFoundError:
+        log.warning("ffmpeg not found — serving uncompressed WAV")
+        return wav_filename
+    except Exception:
+        log.exception("MP3 conversion failed — serving uncompressed WAV")
+        return wav_filename
 
 
 def _build_workflow(text: str, seed: int, model: str, quantize_llm: str = "full precision") -> dict:

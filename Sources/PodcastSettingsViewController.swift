@@ -51,8 +51,8 @@ struct PodcastSettingsView: View {
                         }
                         .disabled(viewModel.isUploadingSpeaker1 || viewModel.audioBaseURL.isEmpty)
                         Button(action: { viewModel.togglePlayVoiceSample(speaker: 1) }) {
-                            Image(systemName: viewModel.playingSpeaker == 1 ? "stop.fill" : "play.fill")
-                                .font(.system(size: 11))
+                            Label(viewModel.playingSpeaker == 1 ? "Stop" : "Play", systemImage: viewModel.playingSpeaker == 1 ? "stop.fill" : "play.fill")
+                                .labelStyle(.iconOnly)
                         }
                         .disabled(viewModel.speaker1VoiceStatus == "Using default voice" || viewModel.audioBaseURL.isEmpty)
                         .help(viewModel.playingSpeaker == 1 ? "Stop" : "Play sample")
@@ -86,8 +86,8 @@ struct PodcastSettingsView: View {
                         }
                         .disabled(viewModel.isUploadingSpeaker2 || viewModel.audioBaseURL.isEmpty)
                         Button(action: { viewModel.togglePlayVoiceSample(speaker: 2) }) {
-                            Image(systemName: viewModel.playingSpeaker == 2 ? "stop.fill" : "play.fill")
-                                .font(.system(size: 11))
+                            Label(viewModel.playingSpeaker == 2 ? "Stop" : "Play", systemImage: viewModel.playingSpeaker == 2 ? "stop.fill" : "play.fill")
+                                .labelStyle(.iconOnly)
                         }
                         .disabled(viewModel.speaker2VoiceStatus == "Using default voice" || viewModel.audioBaseURL.isEmpty)
                         .help(viewModel.playingSpeaker == 2 ? "Stop" : "Play sample")

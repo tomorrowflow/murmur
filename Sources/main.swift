@@ -91,6 +91,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var openClawRecordingManager: OpenClawRecordingManager?
     private var openClawOverlay: OpenClawOverlayWindow?
     private var optionDoubleTapMonitor: Any?
+    private var optionDoubleTapLocalMonitor: Any?
     private var leftOptionState: OptionDoubleTapState = .idle
     private var leftOptionFirstPressTime: TimeInterval = 0
     private var leftOptionFirstReleaseTime: TimeInterval = 0
@@ -379,59 +380,80 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     // Left Option → OpenClaw, Right Option → STT Recording
 
     private func setupOptionDoubleTapMonitor() {
+        // Global monitor captures events when other apps are focused (normal for a menu bar app).
+        // Local monitor captures events when Murmur itself is focused (rare — settings window, etc).
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            guard let self = self else { return }
+            self.handleOptionKeyEvent(event)
+        }
+
+        optionDoubleTapMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
+            handler(event)
+        }
+
+        // Local monitor must return the event to avoid swallowing it
+        optionDoubleTapLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            handler(event)
+            return event  // pass through — don't consume
+        }
+    }
+
+    private func handleOptionKeyEvent(_ event: NSEvent) {
         let leftOptionKeyCode: UInt16 = 58
         let rightOptionKeyCode: UInt16 = 61
 
-        optionDoubleTapMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            guard let self = self else { return }
+        let optionDown = event.modifierFlags.contains(.option)
 
-            let optionDown = event.modifierFlags.contains(.option)
+        if event.keyCode == leftOptionKeyCode {
+            print("PTT: left option \(optionDown ? "DOWN" : "UP"), state=\(leftOptionState), mods=\(event.modifierFlags.rawValue)")
+        }
 
-            // Ignore if other modifiers are held (Cmd, Ctrl, Shift) — don't interfere with shortcuts
-            let otherModifiers: NSEvent.ModifierFlags = [.command, .control, .shift]
-            if !event.modifierFlags.intersection(otherModifiers).isEmpty {
-                self.resetLeftOptionState()
-                self.resetRightOptionState()
-                return
-            }
+        // Ignore if other modifiers are held (Cmd, Ctrl, Shift) — don't interfere with shortcuts
+        let otherModifiers: NSEvent.ModifierFlags = [.command, .control, .shift]
+        if !event.modifierFlags.intersection(otherModifiers).isEmpty {
+            self.resetLeftOptionState()
+            self.resetRightOptionState()
+            return
+        }
 
-            let now = ProcessInfo.processInfo.systemUptime
+        let now = ProcessInfo.processInfo.systemUptime
 
-            if event.keyCode == leftOptionKeyCode && UserDefaults.standard.object(forKey: "ptt.openClaw.enabled") as? Bool ?? true {
-                self.handleDoubleTapHold(
-                    optionDown: optionDown, now: now,
-                    state: &self.leftOptionState,
-                    firstPressTime: &self.leftOptionFirstPressTime,
-                    firstReleaseTime: &self.leftOptionFirstReleaseTime,
-                    resetTimer: &self.leftOptionResetTimer,
-                    onStart: {
-                        if self.podcastManager?.isSessionActive == true {
-                            self.startPodcastInterrupt()
-                        } else {
-                            self.startOpenClawPushToTalk()
-                        }
-                    },
-                    onStop: {
-                        if self.podcastInterruptActive {
-                            self.stopPodcastInterrupt()
-                        } else {
-                            self.stopOpenClawPushToTalk()
-                        }
-                    },
-                    onReset: { self.resetLeftOptionState() }
-                )
-            } else if event.keyCode == rightOptionKeyCode && UserDefaults.standard.object(forKey: "ptt.stt.enabled") as? Bool ?? true {
-                self.handleDoubleTapHold(
-                    optionDown: optionDown, now: now,
-                    state: &self.rightOptionState,
-                    firstPressTime: &self.rightOptionFirstPressTime,
-                    firstReleaseTime: &self.rightOptionFirstReleaseTime,
-                    resetTimer: &self.rightOptionResetTimer,
-                    onStart: { self.startSTTPushToTalk() },
-                    onStop: { self.stopSTTPushToTalk() },
-                    onReset: { self.resetRightOptionState() }
-                )
-            }
+        let openClawPTTEnabled = UserDefaults.standard.object(forKey: "ptt.openClaw.enabled") as? Bool ?? true
+        let podcastActive = self.podcastManager?.isSessionActive == true
+        if event.keyCode == leftOptionKeyCode && (openClawPTTEnabled || podcastActive) {
+            self.handleDoubleTapHold(
+                optionDown: optionDown, now: now,
+                state: &self.leftOptionState,
+                firstPressTime: &self.leftOptionFirstPressTime,
+                firstReleaseTime: &self.leftOptionFirstReleaseTime,
+                resetTimer: &self.leftOptionResetTimer,
+                onStart: {
+                    if self.podcastManager?.isSessionActive == true {
+                        self.startPodcastInterrupt()
+                    } else {
+                        self.startOpenClawPushToTalk()
+                    }
+                },
+                onStop: {
+                    if self.podcastInterruptActive {
+                        self.stopPodcastInterrupt()
+                    } else {
+                        self.stopOpenClawPushToTalk()
+                    }
+                },
+                onReset: { self.resetLeftOptionState() }
+            )
+        } else if event.keyCode == rightOptionKeyCode && UserDefaults.standard.object(forKey: "ptt.stt.enabled") as? Bool ?? true {
+            self.handleDoubleTapHold(
+                optionDown: optionDown, now: now,
+                state: &self.rightOptionState,
+                firstPressTime: &self.rightOptionFirstPressTime,
+                firstReleaseTime: &self.rightOptionFirstReleaseTime,
+                resetTimer: &self.rightOptionResetTimer,
+                onStart: { self.startSTTPushToTalk() },
+                onStop: { self.stopSTTPushToTalk() },
+                onReset: { self.resetRightOptionState() }
+            )
         }
     }
 
@@ -990,6 +1012,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         // Route to podcast interrupt if active
         if podcastInterruptActive {
             podcastInterruptActive = false
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // No speech detected — cancel interrupt and resume playback
+                print("Podcast interrupt: no speech detected, resuming playback")
+                podcastManager?.cancelInterrupt()
+                return
+            }
             print("Podcast interrupt: transcribed question: \"\(text)\"")
             podcastManager?.sendInterrupt(question: text)
             podcastOverlay?.updateState(.processingInterrupt)
@@ -1288,13 +1316,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     func startPodcastInterrupt() {
         guard let manager = podcastManager, manager.isSessionActive else {
-            DispatchQueue.main.async { self.resetLeftOptionState() }
+            resetLeftOptionState()
             return
         }
 
         if audioManager.isRecording || openClawRecordingManager?.isRecording == true {
             print("Podcast interrupt: blocked - another recording is active")
-            DispatchQueue.main.async { self.resetLeftOptionState() }
+            resetLeftOptionState()
             return
         }
 
@@ -1307,7 +1335,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         // Delay interrupt + recording start slightly so the start tone is audible
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.podcastInterruptActive else { return }
             manager.beginInterrupt()
             self.stopTranscriptionIndicator()
             self.audioManager.toggleRecording()
@@ -1315,7 +1343,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func stopPodcastInterrupt() {
-        guard audioManager.isRecording else { return }
+        guard audioManager.isRecording else {
+            // Key released before 180ms delay fired — cancel the pending interrupt
+            if podcastInterruptActive {
+                print("Podcast interrupt: cancelled — released before recording started")
+                podcastInterruptActive = false
+                // Restore overlay to match the actual manager state
+                if let managerState = podcastManager?.state {
+                    podcastOverlay?.updateState(managerState)
+                }
+            }
+            return
+        }
 
         print("Podcast interrupt: released — stopping")
         PTTTonePlayer.shared.playInterruptTone()

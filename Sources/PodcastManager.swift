@@ -88,7 +88,11 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var urlSession: URLSession!
     private var keepaliveTimer: Timer?
     private var isDownloadingPrefetch = false
+    private var prefetchGeneration: Int = 0
     private var isPlayingInterruptResponse = false
+    private var downloadGeneration: Int = 0
+    private var preInterruptTranscript: [ScriptLine]?
+    private var preInterruptActiveLineId: UUID?
     private(set) var isPaused = false
     private var pendingPlayData: (data: Data, chunkIndex: Int)?
     private var lineAdvanceTimers: [Timer] = []
@@ -127,7 +131,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     override init() {
         super.init()
-        urlSession = URLSession(configuration: .default)
+        let config = URLSessionConfiguration.default
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        urlSession = URLSession(configuration: config)
         setupRemoteCommandCenter()
     }
 
@@ -264,9 +271,22 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     }
 
     /// Cancel an in-progress interrupt and resume podcast flow.
-    /// Used when the user's recording fails or is cancelled.
+    /// Used when the user's recording fails, is cancelled, or contains no speech.
     func cancelInterrupt() {
         isPlayingInterruptResponse = false
+
+        // Restore transcript to pre-interrupt state
+        if let saved = preInterruptTranscript {
+            transcript = saved
+            delegate?.podcastDidUpdateTranscript(transcript)
+            if let lineId = preInterruptActiveLineId {
+                activeLineId = lineId
+                delegate?.podcastDidActivateLine(lineId)
+            }
+        }
+        preInterruptTranscript = nil
+        preInterruptActiveLineId = nil
+
         state = .buffering
         requestNextChunk()
     }
@@ -278,6 +298,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         player?.stop()
         player = nil
         cancelLineAdvanceTimers()
+        downloadGeneration += 1  // invalidate any in-flight audio download
         state = .listening
 
         // Discard stale prefetch — server will invalidate all chunks after current
@@ -287,6 +308,11 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
         prefetchedTranscriptLines = []
         isDownloadingPrefetch = false
+        prefetchGeneration += 1  // invalidate any in-flight prefetch
+
+        // Save transcript state for restoration if interrupt is cancelled
+        preInterruptTranscript = transcript
+        preInterruptActiveLineId = activeLineId
 
         // Truncate transcript: keep up to the active line, drop the rest
         if let currentActiveId = activeLineId,
@@ -304,6 +330,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
 
         NSLog("Podcast: sending INTERRUPT question=\"\(question)\" session=\(sessionId)")
+
+        // Successful interrupt — discard saved transcript
+        preInterruptTranscript = nil
+        preInterruptActiveLineId = nil
 
         // Insert interrupt marker
         let marker = ScriptLine.interruptMarker(question: question)
@@ -503,15 +533,21 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
 
         state = .buffering
+        let generation = downloadGeneration
 
         Task {
             do {
                 let (data, _) = try await urlSession.data(from: url)
                 await MainActor.run {
+                    guard self.downloadGeneration == generation else {
+                        NSLog("Podcast: discarding stale audio download (interrupted)")
+                        return
+                    }
                     self.playAudioData(data, chunkIndex: chunkIndex)
                 }
             } catch {
                 await MainActor.run {
+                    guard self.downloadGeneration == generation else { return }
                     NSLog("Podcast: audio download failed: \(error)")
                     self.state = .error("Audio download failed")
                     self.delegate?.podcastDidError("Failed to download audio")
@@ -645,13 +681,20 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         guard let url = URL(string: fullURL) else { return }
 
         isDownloadingPrefetch = true
+        let generation = prefetchGeneration
         Task {
             do {
                 let (data, _) = try await urlSession.data(from: url)
                 let tempFile = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("podcast_prefetch_\(UUID().uuidString).wav")
+                    .appendingPathComponent("podcast_prefetch_\(UUID().uuidString).mp3")
                 try data.write(to: tempFile)
                 await MainActor.run {
+                    // Discard if an interrupt happened while downloading
+                    guard self.prefetchGeneration == generation else {
+                        try? FileManager.default.removeItem(at: tempFile)
+                        NSLog("Podcast: discarding stale prefetch (interrupted)")
+                        return
+                    }
                     self.prefetchedAudioURL = tempFile
                     self.prefetchedTranscriptLines = lines
                     self.isDownloadingPrefetch = false

@@ -68,7 +68,7 @@ enum OptionDoubleTapState {
     case recording
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate {
     var statusItem: NSStatusItem!
     var settingsWindow: SettingsWindowController?
     private var unifiedWindow: UnifiedManagerWindow?
@@ -104,6 +104,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var podcastOverlay: PodcastOverlayWindow?
     private var podcastInterruptActive = false
     private var sttPushToTalkActive = false
+    private var readAloudManager: ReadAloudManager?
+    private var readAloudOverlay: ReadAloudOverlayWindow?
+    private var readAloudInterruptActive = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
@@ -420,7 +423,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         let openClawPTTEnabled = UserDefaults.standard.object(forKey: "ptt.openClaw.enabled") as? Bool ?? true
         let podcastActive = self.podcastManager?.isSessionActive == true
-        if event.keyCode == leftOptionKeyCode && (openClawPTTEnabled || podcastActive) {
+        let readAloudActive = self.readAloudManager?.isActive == true
+        if event.keyCode == leftOptionKeyCode && (openClawPTTEnabled || podcastActive || readAloudActive) {
             self.handleDoubleTapHold(
                 optionDown: optionDown, now: now,
                 state: &self.leftOptionState,
@@ -430,6 +434,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 onStart: {
                     if self.podcastManager?.isSessionActive == true {
                         self.startPodcastInterrupt()
+                    } else if self.readAloudManager?.isActive == true {
+                        self.startReadAloudInterrupt()
                     } else {
                         self.startOpenClawPushToTalk()
                     }
@@ -437,6 +443,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 onStop: {
                     if self.podcastInterruptActive {
                         self.stopPodcastInterrupt()
+                    } else if self.readAloudInterruptActive {
+                        self.stopReadAloudInterrupt()
                     } else {
                         self.stopOpenClawPushToTalk()
                     }
@@ -604,17 +612,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         historyWindow?.showWindow()
     }
     
-    func handleReadSelectedTextToggle() {
-        NSLog("TTS: handleReadSelectedTextToggle called, isCurrentlyPlaying=\(isCurrentlyPlaying)")
+    private func debugLog(_ msg: String) {
+        let logFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("murmur_debug.log")
+        let line = "\(Date()): \(msg)\n"
+        if let handle = try? FileHandle(forWritingTo: logFile) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            try? line.data(using: .utf8)?.write(to: logFile)
+        }
+    }
 
-        // If currently playing, stop the audio
+    func handleReadSelectedTextToggle() {
+        debugLog("handleReadSelectedTextToggle called, isCurrentlyPlaying=\(isCurrentlyPlaying), readAloudActive=\(readAloudManager?.isActive ?? false)")
+        NSLog("TTS: handleReadSelectedTextToggle called, isCurrentlyPlaying=\(isCurrentlyPlaying), readAloudActive=\(readAloudManager?.isActive ?? false)")
+
+        // If read-aloud session is active, stop it
+        if readAloudManager?.isActive == true {
+            readAloudManager?.stop()
+            readAloudOverlay?.dismiss()
+            readAloudManager = nil
+            readAloudOverlay = nil
+            readAloudInterruptActive = false
+            stopWaveformAnimation()
+            return
+        }
+
+        // If currently playing (legacy TTS), stop the audio
         if isCurrentlyPlaying {
             stopCurrentPlayback()
             return
         }
 
-        // Otherwise, start reading selected text
-        readSelectedText()
+        // Start interactive read-aloud session
+        startReadAloudSession()
     }
 
 
@@ -642,6 +674,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func stopCurrentPlayback() {
         print("🛑 Stopping audio playback")
 
+        // Stop read-aloud session if active
+        if readAloudManager?.isActive == true {
+            readAloudManager?.stop()
+            readAloudOverlay?.dismiss()
+            readAloudManager = nil
+            readAloudOverlay = nil
+            readAloudInterruptActive = false
+        }
+
         // Cancel the current streaming task
         currentStreamingTask?.cancel()
         currentStreamingTask = nil
@@ -656,7 +697,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         // Reset playing state
         isCurrentlyPlaying = false
         stopWaveformAnimation()
-        
+
         let notification = NSUserNotification()
         notification.title = "Audio Stopped"
         notification.informativeText = "Text-to-speech playback stopped"
@@ -993,14 +1034,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     
     func audioLevelDidUpdate(db: Float) {
         updateStatusBarWithLevel(db: db)
-        if !podcastInterruptActive {
+        if !podcastInterruptActive && !readAloudInterruptActive {
             ensureAudioOverlay().show(state: .listening)
         }
     }
 
     func transcriptionDidStart() {
         startTranscriptionIndicator()
-        if !podcastInterruptActive {
+        if !podcastInterruptActive && !readAloudInterruptActive {
             ensureAudioOverlay().show(state: .transcribing)
         }
     }
@@ -1008,6 +1049,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func transcriptionDidComplete(text: String) {
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
+
+        // Route to read-aloud interrupt if active
+        if readAloudInterruptActive {
+            readAloudInterruptActive = false
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                print("ReadAloud interrupt: no speech detected, resuming")
+                readAloudManager?.cancelInterrupt()
+                return
+            }
+            print("ReadAloud interrupt: transcribed question: \"\(text)\"")
+            readAloudOverlay?.showPendingQuestion(text)
+            if readAloudManager?.state == .awaitingResume {
+                readAloudManager?.handleResumeInput(text: text)
+            } else {
+                readAloudManager?.sendQuestion(question: text)
+            }
+            readAloudOverlay?.updateState(.processingQuestion)
+            return
+        }
 
         // Route to podcast interrupt if active
         if podcastInterruptActive {
@@ -1048,18 +1108,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     func transcriptionDidFail(error: String) {
         let wasPodcastInterrupt = podcastInterruptActive
+        let wasReadAloudInterrupt = readAloudInterruptActive
+        if readAloudInterruptActive {
+            readAloudInterruptActive = false
+            readAloudManager?.cancelInterrupt()
+        }
         if podcastInterruptActive {
             podcastInterruptActive = false
             podcastManager?.cancelInterrupt()
         }
         stopTranscriptionIndicator()
-        if !wasPodcastInterrupt {
+        if !wasPodcastInterrupt && !wasReadAloudInterrupt {
             ensureAudioOverlay().showError(error)
         }
         showTranscriptionError(error)
     }
 
     func recordingWasCancelled() {
+        if readAloudInterruptActive {
+            readAloudInterruptActive = false
+            readAloudManager?.cancelInterrupt()
+        }
         if podcastInterruptActive {
             podcastInterruptActive = false
             podcastManager?.cancelInterrupt()
@@ -1082,6 +1151,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func recordingWasSkippedDueToSilence() {
+        if readAloudInterruptActive {
+            readAloudInterruptActive = false
+            readAloudManager?.cancelInterrupt()
+        }
         if podcastInterruptActive {
             podcastInterruptActive = false
             podcastManager?.cancelInterrupt()
@@ -1312,6 +1385,184 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             NSLog("Podcast: content preview: \(preview)")
             manager.startSession(contentType: contentType, content: content)
         }
+    }
+
+    // MARK: - Read Aloud
+
+    func startReadAloudSession() {
+        debugLog("startReadAloudSession called")
+        let trusted = AXIsProcessTrusted()
+        debugLog("AXIsProcessTrusted = \(trusted)")
+
+        let selectedText = getSelectedTextViaAccessibility()
+        debugLog("getSelectedTextViaAccessibility returned: \(selectedText == nil ? "nil" : "\(selectedText!.count) chars")")
+
+        guard let selectedText = selectedText, !selectedText.isEmpty else {
+            debugLog("ReadAloud: no selected text found, trying clipboard fallback")
+            // Try clipboard fallback
+            if let clipText = getSelectedTextViaCopy(), !clipText.isEmpty {
+                debugLog("ReadAloud: got text via Cmd+C fallback (\(clipText.count) chars)")
+                startReadAloudWithText(clipText)
+                return
+            }
+            debugLog("ReadAloud: no text from any method")
+            NSLog("ReadAloud: no selected text found")
+            let notification = NSUserNotification()
+            notification.title = "No Text Selected"
+            notification.informativeText = "Please select some text first"
+            NSUserNotificationCenter.default.deliver(notification)
+            return
+        }
+
+        startReadAloudWithText(selectedText)
+    }
+
+    private func startReadAloudWithText(_ text: String) {
+        debugLog("ReadAloud: starting session with \(text.count) chars")
+        NSLog("ReadAloud: starting session with \(text.count) chars")
+
+        let manager = ReadAloudManager()
+        manager.delegate = self
+        readAloudManager = manager
+
+        let overlay = ReadAloudOverlayWindow()
+        overlay.onStop = { [weak self] in
+            self?.readAloudManager?.stop()
+            self?.readAloudOverlay?.dismiss()
+            self?.readAloudManager = nil
+            self?.readAloudOverlay = nil
+            self?.readAloudInterruptActive = false
+            self?.stopWaveformAnimation()
+        }
+        overlay.onPlayPause = { [weak self] in
+            guard let self = self, let manager = self.readAloudManager else { return }
+            switch manager.state {
+            case .awaitingResume:
+                manager.resumeFromAwait()
+            case .complete:
+                manager.startReading(text: manager.fullText)
+            case .listening:
+                // Cancel interrupt and resume reading
+                self.readAloudInterruptActive = false
+                if self.audioManager.isRecording {
+                    self.audioManager.toggleRecording()
+                }
+                manager.cancelInterrupt()
+            case .reading, .speakingAnswer:
+                // Unified pause/resume for both reading and answer playback
+                manager.togglePause()
+                self.readAloudOverlay?.updatePaused(manager.isPaused)
+            case .processingQuestion:
+                // Can't pause while waiting for LLM — skip instead
+                manager.skipAnswerAndResume()
+            default:
+                break
+            }
+        }
+        overlay.onWebSearchToggled = { enabled in
+            UserDefaults.standard.set(enabled, forKey: "readAloud.webSearchEnabled")
+        }
+        overlay.onExportAudio = { [weak self] in
+            guard let data = self?.readAloudManager?.combinedAudioData() else { return }
+            DispatchQueue.main.async {
+                let savePanel = NSSavePanel()
+                savePanel.allowedContentTypes = [.wav]
+                savePanel.nameFieldStringValue = "Read Aloud.wav"
+                savePanel.begin { response in
+                    if response == .OK, let url = savePanel.url {
+                        try? data.write(to: url)
+                    }
+                }
+            }
+        }
+        readAloudOverlay = overlay
+        overlay.show(state: .translating)
+
+        startWaveformAnimation()
+        manager.startReading(text: text)
+    }
+
+    func startReadAloudInterrupt() {
+        guard let manager = readAloudManager, manager.isActive else {
+            resetLeftOptionState()
+            return
+        }
+
+        if audioManager.isRecording || openClawRecordingManager?.isRecording == true {
+            print("ReadAloud interrupt: blocked - another recording is active")
+            resetLeftOptionState()
+            return
+        }
+
+        print("ReadAloud interrupt: started (double-tap-hold)")
+        PTTTonePlayer.shared.playStartTone()
+        readAloudInterruptActive = true
+        readAloudOverlay?.updateState(.listening)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            guard let self = self, self.readAloudInterruptActive else { return }
+            manager.beginInterrupt()
+            self.stopTranscriptionIndicator()
+            self.audioManager.toggleRecording()
+        }
+    }
+
+    func stopReadAloudInterrupt() {
+        guard audioManager.isRecording else {
+            if readAloudInterruptActive {
+                print("ReadAloud interrupt: cancelled — released before recording started")
+                readAloudInterruptActive = false
+                if let managerState = readAloudManager?.state {
+                    readAloudOverlay?.updateState(managerState)
+                }
+            }
+            return
+        }
+
+        print("ReadAloud interrupt: released — stopping")
+        PTTTonePlayer.shared.playInterruptTone()
+        audioManager.toggleRecording()
+    }
+
+    // MARK: - ReadAloudManagerDelegate
+
+    func readAloudDidChangeState(_ state: ReadAloudState) {
+        readAloudOverlay?.updateState(state)
+        switch state {
+        case .reading, .speakingAnswer:
+            startWaveformAnimation()
+        case .complete, .error, .idle:
+            stopWaveformAnimation()
+        default:
+            break
+        }
+    }
+
+    func readAloudDidUpdateSentences(_ sentences: [String]) {
+        readAloudOverlay?.updateSentences(sentences)
+    }
+
+    func readAloudDidActivateSentence(index: Int) {
+        readAloudOverlay?.activateSentence(index: index)
+    }
+
+    func readAloudDidInsertQA(question: String, answer: String, afterSentenceIndex: Int) {
+        readAloudOverlay?.insertQA(question: question, answer: answer, afterSentenceIndex: afterSentenceIndex)
+    }
+
+    func readAloudDidUpdateStreamingAnswer(_ text: String) {
+        readAloudOverlay?.updateStreamingAnswer(text)
+    }
+
+    func readAloudDidUpdateTranslationStatus(_ status: String) {
+        readAloudOverlay?.updateTranslationStatus(status)
+    }
+
+    func readAloudDidError(_ message: String) {
+        let notification = NSUserNotification()
+        notification.title = "Read Aloud Error"
+        notification.informativeText = message
+        NSUserNotificationCenter.default.deliver(notification)
     }
 
     func startPodcastInterrupt() {

@@ -335,11 +335,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         preInterruptTranscript = nil
         preInterruptActiveLineId = nil
 
-        // Insert interrupt marker
+        // Insert interrupt marker followed by the user's question
         let marker = ScriptLine.interruptMarker(question: question)
         transcript.append(marker)
+        let userLine = ScriptLine(speaker: "You", text: question)
+        transcript.append(userLine)
         delegate?.podcastDidUpdateTranscript(transcript)
-        delegate?.podcastDidActivateLine(marker.id)
+        delegate?.podcastDidActivateLine(userLine.id)
 
         state = .processingInterrupt
 
@@ -533,6 +535,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         }
 
         state = .buffering
+        delegate?.podcastDidUpdateProgress(stage: "download", percent: -1, message: "Downloading audio...")
         let generation = downloadGeneration
 
         Task {

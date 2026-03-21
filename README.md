@@ -29,11 +29,23 @@ macOS voice assistant that lives in your menu bar. Transcribe speech to text wit
 - Secure device identity with Curve25519 keypair
 - Automatic reconnection with exponential backoff
 
-**Text-to-Speech**
+**Interactive Read Aloud**
 - Read selected text aloud with Kokoro (offline) or Gemini Live API (streaming)
-- Smart sentence splitting for natural speech flow
+- Smart sentence splitting for natural speech flow with sentence highlighting
+- Ask questions mid-reading via push-to-talk — Ollama answers in context, then resumes
+- Pause, resume, and export readings
 - 15% speed boost via TimePitch effect on Gemini streaming
 - Press shortcut again to stop playback
+
+**Podcast Mode**
+- Transform URLs, PDFs, or text into a two-host AI podcast you can interrupt and steer
+- Two AI hosts with custom names and cloned voices via uploaded samples
+- Push-to-talk interrupts — ask questions or redirect the conversation in real time
+- LLM-driven script generation with configurable podcast length and model selection
+- GPU-accelerated TTS via ComfyUI + VibeVoice on a remote server
+- Real-time streaming with chunk prefetch and Now Playing integration
+- Full audio download and markdown transcript export
+- Self-hosted backend (`podcastd`) with Docker deployment
 
 **Transcription History**
 - Browse, copy, and delete past transcriptions
@@ -102,10 +114,12 @@ Access via the menu bar icon > Settings:
 | Tab | Options |
 |---|---|
 | **General** | Launch at login |
-| **Models** | Transcription engine (Parakeet / WhisperKit), model download and selection |
-| **Audio Devices** | Input/output device, Kokoro TTS voice selection with preview |
+| **Settings** | Transcription engine (Parakeet / WhisperKit), model download and selection |
 | **Shortcuts** | Keyboard shortcuts, PTT toggles, auto-Return after paste, prompt refinement |
+| **Audio Devices** | Input/output device, Kokoro TTS voice selection with preview |
 | **OpenClaw** | Connection URL, token, password, session key, device ID |
+| **Podcast** | Server URL, host names, voice sample upload with preview, podcast length, LLM model |
+| **Read Aloud** | Ollama model selection, resume behavior after Q&A |
 
 ### Transcription Engines
 
@@ -156,6 +170,13 @@ Enables Gemini streaming TTS, cloud transcription fallback, and OpenClaw TTS via
   - `ShortcutsSettingsViewController.swift` — Shortcut and PTT configuration
   - `OpenClawSettingsViewController.swift` — OpenClaw connection settings
   - `AudioDevicesViewController.swift` — Audio device and TTS voice selection
+  - `PodcastManager.swift` — Podcast WebSocket client, chunk playback, and interrupt handling
+  - `PodcastOverlayWindow.swift` — Podcast floating overlay with transcript and progress
+  - `PodcastSettingsViewController.swift` — Podcast server and voice configuration
+  - `ReadAloudManager.swift` — Interactive read aloud with Q&A and pause/resume
+  - `ReadAloudOverlayWindow.swift` — Read aloud overlay with sentence highlighting
+  - `ReadAloudSettingsViewController.swift` — Read aloud and Ollama settings
+  - `OllamaClient.swift` — Ollama LLM client for Q&A and prompt refinement
   - `TranscriptionHistory.swift` — JSON-based transcription storage
   - `TextReplacements.swift` — Post-transcription text corrections
   - `UnifiedManagerWindow.swift` — Tabbed settings window
@@ -167,6 +188,12 @@ Enables Gemini streaming TTS, cloud transcription fallback, and OpenClaw TTS via
   - `GeminiAudioTranscriber.swift` — Gemini API transcription fallback
   - `SmartSentenceSplitter.swift` — Sentence boundary detection for TTS
   - `AudioDeviceManager.swift` — CoreAudio device enumeration
+- `podcastd/` — Podcast backend service (Python asyncio WebSocket)
+  - `server.py` — WebSocket server with script generation and TTS pipeline
+  - `prompts/` — LLM system prompts for podcast script generation
+  - `docker-compose.yml` — Docker deployment with Traefik reverse proxy
+- `docs/` — Documentation
+  - `PODCAST_SPEC.md` — Full podcast mode specification
 
 ## Dependencies
 

@@ -56,7 +56,7 @@ struct ShortcutsSettingsView: View {
                         HStack {
                             Text("Prompt Refinement")
                                 .frame(width: 220, alignment: .leading)
-                            Text("Clean up speech via Ollama before pasting")
+                            Text("Clean up speech via Ollama before pasting (uses LLM from Read Aloud settings)")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
                         }

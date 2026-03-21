@@ -17,6 +17,8 @@ macOS voice assistant that lives in your menu bar. Transcribe speech to text wit
 - Double-tap-and-hold **Left Option** for OpenClaw — release to send
 - Audio feedback tones on recording start and stop
 - Optional auto-Return after paste (useful for Claude Code, chat UIs)
+- Window targeting: remembers which window was active when recording started and pastes there even if you switch away during processing
+- Optional prompt refinement via Ollama — cleans up filler words and fixes punctuation before pasting
 - Mutual exclusion prevents simultaneous recordings
 
 **OpenClaw AI Assistant**
@@ -102,7 +104,7 @@ Access via the menu bar icon > Settings:
 | **General** | Launch at login |
 | **Models** | Transcription engine (Parakeet / WhisperKit), model download and selection |
 | **Audio Devices** | Input/output device, Kokoro TTS voice selection with preview |
-| **Shortcuts** | Keyboard shortcuts, PTT toggles, auto-Return after paste |
+| **Shortcuts** | Keyboard shortcuts, PTT toggles, auto-Return after paste, prompt refinement |
 | **OpenClaw** | Connection URL, token, password, session key, device ID |
 
 ### Transcription Engines

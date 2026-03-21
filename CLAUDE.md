@@ -43,7 +43,8 @@ There are no unit test suites — tests are standalone executables in `tests/` r
 ### Key patterns
 
 - **Manager + OverlayWindow pairs**: Each feature has a manager (business logic, WebSocket, audio) and a companion overlay window (SwiftUI-in-NSWindow floating UI). Examples: `OpenClawManager` + `OpenClawOverlayWindow`, `PodcastManager` + `PodcastOverlayWindow`.
-- **Push-to-talk state machine**: Double-tap-and-hold detection for Option keys, implemented in `main.swift`. Right Option → STT, Left Option → OpenClaw.
+- **Push-to-talk state machine**: Double-tap-and-hold detection for Option keys, implemented in `main.swift`. Right Option → STT, Left Option → OpenClaw. STT PTT captures the frontmost window (via AXUIElement) at recording start and pastes into that window even if the user switches away during transcription/LLM processing.
+- **Prompt refinement**: Optional Ollama-based cleanup of transcribed text (removes filler words, fixes punctuation) before pasting. Uses the LLM configured in Read Aloud settings. Toggle in Shortcuts settings.
 - **Engine routing**: `AudioTranscriptionManager` routes between Parakeet (FluidAudio), WhisperKit, and Gemini (cloud fallback) based on user settings and transcription results.
 - **Environment**: `.env` file at project root parsed at startup for `GEMINI_API_KEY` and other secrets.
 

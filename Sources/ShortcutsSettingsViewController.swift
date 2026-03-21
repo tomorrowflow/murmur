@@ -6,6 +6,7 @@ struct ShortcutsSettingsView: View {
     @AppStorage("ptt.openClaw.enabled") private var openClawPTTEnabled = true
     @AppStorage("ptt.stt.enabled") private var sttPTTEnabled = true
     @AppStorage("ptt.stt.sendReturn") private var sttPTTSendReturn = true
+    @AppStorage("ptt.stt.promptRefinement") private var sttPromptRefinement = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -50,6 +51,17 @@ struct ShortcutsSettingsView: View {
                         }
                     }
                     .disabled(!sttPTTEnabled)
+
+                    Toggle(isOn: $sttPromptRefinement) {
+                        HStack {
+                            Text("Prompt Refinement")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Clean up speech via Ollama before pasting")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(!sttPTTEnabled)
                 }
             }
             .formStyle(.grouped)
@@ -85,6 +97,7 @@ struct ShortcutsSettingsView: View {
         openClawPTTEnabled = true
         sttPTTEnabled = true
         sttPTTSendReturn = true
+        sttPromptRefinement = false
     }
 }
 

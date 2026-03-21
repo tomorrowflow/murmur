@@ -7,6 +7,7 @@ enum AudioTranscriptionOverlayState {
     case hidden
     case listening
     case transcribing
+    case refining
     case error
 }
 
@@ -53,6 +54,7 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
 
 struct AudioTranscriptionOverlayView: View {
     @ObservedObject var viewModel: AudioTranscriptionOverlayViewModel
+    @AppStorage("ptt.stt.promptRefinement") private var promptRefinementEnabled = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -107,6 +109,17 @@ struct AudioTranscriptionOverlayView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+                case .refining:
+                    HStack(spacing: 10) {
+                        Image(systemName: "wand.and.stars")
+                            .foregroundColor(.purple)
+                            .font(.system(size: 20))
+                            .symbolEffect(.pulse)
+                        Text("Refining prompt...")
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
                 case .error:
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -127,7 +140,7 @@ struct AudioTranscriptionOverlayView: View {
     private var dynamicHeight: CGFloat {
         switch viewModel.state {
         case .hidden: return 0
-        case .listening, .transcribing: return 100
+        case .listening, .transcribing, .refining: return 100
         case .error: return 120
         }
     }
@@ -136,13 +149,19 @@ struct AudioTranscriptionOverlayView: View {
     private var stateIndicator: some View {
         switch viewModel.state {
         case .listening:
-            Text("Recording")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.red)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.red.opacity(0.15))
-                .cornerRadius(4)
+            HStack(spacing: 3) {
+                Text("Recording")
+                    .font(.system(size: 10, weight: .medium))
+                if promptRefinementEnabled {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 8))
+                }
+            }
+            .foregroundColor(.red)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.red.opacity(0.15))
+            .cornerRadius(4)
 
         case .transcribing:
             Text("Transcribing")
@@ -152,6 +171,19 @@ struct AudioTranscriptionOverlayView: View {
                 .padding(.vertical, 2)
                 .background(Color.orange.opacity(0.15))
                 .cornerRadius(4)
+
+        case .refining:
+            HStack(spacing: 3) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 8))
+                Text("Refining")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundColor(.purple)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.purple.opacity(0.15))
+            .cornerRadius(4)
 
         case .error:
             Text("Error")

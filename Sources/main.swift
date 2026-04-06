@@ -104,6 +104,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var podcastOverlay: PodcastOverlayWindow?
     private var podcastInterruptActive = false
     private var sttPushToTalkActive = false
+    private var sttPushToTalkStartTime: Date?
     private var sttPushToTalkTargetApp: NSRunningApplication?
     private var sttPushToTalkTargetWindow: AXUIElement?
     private var readAloudManager: ReadAloudManager?
@@ -587,6 +588,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         print("STT PTT: started (double-tap-hold)")
         PTTTonePlayer.shared.playStartTone()
         sttPushToTalkActive = true
+        sttPushToTalkStartTime = Date()
         sttPushToTalkTargetApp = NSWorkspace.shared.frontmostApplication
         // Capture the specific focused window via Accessibility API
         if let app = sttPushToTalkTargetApp {
@@ -1175,13 +1177,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         let shouldSendReturn = sttPushToTalkActive && (UserDefaults.standard.object(forKey: "ptt.stt.sendReturn") as? Bool ?? true)
         let promptRefinementEnabled = UserDefaults.standard.bool(forKey: "ptt.stt.promptRefinement")
+        let speechDuration = sttPushToTalkStartTime.map { Date().timeIntervalSince($0) } ?? 0
         let targetApp = sttPushToTalkTargetApp
         let targetWindow = sttPushToTalkTargetWindow
         sttPushToTalkActive = false
+        sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
 
-        if promptRefinementEnabled {
+        if promptRefinementEnabled && speechDuration > 5.0 {
             refineAndPaste(text: text, shouldSendReturn: shouldSendReturn, targetApp: targetApp, targetWindow: targetWindow)
         } else {
             pasteTextIntoApp(text, targetApp: targetApp, targetWindow: targetWindow, shouldSendReturn: shouldSendReturn)
@@ -1291,6 +1295,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             podcastInterruptActive = false
             podcastManager?.cancelInterrupt()
         }
+        sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
         stopTranscriptionIndicator()
@@ -1310,6 +1315,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             podcastManager?.cancelInterrupt()
         }
         sttPushToTalkActive = false
+        sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
         // Ensure any processing indicator is stopped
@@ -1338,6 +1344,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             podcastManager?.cancelInterrupt()
         }
         sttPushToTalkActive = false
+        sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
         // Ensure any processing indicator is stopped

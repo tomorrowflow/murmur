@@ -60,11 +60,11 @@ let package = Package(
     targets: [
         .target(
             name: "SharedModels",
-            dependencies: ["WhisperKit", "FluidAudio", .product(name: "FluidAudioTTS", package: "FluidAudio")],
+            dependencies: ["WhisperKit", "FluidAudio"],
             path: "SharedSources"),
         .executableTarget(
             name: "Murmur",
-            dependencies: ["KeyboardShortcuts", "WhisperKit", "SharedModels", "FluidAudio", .product(name: "FluidAudioTTS", package: "FluidAudio")],
+            dependencies: ["KeyboardShortcuts", "WhisperKit", "SharedModels", "FluidAudio"],
             path: "Sources",
             exclude: ["Assets.xcassets", "AppIcon.icns"]),
         .executableTarget(

@@ -144,8 +144,8 @@ public class ParakeetTranscriber {
                 version: version.asrModelVersion
             )
 
-            // Initialize the manager with loaded models
-            try await manager.initialize(models: asrModels)
+            // Load ASR models into the manager
+            try await manager.loadModels(asrModels)
 
             asrManager = manager
             loadedVersion = version
@@ -181,7 +181,7 @@ public class ParakeetTranscriber {
 
     /// Check if a model is loaded and ready
     public var isReady: Bool {
-        return asrManager?.isAvailable ?? false && loadingState == .loaded
+        return asrManager != nil && loadingState == .loaded
     }
 
     /// Unload the current model to free memory

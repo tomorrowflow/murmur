@@ -7,6 +7,7 @@ struct ShortcutsSettingsView: View {
     @AppStorage("ptt.stt.enabled") private var sttPTTEnabled = true
     @AppStorage("ptt.stt.sendReturn") private var sttPTTSendReturn = true
     @AppStorage("ptt.stt.promptRefinement") private var sttPromptRefinement = false
+    @AppStorage("ptt.maxRecordingSeconds") private var maxRecordingSeconds = 300
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -62,6 +63,16 @@ struct ShortcutsSettingsView: View {
                         }
                     }
                     .disabled(!sttPTTEnabled)
+
+                    Picker(selection: $maxRecordingSeconds) {
+                        Text("3 minutes").tag(180)
+                        Text("5 minutes").tag(300)
+                        Text("10 minutes").tag(600)
+                        Text("Unlimited").tag(0)
+                    } label: {
+                        Text("Max Recording Duration")
+                            .frame(width: 220, alignment: .leading)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -98,6 +109,7 @@ struct ShortcutsSettingsView: View {
         sttPTTEnabled = true
         sttPTTSendReturn = true
         sttPromptRefinement = false
+        maxRecordingSeconds = 300
     }
 }
 

@@ -21,20 +21,28 @@ class OpenClawOverlayViewModel: ObservableObject {
     @Published var isPinned: Bool = false
     @Published var isTTSPlaying: Bool = false
     @Published var showCopied: Bool = false
+    @Published var elapsedSeconds: Int = 0
 
     var isHovered: Bool = false
     var onDismiss: (() -> Void)?
     var onCancel: (() -> Void)?
 
     private var autoDismissTimer: Timer?
+    private var recordingTimer: Timer?
 
     func show(state: OpenClawOverlayState) {
         cancelAutoDismiss()
+        let wasListening = self.state == .listening
         self.state = state
         if state == .listening {
-            responseText = ""
-            errorText = ""
-            isPinned = false
+            if !wasListening {
+                responseText = ""
+                errorText = ""
+                isPinned = false
+                startRecordingTimer()
+            }
+        } else {
+            stopRecordingTimer()
         }
     }
 
@@ -56,12 +64,40 @@ class OpenClawOverlayViewModel: ObservableObject {
 
     func dismiss() {
         cancelAutoDismiss()
+        stopRecordingTimer()
         state = .hidden
         responseText = ""
         errorText = ""
         isPinned = false
         isHovered = false
         onDismiss?()
+    }
+
+    var formattedElapsedTime: String {
+        let minutes = elapsedSeconds / 60
+        let seconds = elapsedSeconds % 60
+        if minutes > 0 {
+            return String(format: "%d:%02d", minutes, seconds)
+        } else {
+            return "\(seconds)s"
+        }
+    }
+
+    private func startRecordingTimer() {
+        stopRecordingTimer()
+        elapsedSeconds = 0
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.elapsedSeconds += 1
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        recordingTimer = timer
+    }
+
+    private func stopRecordingTimer() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
     }
 
     func pin() {
@@ -197,7 +233,12 @@ struct OpenClawOverlayView: View {
                             .symbolEffect(.pulse)
                         Text("Listening...")
                             .foregroundColor(.secondary)
+                        Spacer()
+                        Text(viewModel.formattedElapsedTime)
+                            .font(.system(size: 13, weight: .medium).monospacedDigit())
+                            .foregroundColor(.secondary)
                     }
+                    .padding(.horizontal, 12)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .processing:

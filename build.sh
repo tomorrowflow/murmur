@@ -10,7 +10,7 @@ BUILD_DIR="$SCRIPT_DIR/.build/arm64-apple-macosx/${BUILD_CONFIG}"
 APP_BUNDLE="$SCRIPT_DIR/build/${APP_NAME}.app"
 
 echo "🔨 Building ${APP_NAME} (${BUILD_CONFIG})..."
-swift build -c "$BUILD_CONFIG"
+swift build -c "$BUILD_CONFIG" -Xswiftc -swift-version -Xswiftc 5
 
 echo "📦 Creating app bundle..."
 rm -rf "$APP_BUNDLE"

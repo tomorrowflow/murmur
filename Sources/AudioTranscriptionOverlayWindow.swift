@@ -16,16 +16,24 @@ enum AudioTranscriptionOverlayState {
 class AudioTranscriptionOverlayViewModel: ObservableObject {
     @Published var state: AudioTranscriptionOverlayState = .hidden
     @Published var errorText: String = ""
+    @Published var elapsedSeconds: Int = 0
 
     var onDismiss: (() -> Void)?
 
     private var autoDismissTimer: Timer?
+    private var recordingTimer: Timer?
 
     func show(state: AudioTranscriptionOverlayState) {
         cancelAutoDismiss()
+        let wasListening = self.state == .listening
         self.state = state
         if state == .listening {
             errorText = ""
+            if !wasListening {
+                startRecordingTimer()
+            }
+        } else {
+            stopRecordingTimer()
         }
     }
 
@@ -39,9 +47,37 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
 
     func dismiss() {
         cancelAutoDismiss()
+        stopRecordingTimer()
         state = .hidden
         errorText = ""
         onDismiss?()
+    }
+
+    var formattedElapsedTime: String {
+        let minutes = elapsedSeconds / 60
+        let seconds = elapsedSeconds % 60
+        if minutes > 0 {
+            return String(format: "%d:%02d", minutes, seconds)
+        } else {
+            return "\(seconds)s"
+        }
+    }
+
+    private func startRecordingTimer() {
+        stopRecordingTimer()
+        elapsedSeconds = 0
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.elapsedSeconds += 1
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        recordingTimer = timer
+    }
+
+    private func stopRecordingTimer() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
     }
 
     private func cancelAutoDismiss() {
@@ -97,7 +133,12 @@ struct AudioTranscriptionOverlayView: View {
                             .symbolEffect(.pulse)
                         Text("Recording...")
                             .foregroundColor(.secondary)
+                        Spacer()
+                        Text(viewModel.formattedElapsedTime)
+                            .font(.system(size: 13, weight: .medium).monospacedDigit())
+                            .foregroundColor(.secondary)
                     }
+                    .padding(.horizontal, 12)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .transcribing:

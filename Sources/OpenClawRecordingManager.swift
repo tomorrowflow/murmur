@@ -29,7 +29,12 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     private var inputNode: AVAudioInputNode!
     private var audioBuffer: [Float] = []
     private let sampleRate: Double = 16000
-    private let maxBufferSamples = 16000 * 300  // 5 minutes max
+    private var maxBufferSamples: Int {
+        let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
+        if seconds == 0 { return Int.max }  // Unlimited
+        let effectiveSeconds = seconds > 0 ? seconds : 300  // Default 5 minutes
+        return 16000 * effectiveSeconds
+    }
 
     // State
     var isRecording = false
@@ -182,7 +187,9 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
                 }
 
                 if self.audioBuffer.count > self.maxBufferSamples {
-                    print("OpenClaw: buffer limit reached. Auto-stopping.")
+                    let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
+                    let label = seconds > 0 ? "\(seconds / 60) min" : "limit"
+                    print("OpenClaw: buffer limit reached (\(label)). Auto-stopping.")
                     DispatchQueue.main.async {
                         self.isRecording = false
                         self.stopRecording()

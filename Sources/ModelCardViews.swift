@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 import SharedModels
-import FluidAudioTTS
+import FluidAudio
 
 struct AccuracyBar: View {
     let accuracy: String

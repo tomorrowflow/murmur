@@ -1,7 +1,7 @@
 import Cocoa
 import Combine
 import SharedModels
-import FluidAudioTTS
+import FluidAudio
 
 class AudioDevicesViewController: NSViewController {
     private var deviceManager = AudioDeviceManager.shared

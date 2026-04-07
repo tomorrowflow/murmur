@@ -13,12 +13,12 @@ macOS voice assistant that lives in your menu bar. Transcribe speech to text wit
 - Silence detection and short-audio filtering
 
 **Push-to-Talk**
-- Double-tap-and-hold **Right Option** for STT — release to transcribe and paste
-- Double-tap-and-hold **Left Option** for OpenClaw — release to send
+- Double-tap **Right Option** for STT, **Left Option** for OpenClaw
+- Two modes: **hold** (double-tap and keep holding, release to stop) or **toggle** (double-tap and release, tap again to stop)
 - Audio feedback tones on recording start and stop
 - Optional auto-Return after paste (useful for Claude Code, chat UIs)
 - Window targeting: remembers which window was active when recording started and pastes there even if you switch away during processing
-- Optional prompt refinement via Ollama — cleans up filler words and fixes punctuation before pasting
+- Optional prompt refinement via Ollama — cleans up filler words and fixes punctuation for recordings longer than 5 seconds
 - Mutual exclusion prevents simultaneous recordings
 
 **OpenClaw AI Assistant**
@@ -61,8 +61,8 @@ macOS voice assistant that lives in your menu bar. Transcribe speech to text wit
 | **Cmd+Opt+O** | Start/stop OpenClaw voice recording |
 | **Cmd+Opt+A** | Show transcription history |
 | **Cmd+Opt+V** | Paste last transcription at cursor |
-| **Right Option** (double-tap-hold) | STT push-to-talk |
-| **Left Option** (double-tap-hold) | OpenClaw push-to-talk |
+| **Right Option** (double-tap) | STT push-to-talk (hold or toggle) |
+| **Left Option** (double-tap) | OpenClaw push-to-talk (hold or toggle) |
 | **Escape** | Cancel active recording |
 
 All shortcuts are customizable in Settings.

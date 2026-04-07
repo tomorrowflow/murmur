@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 import WhisperKit
 import SharedModels
-import FluidAudioTTS
+import FluidAudio
 
 /// Transcription engine selection
 public enum TranscriptionEngine: String, CaseIterable {
@@ -60,7 +60,7 @@ class ModelStateManager: ObservableObject {
 
     // MARK: - Kokoro TTS State
     @Published var kokoroLoadingState: ParakeetLoadingState = .notDownloaded
-    @Published var loadedTtsManager: TtSManager? = nil
+    @Published var loadedTtsManager: KokoroTtsManager? = nil
     private var currentKokoroLoadingTask: Task<Void, Never>? = nil
 
     // MARK: - WhisperKit State
@@ -432,7 +432,7 @@ class ModelStateManager: ObservableObject {
             if Task.isCancelled { return }
 
             do {
-                let manager = TtSManager()
+                let manager = KokoroTtsManager()
                 try await manager.initialize()
 
                 if Task.isCancelled {

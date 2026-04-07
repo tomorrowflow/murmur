@@ -4,7 +4,7 @@ import AppKit
 import SharedModels
 import CoreAudio
 import WhisperKit
-import FluidAudioTTS
+import FluidAudio
 
 protocol OpenClawRecordingManagerDelegate: AnyObject {
     func openClawAudioLevelDidUpdate(db: Float)

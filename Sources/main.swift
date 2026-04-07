@@ -65,7 +65,8 @@ enum OptionDoubleTapState {
     case idle
     case firstPress
     case firstRelease
-    case recording
+    case recording       // double-tap held — release stops recording
+    case recordingToggle // double-tap released — next tap stops recording
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate {
@@ -510,6 +511,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 if gap < 0.4 {
                     resetTimer?.invalidate()
                     resetTimer = nil
+                    firstPressTime = now  // track second press time for hold detection
                     state = .recording
                     onStart()
                 } else {
@@ -519,6 +521,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         case .recording:
             if !optionDown {
+                let holdDuration = now - firstPressTime
+                if holdDuration < 0.3 {
+                    // Quick release after double-tap: toggle mode — recording continues
+                    state = .recordingToggle
+                } else {
+                    // Held key: classic hold-to-record — stop on release
+                    state = .idle
+                    onStop()
+                }
+            }
+
+        case .recordingToggle:
+            if optionDown {
+                // Any press stops recording in toggle mode
                 state = .idle
                 onStop()
             }

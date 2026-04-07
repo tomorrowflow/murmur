@@ -1,4 +1,5 @@
 import AVFoundation
+import SharedModels
 
 /// Plays short synthesized tones for push-to-talk start/stop feedback.
 class PTTTonePlayer {
@@ -12,23 +13,32 @@ class PTTTonePlayer {
 
     /// Play a short rising two-tone beep (recording started).
     func playStartTone() {
-        playTone(frequencies: [880, 1175], noteDuration: 0.07)
+        let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
+        playTone(frequencies: [880, 1175], noteDuration: 0.07, prependSilence: bluetooth ? 0.5 : 0)
     }
 
     /// Play a short falling single-tone beep (recording stopped).
     func playStopTone() {
-        playTone(frequencies: [784], noteDuration: 0.09)
+        let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
+        playTone(frequencies: [784], noteDuration: 0.09, prependSilence: bluetooth ? 0.5 : 0)
     }
 
     /// Play a confirmation chirp (podcast interrupt received, processing started).
     func playInterruptTone() {
-        playTone(frequencies: [660, 880, 660], noteDuration: 0.06)
+        let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
+        playTone(frequencies: [660, 880, 660], noteDuration: 0.06, prependSilence: bluetooth ? 0.5 : 0)
     }
 
-    private func playTone(frequencies: [Double], noteDuration: Double) {
-        let totalSamples = Int(sampleRate * noteDuration) * frequencies.count
+    private func playTone(frequencies: [Double], noteDuration: Double, prependSilence: Double = 0) {
+        let silenceSamples = Int(sampleRate * prependSilence)
+        let totalSamples = silenceSamples + Int(sampleRate * noteDuration) * frequencies.count
         var samples = [Float]()
         samples.reserveCapacity(totalSamples)
+
+        // Prepend silence to wake up Bluetooth audio devices
+        for _ in 0..<silenceSamples {
+            samples.append(0.0)
+        }
 
         for freq in frequencies {
             let framesPerNote = Int(sampleRate * noteDuration)

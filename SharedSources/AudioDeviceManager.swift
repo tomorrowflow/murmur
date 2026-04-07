@@ -392,6 +392,41 @@ public class AudioDeviceManager: ObservableObject {
         return deviceID
     }
 
+    /// Returns true if the given device uses Bluetooth transport.
+    private func isBluetoothTransport(deviceID: AudioDeviceID) -> Bool {
+        let transport = getTransportType(deviceID: deviceID)
+        return transport == kAudioDeviceTransportTypeBluetooth ||
+               transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Returns true if the current input device uses Bluetooth transport
+    /// (e.g. AirPods, Bluetooth headsets). These devices need extra warmup
+    /// time before the microphone is ready to capture audio.
+    public func isCurrentInputDeviceBluetooth() -> Bool {
+        let deviceID: AudioDeviceID?
+        if !useSystemDefaultInput,
+           let selectedUID = selectedInputDeviceUID {
+            deviceID = getAudioDeviceID(for: selectedUID)
+        } else {
+            deviceID = getSystemDefaultInputDeviceID()
+        }
+        guard let id = deviceID else { return false }
+        return isBluetoothTransport(deviceID: id)
+    }
+
+    /// Returns true if the current output device uses Bluetooth transport.
+    public func isCurrentOutputDeviceBluetooth() -> Bool {
+        let deviceID: AudioDeviceID?
+        if !useSystemDefaultOutput,
+           let selectedUID = selectedOutputDeviceUID {
+            deviceID = getAudioDeviceID(for: selectedUID)
+        } else {
+            deviceID = getSystemDefaultOutputDeviceID()
+        }
+        guard let id = deviceID else { return false }
+        return isBluetoothTransport(deviceID: id)
+    }
+
     public func getAudioDeviceID(for uid: String) -> AudioDeviceID? {
         // First, iterate through all devices to find matching UID
         var propertyAddress = AudioObjectPropertyAddress(

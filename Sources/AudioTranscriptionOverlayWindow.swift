@@ -5,6 +5,7 @@ import SwiftUI
 
 enum AudioTranscriptionOverlayState {
     case hidden
+    case connecting   // Bluetooth mic warming up — don't speak yet
     case listening
     case transcribing
     case refining
@@ -32,6 +33,9 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
             if !wasListening {
                 startRecordingTimer()
             }
+        } else if state == .connecting {
+            errorText = ""
+            stopRecordingTimer()
         } else {
             stopRecordingTimer()
         }
@@ -125,6 +129,15 @@ struct AudioTranscriptionOverlayView: View {
                 case .hidden:
                     EmptyView()
 
+                case .connecting:
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Connecting microphone...")
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
                 case .listening:
                     HStack(spacing: 8) {
                         Image(systemName: "mic.fill")
@@ -181,7 +194,7 @@ struct AudioTranscriptionOverlayView: View {
     private var dynamicHeight: CGFloat {
         switch viewModel.state {
         case .hidden: return 0
-        case .listening, .transcribing, .refining: return 100
+        case .connecting, .listening, .transcribing, .refining: return 100
         case .error: return 120
         }
     }
@@ -189,6 +202,15 @@ struct AudioTranscriptionOverlayView: View {
     @ViewBuilder
     private var stateIndicator: some View {
         switch viewModel.state {
+        case .connecting:
+            Text("Connecting")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.blue)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.blue.opacity(0.15))
+                .cornerRadius(4)
+
         case .listening:
             HStack(spacing: 3) {
                 Text("Recording")

@@ -43,6 +43,11 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     private var escapeGlobalMonitor: Any?
     private var escapeLocalMonitor: Any?
 
+    /// Called once when the first audio buffer arrives after starting recording.
+    /// Used to detect when Bluetooth mic profile switch is complete.
+    var onMicReady: (() -> Void)?
+    private var micReadyFired = false
+
     // Response tracking
     private var currentRunId: String?
     private var accumulatedResponse = ""
@@ -104,6 +109,11 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
     // MARK: - Recording Control
 
+    /// Discard any audio captured so far (used after Bluetooth mic warmup).
+    func clearAudioBuffer() {
+        audioBuffer.removeAll()
+    }
+
     func toggleRecording() {
         if isStartingRecording { return }
 
@@ -138,6 +148,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     private func startRecording() {
         isStartingRecording = true
         audioBuffer.removeAll()
+        micReadyFired = false
         accumulatedResponse = ""
         currentRunId = nil
 
@@ -176,6 +187,17 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             let inputSampleRate = buffer.format.sampleRate
 
             if let channelData = channelData {
+                // Fire mic-ready callback on first buffer (Bluetooth profile switch complete)
+                if !self.micReadyFired {
+                    self.micReadyFired = true
+                    if let callback = self.onMicReady {
+                        DispatchQueue.main.async {
+                            callback()
+                        }
+                        self.onMicReady = nil
+                    }
+                }
+
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 
                 if inputSampleRate != self.sampleRate {

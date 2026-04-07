@@ -5,6 +5,7 @@ import SwiftUI
 
 enum OpenClawOverlayState {
     case hidden
+    case connecting   // Bluetooth mic warming up — don't speak yet
     case listening
     case processing
     case streaming
@@ -41,6 +42,11 @@ class OpenClawOverlayViewModel: ObservableObject {
                 isPinned = false
                 startRecordingTimer()
             }
+        } else if state == .connecting {
+            responseText = ""
+            errorText = ""
+            isPinned = false
+            stopRecordingTimer()
         } else {
             stopRecordingTimer()
         }
@@ -225,6 +231,15 @@ struct OpenClawOverlayView: View {
                 case .hidden:
                     EmptyView()
 
+                case .connecting:
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Connecting microphone...")
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
                 case .listening:
                     HStack(spacing: 8) {
                         Image(systemName: "mic.fill")
@@ -308,7 +323,7 @@ struct OpenClawOverlayView: View {
     private var dynamicHeight: CGFloat {
         switch viewModel.state {
         case .hidden: return 0
-        case .listening, .processing: return 100
+        case .connecting, .listening, .processing: return 100
         case .error: return 120
         case .streaming, .complete: return min(400, max(120, CGFloat(viewModel.responseText.count / 2) + 80))
         }
@@ -317,6 +332,15 @@ struct OpenClawOverlayView: View {
     @ViewBuilder
     private var stateIndicator: some View {
         switch viewModel.state {
+        case .connecting:
+            Text("Connecting")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.blue)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.blue.opacity(0.15))
+                .cornerRadius(4)
+
         case .listening:
             Text("Listening")
                 .font(.system(size: 10, weight: .medium))

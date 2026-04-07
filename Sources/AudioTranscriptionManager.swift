@@ -33,6 +33,11 @@ class AudioTranscriptionManager {
     var isRecording = false
     private var isStartingRecording = false  // Prevents race condition
     private var escapeKeyMonitor: Any?
+
+    /// Called once when the first audio buffer arrives after starting recording.
+    /// Used to detect when Bluetooth mic profile switch is complete.
+    var onMicReady: (() -> Void)?
+    private var micReadyFired = false
     
     // Transcription state
     private var isTranscribing = false
@@ -109,6 +114,11 @@ class AudioTranscriptionManager {
         alert.runModal()
     }
     
+    /// Discard any audio captured so far (used after Bluetooth mic warmup).
+    func clearAudioBuffer() {
+        audioBuffer.removeAll()
+    }
+
     func toggleRecording() {
         // Prevent race condition if called while starting
         if isStartingRecording {
@@ -127,6 +137,7 @@ class AudioTranscriptionManager {
     func startRecording() {
         isStartingRecording = true
         audioBuffer.removeAll()
+        micReadyFired = false
 
         // Create fresh audio engine to avoid state issues
         audioEngine = AVAudioEngine()
@@ -155,6 +166,17 @@ class AudioTranscriptionManager {
             let inputSampleRate = buffer.format.sampleRate
             
             if let channelData = channelData {
+                // Fire mic-ready callback on first buffer (Bluetooth profile switch complete)
+                if !self.micReadyFired {
+                    self.micReadyFired = true
+                    if let callback = self.onMicReady {
+                        DispatchQueue.main.async {
+                            callback()
+                        }
+                        self.onMicReady = nil
+                    }
+                }
+
                 // Collect raw samples
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 

@@ -105,6 +105,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var podcastOverlay: PodcastOverlayWindow?
     private var podcastInterruptActive = false
     private var sttPushToTalkActive = false
+    private var bluetoothWarmingUp = false
     private var sttPushToTalkStartTime: Date?
     private var sttPushToTalkTargetApp: NSRunningApplication?
     private var sttPushToTalkTargetWindow: AXUIElement?
@@ -573,9 +574,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("OpenClaw PTT: started (double-tap-hold)")
-        PTTTonePlayer.shared.playStartTone()
         stopTranscriptionIndicator()
-        recordingManager.toggleRecording()
+
+        if AudioDeviceManager.shared.isCurrentInputDeviceBluetooth() {
+            // Bluetooth devices (AirPods) switch from A2DP to HFP profile when
+            // the mic starts. Both input AND output are unavailable during this
+            // switch (can take 1-2s). Wait for the first audio buffer callback
+            // (proving the profile switch is complete) before playing the tone.
+            print("OpenClaw PTT: Bluetooth mic detected — waiting for profile switch")
+            bluetoothWarmingUp = true
+            recordingManager.onMicReady = { [weak self] in
+                // Input is live, but give HFP output path a moment to stabilize
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    recordingManager.clearAudioBuffer()
+                    self?.bluetoothWarmingUp = false
+                    PTTTonePlayer.shared.playStartTone()
+                    print("OpenClaw PTT: Bluetooth mic ready — tone played")
+                }
+            }
+            recordingManager.toggleRecording()
+        } else {
+            PTTTonePlayer.shared.playStartTone()
+            recordingManager.toggleRecording()
+        }
     }
 
     private func stopOpenClawPushToTalk() {
@@ -602,7 +623,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         print("STT PTT: started (double-tap-hold)")
-        PTTTonePlayer.shared.playStartTone()
         sttPushToTalkActive = true
         sttPushToTalkStartTime = Date()
         sttPushToTalkTargetApp = NSWorkspace.shared.frontmostApplication
@@ -624,7 +644,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             }
         }
         stopTranscriptionIndicator()
-        audioManager.toggleRecording()
+
+        if AudioDeviceManager.shared.isCurrentInputDeviceBluetooth() {
+            // Bluetooth devices (AirPods) switch from A2DP to HFP profile when
+            // the mic starts. Both input AND output are unavailable during this
+            // switch (can take 1-2s). Wait for the first audio buffer callback
+            // (proving the profile switch is complete) before playing the tone.
+            print("STT PTT: Bluetooth mic detected — waiting for profile switch")
+            bluetoothWarmingUp = true
+            audioManager.onMicReady = { [weak self] in
+                // Input is live, but give HFP output path a moment to stabilize
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self?.audioManager.clearAudioBuffer()
+                    self?.bluetoothWarmingUp = false
+                    PTTTonePlayer.shared.playStartTone()
+                    print("STT PTT: Bluetooth mic ready — tone played")
+                }
+            }
+            audioManager.toggleRecording()
+        } else {
+            PTTTonePlayer.shared.playStartTone()
+            audioManager.toggleRecording()
+        }
     }
 
     private func stopSTTPushToTalk() {
@@ -1142,7 +1183,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func audioLevelDidUpdate(db: Float) {
         updateStatusBarWithLevel(db: db)
         if !podcastInterruptActive && !readAloudInterruptActive {
-            ensureAudioOverlay().show(state: .listening)
+            ensureAudioOverlay().show(state: bluetoothWarmingUp ? .connecting : .listening)
         }
     }
 
@@ -1383,7 +1424,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     func openClawAudioLevelDidUpdate(db: Float) {
         updateStatusBarWithLevel(db: db)
-        openClawOverlay?.show(state: .listening)
+        openClawOverlay?.show(state: bluetoothWarmingUp ? .connecting : .listening)
     }
 
     func openClawDidStartProcessing() {

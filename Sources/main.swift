@@ -396,7 +396,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         optionDoubleTapMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
-            handler(event)
+            // Global monitor fires on a non-main thread; dispatch to main
+            // to avoid Swift exclusivity violations with the local monitor.
+            DispatchQueue.main.async { handler(event) }
         }
 
         // Local monitor must return the event to avoid swallowing it

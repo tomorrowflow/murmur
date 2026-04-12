@@ -243,19 +243,11 @@ struct OpenClawOverlayView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .listening:
-                    HStack(spacing: 8) {
-                        Image(systemName: "mic.fill")
-                            .foregroundColor(.red)
-                            .font(.system(size: 20))
-                            .symbolEffect(.pulse)
-                        Text("Listening...")
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text(viewModel.formattedElapsedTime)
-                            .font(.system(size: 13, weight: .medium).monospacedDigit())
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 12)
+                    ListeningIndicatorView(
+                        prompt: "Listening...",
+                        elapsedTime: viewModel.formattedElapsedTime,
+                        monitor: AudioLevelMonitor.shared
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .processing:

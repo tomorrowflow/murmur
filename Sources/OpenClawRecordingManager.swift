@@ -77,6 +77,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         configureInputDevice()
     }
 
+
     private func configureInputDevice() {
         let deviceManager = AudioDeviceManager.shared
 
@@ -127,8 +128,9 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     func cancelRecording() {
         if isRecording {
             isRecording = false
-            audioEngine.stop()
             inputNode.removeTap(onBus: 0)
+            audioEngine.stop()
+            audioEngine.reset()
             audioBuffer.removeAll()
             removeEscapeMonitor()
             cancelStreamingTTS()
@@ -249,8 +251,9 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
     private func stopRecording() {
         isRecording = false
-        audioEngine.stop()
         inputNode.removeTap(onBus: 0)
+        audioEngine.stop()
+        audioEngine.reset()
         removeEscapeMonitor()
 
         print("OpenClaw: recording stopped (\(audioBuffer.count) samples)")

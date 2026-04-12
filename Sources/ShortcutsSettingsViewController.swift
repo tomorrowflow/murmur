@@ -8,6 +8,7 @@ struct ShortcutsSettingsView: View {
     @AppStorage("ptt.stt.sendReturn") private var sttPTTSendReturn = true
     @AppStorage("ptt.stt.promptRefinement") private var sttPromptRefinement = false
     @AppStorage("ptt.maxRecordingSeconds") private var maxRecordingSeconds = 300
+    @AppStorage("ptt.cursorAnchoredOverlay") private var cursorAnchoredOverlay = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -65,6 +66,17 @@ struct ShortcutsSettingsView: View {
                     }
                     .disabled(!sttPTTEnabled)
 
+                    Toggle(isOn: $cursorAnchoredOverlay) {
+                        HStack {
+                            Text("Cursor-anchored indicator")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Show recording waveform near text cursor instead of top overlay")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(!sttPTTEnabled)
+
                     Picker(selection: $maxRecordingSeconds) {
                         Text("3 minutes").tag(180)
                         Text("5 minutes").tag(300)
@@ -111,6 +123,7 @@ struct ShortcutsSettingsView: View {
         sttPTTEnabled = true
         sttPTTSendReturn = true
         sttPromptRefinement = false
+        cursorAnchoredOverlay = false
         maxRecordingSeconds = 300
     }
 }

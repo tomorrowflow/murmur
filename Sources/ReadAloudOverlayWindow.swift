@@ -400,19 +400,10 @@ struct ReadAloudOverlayView: View {
     }
 
     private var listeningIndicator: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "mic.fill")
-                .foregroundColor(.red)
-                .font(.system(size: 16))
-                .symbolEffect(.pulse)
-            Text("Listening...")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.red.opacity(0.05))
+        ListeningIndicatorView(
+            prompt: "Listening...",
+            monitor: AudioLevelMonitor.shared
+        )
     }
 
     private var processingIndicator: some View {

@@ -31,6 +31,7 @@ class DraftEditingOverlayViewModel: ObservableObject {
     @Published var streamingEditText: String = ""
     @Published var editHistory: [DraftEditEntry] = []
     @Published var isPaused: Bool = false
+    @Published var editorConnected: Bool = false
 
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
@@ -261,7 +262,7 @@ struct DraftEditingOverlayView: View {
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Paragraph position
+            // Paragraph position + optional preview
             HStack(spacing: 6) {
                 Text(viewModel.kindLabel)
                     .font(.system(size: 10, weight: .medium))
@@ -275,16 +276,26 @@ struct DraftEditingOverlayView: View {
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
 
+                if viewModel.editorConnected {
+                    Text(viewModel.currentParagraphText)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
                 Spacer()
             }
 
-            // Current paragraph text
-            ScrollView(.vertical, showsIndicators: false) {
-                Text(viewModel.currentParagraphText)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
+            // Full paragraph text only when no editor is connected
+            if !viewModel.editorConnected {
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(viewModel.currentParagraphText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(12)
@@ -293,44 +304,28 @@ struct DraftEditingOverlayView: View {
     // MARK: - Edit Preview
 
     private var editPreviewView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Original text
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Original")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.red.opacity(0.8))
-                Text(viewModel.currentParagraphText)
-                    .font(.system(size: 11))
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Rewritten")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.green.opacity(0.8))
+            if viewModel.streamingEditText.isEmpty {
+                Text("Generating...")
+                    .font(.system(size: 11, weight: .light))
                     .foregroundColor(.secondary)
-                    .strikethrough(true, color: .red.opacity(0.4))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineLimit(4)
-            }
-
-            // Streaming replacement
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Rewritten")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.green.opacity(0.8))
-                if viewModel.streamingEditText.isEmpty {
-                    Text("Generating...")
-                        .font(.system(size: 11, weight: .light))
-                        .foregroundColor(.secondary)
-                        .italic()
-                } else {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        Text(viewModel.streamingEditText)
-                            .font(.system(size: 11))
-                            .foregroundColor(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    .italic()
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(viewModel.streamingEditText)
+                        .font(.system(size: 11))
+                        .foregroundColor(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(8)
-            .background(Color.green.opacity(0.05))
-            .cornerRadius(6)
         }
+        .padding(8)
+        .background(Color.green.opacity(0.05))
+        .cornerRadius(6)
         .padding(12)
     }
 
@@ -387,19 +382,10 @@ struct DraftEditingOverlayView: View {
     }
 
     private var listeningIndicator: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "mic.fill")
-                .foregroundColor(.red)
-                .font(.system(size: 16))
-                .symbolEffect(.pulse)
-            Text("Describe how to edit this paragraph...")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.red.opacity(0.05))
+        ListeningIndicatorView(
+            prompt: "Describe how to edit this paragraph...",
+            monitor: AudioLevelMonitor.shared
+        )
     }
 
     private var processingIndicator: some View {
@@ -433,13 +419,15 @@ struct DraftEditingOverlayView: View {
     // MARK: - Helpers
 
     private var dynamicHeight: CGFloat {
+        let historyHeight: CGFloat = viewModel.editHistory.isEmpty ? 0 : 50
+        let compact = viewModel.editorConnected
         switch viewModel.state {
         case .idle: return 0
         case .loading: return 100
         case .error: return 120
-        case .reading, .paused, .complete: return 300 + (viewModel.editHistory.isEmpty ? 0 : 50)
-        case .listening: return 330 + (viewModel.editHistory.isEmpty ? 0 : 50)
-        case .processingEdit, .applyingEdit: return 380 + (viewModel.editHistory.isEmpty ? 0 : 50)
+        case .reading, .paused, .complete: return (compact ? 120 : 300) + historyHeight
+        case .listening: return (compact ? 150 : 330) + historyHeight
+        case .processingEdit, .applyingEdit: return 250 + historyHeight
         }
     }
 

@@ -52,7 +52,7 @@ class AudioTranscriptionManager {
         inputNode = audioEngine.inputNode
         configureInputDevice()
     }
-    
+
     private func configureInputDevice() {
         let deviceManager = AudioDeviceManager.shared
 
@@ -134,19 +134,18 @@ class AudioTranscriptionManager {
         }
     }
 
+    private var useEchoCancellation: Bool {
+        UserDefaults.standard.bool(forKey: "audio.voiceProcessing")
+    }
+
     func startRecording() {
         isStartingRecording = true
         audioBuffer.removeAll()
         micReadyFired = false
 
-        // Create fresh audio engine to avoid state issues
-        audioEngine = AVAudioEngine()
-        inputNode = audioEngine.inputNode
-        configureInputDevice()
-
         // Set up global Escape key monitor to cancel recording
         escapeKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { // 53 is the key code for Escape
+            if event.keyCode == 53 {
                 if self?.isRecording == true {
                     print("🛑 Recording cancelled by Escape key")
                     DispatchQueue.main.async {
@@ -156,15 +155,27 @@ class AudioTranscriptionManager {
             }
         }
 
+        if useEchoCancellation {
+            AudioDucker.shared.duck()
+        }
+        startRecordingWithAVAudioEngine()
+    }
+
+    private func startRecordingWithAVAudioEngine() {
+        // Create fresh audio engine to avoid state issues
+        audioEngine = AVAudioEngine()
+        inputNode = audioEngine.inputNode
+        configureInputDevice()
+
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         audioEngine.prepare()
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
-            
+
             let channelData = buffer.floatChannelData?[0]
             let frameLength = Int(buffer.frameLength)
             let inputSampleRate = buffer.format.sampleRate
-            
+
             if let channelData = channelData {
                 // Fire mic-ready callback on first buffer (Bluetooth profile switch complete)
                 if !self.micReadyFired {
@@ -177,10 +188,8 @@ class AudioTranscriptionManager {
                     }
                 }
 
-                // Collect raw samples
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 
-                // Resample to 16kHz if needed for WhisperKit
                 if inputSampleRate != self.sampleRate {
                     let ratio = Int(inputSampleRate / self.sampleRate)
                     let resampledSamples = stride(from: 0, to: samples.count, by: ratio).map { samples[$0] }
@@ -189,7 +198,6 @@ class AudioTranscriptionManager {
                     self.audioBuffer.append(contentsOf: samples)
                 }
 
-                // Prevent memory explosion from runaway recording
                 if self.audioBuffer.count > self.maxBufferSamples {
                     let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
                     let label = seconds > 0 ? "\(seconds / 60) min" : "limit"
@@ -200,8 +208,7 @@ class AudioTranscriptionManager {
                     }
                     return
                 }
-                
-                // Calculate audio level
+
                 let rms = sqrt(channelData.withMemoryRebound(to: Float.self, capacity: frameLength) { ptr in
                     var sum: Float = 0
                     for i in 0..<frameLength {
@@ -209,9 +216,9 @@ class AudioTranscriptionManager {
                     }
                     return sum / Float(frameLength)
                 })
-                
+
                 let db = 20 * log10(max(rms, 0.00001))
-                
+
                 DispatchQueue.main.async {
                     self.delegate?.audioLevelDidUpdate(db: db)
                 }
@@ -228,30 +235,34 @@ class AudioTranscriptionManager {
             isStartingRecording = false
         }
     }
-    
+
     func stopRecording() {
-        audioEngine.stop()
         inputNode.removeTap(onBus: 0)
-        
+        audioEngine.stop()
+        audioEngine.reset()
+        AudioDucker.shared.restore()
+
         // Remove Escape key monitor
         if let monitor = escapeKeyMonitor {
             NSEvent.removeMonitor(monitor)
             escapeKeyMonitor = nil
         }
-        
+
         print("⏹ Recording stopped")
         print("Captured \(audioBuffer.count) audio samples")
-        
+
         // Process the recording
         Task {
             await processRecording()
         }
     }
-    
+
     func cancelRecording() {
         isRecording = false
-        audioEngine.stop()
         inputNode.removeTap(onBus: 0)
+        audioEngine.stop()
+        audioEngine.reset()
+        AudioDucker.shared.restore()
         audioBuffer.removeAll()
         
         // Remove Escape key monitor

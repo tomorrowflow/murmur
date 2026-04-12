@@ -116,6 +116,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var draftEditingManager: DraftEditingManager?
     private var draftEditingOverlay: DraftEditingOverlayWindow?
     private var draftEditInterruptActive = false
+    private var cursorAnchoredOverlay: CursorAnchoredOverlayWindow?
     private var httpServer: MurmurHTTPServer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -914,51 +915,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
     
     func defaultWaveformImage() -> NSImage {
-        let width: CGFloat = 18
-        let height: CGFloat = 18
-        let barWidth: CGFloat = 3.0
-        let barSpacing: CGFloat = 1.5
-        let cornerRadius: CGFloat = 1.5
-
-        let barHeights: [CGFloat] = [8.0, 12.0, 8.0]
-
-        let image = NSImage(size: NSSize(width: width, height: height))
-        image.lockFocus()
-
-        let totalBarsWidth = 3 * barWidth + 2 * barSpacing
-        let startX = (width - totalBarsWidth) / 2
-
-        for i in 0..<3 {
-            let x = startX + CGFloat(i) * (barWidth + barSpacing)
-            let y = (height - barHeights[i]) / 2
-            let rect = NSRect(x: x, y: y, width: barWidth, height: barHeights[i])
-            let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
-            NSColor.black.setFill()
-            path.fill()
-        }
-
-        image.unlockFocus()
-        image.isTemplate = true
-        return image
+        return generateWaveformImage(level: 0)
     }
 
-    func generateWaveformImage() -> NSImage {
+    func generateWaveformImage(level: CGFloat = 0) -> NSImage {
         let width: CGFloat = 18
         let height: CGFloat = 18
-        let barWidth: CGFloat = 3.0
-        let barSpacing: CGFloat = 1.5
-        let cornerRadius: CGFloat = 1.5
+        let barCount = 5
+        let barWidth: CGFloat = 2.0
+        let barSpacing: CGFloat = 1.0
+        let cornerRadius: CGFloat = 1.0
         let minBarHeight: CGFloat = 4.0
         let maxBarHeight: CGFloat = 14.0
 
+        // Bar scale factors: outer bars shorter, center tallest
+        let scaleFactors: [CGFloat] = [0.55, 0.8, 1.0, 0.8, 0.55]
+
         let image = NSImage(size: NSSize(width: width, height: height))
         image.lockFocus()
 
-        let totalBarsWidth = 3 * barWidth + 2 * barSpacing
+        let totalBarsWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
         let startX = (width - totalBarsWidth) / 2
 
-        for i in 0..<3 {
-            let barHeight = CGFloat.random(in: minBarHeight...maxBarHeight)
+        for i in 0..<barCount {
+            let barLevel = level * scaleFactors[i]
+            let barHeight = minBarHeight + barLevel * (maxBarHeight - minBarHeight)
             let x = startX + CGFloat(i) * (barWidth + barSpacing)
             let y = (height - barHeight) / 2
             let rect = NSRect(x: x, y: y, width: barWidth, height: barHeight)
@@ -979,14 +960,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         // Show first frame immediately
         if let button = statusItem.button {
             button.title = ""
-            button.image = generateWaveformImage()
+            button.image = generateWaveformImage(level: AudioLevelMonitor.shared.currentLevel)
         }
 
-        waveformAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        waveformAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             if let button = self.statusItem.button {
                 button.title = ""
-                button.image = self.generateWaveformImage()
+                button.image = self.generateWaveformImage(level: AudioLevelMonitor.shared.currentLevel)
             }
         }
     }
@@ -994,9 +975,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func stopWaveformAnimation() {
         waveformAnimationTimer?.invalidate()
         waveformAnimationTimer = nil
-
-        // Don't update status bar if screen recording is active
-
+        AudioLevelMonitor.shared.reset()
 
         if let button = statusItem.button {
             button.image = defaultWaveformImage()
@@ -1201,16 +1180,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     
     // MARK: - AudioTranscriptionManagerDelegate
     
+    private var useCursorAnchoredOverlay: Bool {
+        UserDefaults.standard.bool(forKey: "ptt.cursorAnchoredOverlay")
+    }
+
     func audioLevelDidUpdate(db: Float) {
+        AudioLevelMonitor.shared.update(db: db)
         updateStatusBarWithLevel(db: db)
         if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
-            ensureAudioOverlay().show(state: bluetoothWarmingUp ? .connecting : .listening)
+            if useCursorAnchoredOverlay {
+                if cursorAnchoredOverlay == nil {
+                    cursorAnchoredOverlay = CursorAnchoredOverlayWindow()
+                }
+                cursorAnchoredOverlay?.show()
+            } else {
+                ensureAudioOverlay().show(state: bluetoothWarmingUp ? .connecting : .listening)
+            }
         }
     }
 
     func transcriptionDidStart() {
         startTranscriptionIndicator()
         if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
+            cursorAnchoredOverlay?.dismiss()
             ensureAudioOverlay().show(state: .transcribing)
         }
     }
@@ -1218,6 +1210,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func transcriptionDidComplete(text: String) {
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
+        cursorAnchoredOverlay?.dismiss()
 
         // Route to draft editing interrupt if active
         if draftEditInterruptActive {
@@ -1471,6 +1464,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     // MARK: - OpenClawRecordingManagerDelegate
 
     func openClawAudioLevelDidUpdate(db: Float) {
+        AudioLevelMonitor.shared.update(db: db)
         updateStatusBarWithLevel(db: db)
         openClawOverlay?.show(state: bluetoothWarmingUp ? .connecting : .listening)
     }
@@ -2020,6 +2014,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             }
         }
         draftEditingOverlay = overlay
+        overlay.viewModel.editorConnected = true
         overlay.show(state: .loading)
 
         startWaveformAnimation()

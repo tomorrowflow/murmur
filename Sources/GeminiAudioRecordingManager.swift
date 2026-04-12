@@ -47,6 +47,7 @@ class GeminiAudioRecordingManager {
         configureInputDevice()
     }
 
+
     private func configureInputDevice() {
         let deviceManager = AudioDeviceManager.shared
 
@@ -208,8 +209,9 @@ class GeminiAudioRecordingManager {
     }
 
     func stopRecording() {
-        audioEngine.stop()
         inputNode.removeTap(onBus: 0)
+        audioEngine.stop()
+        audioEngine.reset()
 
         // Remove Escape key monitor
         if let monitor = escapeKeyMonitor {
@@ -226,8 +228,9 @@ class GeminiAudioRecordingManager {
 
     func cancelRecording() {
         isRecording = false
-        audioEngine.stop()
         inputNode.removeTap(onBus: 0)
+        audioEngine.stop()
+        audioEngine.reset()
         audioBuffer.removeAll()
 
         // Remove Escape key monitor

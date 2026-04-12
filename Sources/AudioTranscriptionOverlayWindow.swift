@@ -141,19 +141,11 @@ struct AudioTranscriptionOverlayView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .listening:
-                    HStack(spacing: 8) {
-                        Image(systemName: "mic.fill")
-                            .foregroundColor(.red)
-                            .font(.system(size: 20))
-                            .symbolEffect(.pulse)
-                        Text("Recording...")
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text(viewModel.formattedElapsedTime)
-                            .font(.system(size: 13, weight: .medium).monospacedDigit())
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 12)
+                    ListeningIndicatorView(
+                        prompt: "Recording...",
+                        elapsedTime: viewModel.formattedElapsedTime,
+                        monitor: AudioLevelMonitor.shared
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .transcribing:

@@ -4,6 +4,7 @@ import ServiceManagement
 
 struct GeneralSettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @AppStorage("audio.voiceProcessing") private var voiceProcessingEnabled = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -19,6 +20,17 @@ struct GeneralSettingsView: View {
                     }
                     .onChange(of: launchAtLogin) { _, newValue in
                         setLaunchAtLogin(newValue)
+                    }
+                }
+
+                Section("Audio") {
+                    Toggle(isOn: $voiceProcessingEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Audio Ducking")
+                            Text("Lower system volume during recording to reduce mic bleed from speakers. Volume is restored when recording stops.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }

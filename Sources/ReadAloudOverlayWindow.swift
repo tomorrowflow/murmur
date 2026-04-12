@@ -115,6 +115,8 @@ struct ReadAloudOverlayView: View {
                         Image(systemName: playPauseIcon)
                             .foregroundColor(.secondary)
                             .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(playPauseHelp)
@@ -128,6 +130,8 @@ struct ReadAloudOverlayView: View {
                         Image(systemName: "arrow.down.doc.fill")
                             .foregroundColor(viewModel.state == .complete ? .secondary : .secondary.opacity(0.3))
                             .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.state != .complete)
@@ -137,6 +141,8 @@ struct ReadAloudOverlayView: View {
                         Image(systemName: "arrow.down.doc")
                             .foregroundColor(.secondary)
                             .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("Export transcript as Markdown")
@@ -146,6 +152,8 @@ struct ReadAloudOverlayView: View {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.secondary)
                         .font(.system(size: 14))
+                        .frame(width: 28, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Stop and close")

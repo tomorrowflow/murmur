@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Stop Draft Editing</string>
+	<key>uuid</key>
+	<string>9B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E</string>
+	<key>scope</key>
+	<string>text.html.markdown</string>
+	<key>input</key>
+	<string>none</string>
+	<key>output</key>
+	<string>showAsTooltip</string>
+	<key>keyEquivalent</key>
+	<string></string>
+	<key>command</key>
+	<string>#!/bin/bash
+RESPONSE=$(curl -s -m 3 -X POST http://127.0.0.1:7878/api/v1/draft/stop 2>/dev/null)
+if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+  echo "Failed to connect. Is Murmur running?"
+else
+  echo "Draft editing stopped."
+fi
+</string>
+</dict>
+</plist>

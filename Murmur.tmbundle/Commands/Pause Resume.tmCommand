@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Pause / Resume</string>
+	<key>uuid</key>
+	<string>BD4E5F6A-7B8C-9D0E-1F2A-3B4C5D6E7F80</string>
+	<key>scope</key>
+	<string>text.html.markdown</string>
+	<key>input</key>
+	<string>none</string>
+	<key>output</key>
+	<string>showAsTooltip</string>
+	<key>keyEquivalent</key>
+	<string>^~ </string>
+	<key>command</key>
+	<string>#!/bin/bash
+# Check current status to decide pause or resume
+STATUS=$(curl -s -m 3 http://127.0.0.1:7878/api/v1/draft/status 2>/dev/null)
+if [ $? -ne 0 ] || [ -z "$STATUS" ]; then
+  echo "Failed to connect. Is Murmur running?"
+  exit 0
+fi
+
+ACTIVE=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('active', False))" 2>/dev/null)
+if [ "$ACTIVE" != "True" ]; then
+  echo "No active draft editing session."
+  exit 0
+fi
+
+STATE=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('state', ''))" 2>/dev/null)
+if [ "$STATE" = "Paused" ]; then
+  curl -s -m 3 -X POST http://127.0.0.1:7878/api/v1/draft/resume >/dev/null 2>&1
+  echo "Resumed."
+else
+  curl -s -m 3 -X POST http://127.0.0.1:7878/api/v1/draft/pause >/dev/null 2>&1
+  echo "Paused."
+fi
+</string>
+</dict>
+</plist>

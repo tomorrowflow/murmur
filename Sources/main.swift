@@ -59,6 +59,7 @@ extension KeyboardShortcuts.Name {
     static let pasteLastTranscription = Self("pasteLastTranscription")
     static let openclawRecording = Self("openclawRecording")
     static let podcastToggle = Self("podcastToggle")
+    static let draftEditing = Self("draftEditing")
 }
 
 enum OptionDoubleTapState {
@@ -69,7 +70,7 @@ enum OptionDoubleTapState {
     case recordingToggle // double-tap released — next tap stops recording
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate, DraftEditingManagerDelegate {
     var statusItem: NSStatusItem!
     var settingsWindow: SettingsWindowController?
     private var unifiedWindow: UnifiedManagerWindow?
@@ -112,6 +113,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var readAloudManager: ReadAloudManager?
     private var readAloudOverlay: ReadAloudOverlayWindow?
     private var readAloudInterruptActive = false
+    private var draftEditingManager: DraftEditingManager?
+    private var draftEditingOverlay: DraftEditingOverlayWindow?
+    private var draftEditInterruptActive = false
+    private var httpServer: MurmurHTTPServer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
@@ -163,7 +168,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             (.s, .readSelectedText),
             (.v, .pasteLastTranscription),
             (.o, .openclawRecording),
-            (.p, .podcastToggle)
+            (.p, .podcastToggle),
+            (.d, .draftEditing)
         ]
         for (key, name) in defaults {
             if KeyboardShortcuts.getShortcut(for: name) == nil {
@@ -237,6 +243,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             self?.togglePodcast()
         }
 
+        KeyboardShortcuts.onKeyUp(for: .draftEditing) { [weak self] in
+            NSLog("DraftEditing: Cmd+Opt+D pressed")
+            self?.toggleDraftEditing()
+        }
+
         // Log current podcast shortcut binding
         if let shortcut = KeyboardShortcuts.getShortcut(for: .podcastToggle) {
             print("Podcast shortcut registered: \(shortcut)")
@@ -244,6 +255,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             print("Podcast shortcut: NOT SET — setting default now")
             KeyboardShortcuts.setShortcut(.init(.p, modifiers: [.command, .option]), for: .podcastToggle)
         }
+
+        // Set up HTTP server for editor integration
+        setupHTTPServer()
 
         // Set up audio manager
         audioManager = AudioTranscriptionManager()
@@ -431,7 +445,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         let openClawPTTEnabled = UserDefaults.standard.object(forKey: "ptt.openClaw.enabled") as? Bool ?? true
         let podcastActive = self.podcastManager?.isSessionActive == true
         let readAloudActive = self.readAloudManager?.isActive == true
-        if event.keyCode == leftOptionKeyCode && (openClawPTTEnabled || podcastActive || readAloudActive) {
+        let draftEditActive = self.draftEditingManager?.isActive == true
+        if event.keyCode == leftOptionKeyCode && (openClawPTTEnabled || podcastActive || readAloudActive || draftEditActive) {
             self.handleDoubleTapHold(
                 optionDown: optionDown, now: now,
                 state: &self.leftOptionState,
@@ -441,6 +456,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 onStart: {
                     if self.podcastManager?.isSessionActive == true {
                         self.startPodcastInterrupt()
+                    } else if self.draftEditingManager?.isActive == true {
+                        self.startDraftEditInterrupt()
                     } else if self.readAloudManager?.isActive == true {
                         self.startReadAloudInterrupt()
                     } else {
@@ -450,6 +467,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 onStop: {
                     if self.podcastInterruptActive {
                         self.stopPodcastInterrupt()
+                    } else if self.draftEditInterruptActive {
+                        self.stopDraftEditInterrupt()
                     } else if self.readAloudInterruptActive {
                         self.stopReadAloudInterrupt()
                     } else {
@@ -1184,14 +1203,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     
     func audioLevelDidUpdate(db: Float) {
         updateStatusBarWithLevel(db: db)
-        if !podcastInterruptActive && !readAloudInterruptActive {
+        if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
             ensureAudioOverlay().show(state: bluetoothWarmingUp ? .connecting : .listening)
         }
     }
 
     func transcriptionDidStart() {
         startTranscriptionIndicator()
-        if !podcastInterruptActive && !readAloudInterruptActive {
+        if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
             ensureAudioOverlay().show(state: .transcribing)
         }
     }
@@ -1199,6 +1218,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func transcriptionDidComplete(text: String) {
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
+
+        // Route to draft editing interrupt if active
+        if draftEditInterruptActive {
+            draftEditInterruptActive = false
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                print("DraftEdit interrupt: no speech detected, resuming")
+                draftEditingManager?.cancelEditInterrupt()
+                return
+            }
+            print("DraftEdit interrupt: transcribed instruction: \"\(text)\"")
+            draftEditingManager?.applyEdit(instruction: text)
+            draftEditingOverlay?.updateState(.processingEdit)
+            return
+        }
 
         // Route to read-aloud interrupt if active
         if readAloudInterruptActive {
@@ -1346,6 +1379,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func transcriptionDidFail(error: String) {
         let wasPodcastInterrupt = podcastInterruptActive
         let wasReadAloudInterrupt = readAloudInterruptActive
+        let wasDraftEditInterrupt = draftEditInterruptActive
+        if draftEditInterruptActive {
+            draftEditInterruptActive = false
+            draftEditingManager?.cancelEditInterrupt()
+        }
         if readAloudInterruptActive {
             readAloudInterruptActive = false
             readAloudManager?.cancelInterrupt()
@@ -1358,13 +1396,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
         stopTranscriptionIndicator()
-        if !wasPodcastInterrupt && !wasReadAloudInterrupt {
+        if !wasPodcastInterrupt && !wasReadAloudInterrupt && !wasDraftEditInterrupt {
             ensureAudioOverlay().showError(error)
         }
         showTranscriptionError(error)
     }
 
     func recordingWasCancelled() {
+        if draftEditInterruptActive {
+            draftEditInterruptActive = false
+            draftEditingManager?.cancelEditInterrupt()
+        }
         if readAloudInterruptActive {
             readAloudInterruptActive = false
             readAloudManager?.cancelInterrupt()
@@ -1394,6 +1436,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func recordingWasSkippedDueToSilence() {
+        if draftEditInterruptActive {
+            draftEditInterruptActive = false
+            draftEditingManager?.cancelEditInterrupt()
+        }
         if readAloudInterruptActive {
             readAloudInterruptActive = false
             readAloudManager?.cancelInterrupt()
@@ -1857,6 +1903,358 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         PTTTonePlayer.shared.playInterruptTone()
         audioManager.toggleRecording()
         // transcriptionDidComplete will route to podcastManager.sendInterrupt
+    }
+
+    // MARK: - Draft Editing
+
+    private func toggleDraftEditing() {
+        if let manager = draftEditingManager, manager.isActive {
+            stopDraftEditing()
+            return
+        }
+
+        let editorPref = UserDefaults.standard.string(forKey: "draftEditing.editor") ?? "auto"
+
+        let useTextMate: Bool
+        let useObsidian: Bool
+
+        switch editorPref {
+        case "textmate":
+            useTextMate = true
+            useObsidian = false
+        case "obsidian":
+            useTextMate = false
+            useObsidian = true
+        default: // "auto" — use whichever editor is frontmost
+            let frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+            if frontApp == "com.macromates.TextMate" {
+                useTextMate = true
+                useObsidian = false
+            } else if frontApp == "md.obsidian" {
+                useTextMate = false
+                useObsidian = true
+            } else {
+                // Neither is frontmost — check which is running
+                let tm = TextMateAdapter()
+                let ob = ObsidianAdapter()
+                useTextMate = tm.isRunning()
+                useObsidian = !useTextMate && ob.isRunning()
+            }
+        }
+
+        if useTextMate {
+            let cursorLine = TextMateAdapter.getCursorLine()
+            Task {
+                guard let filePath = await TextMateAdapter.frontDocumentPath() else {
+                    let notification = NSUserNotification()
+                    notification.title = "Draft Editing"
+                    notification.informativeText = "No markdown file found in TextMate."
+                    NSUserNotificationCenter.default.deliver(notification)
+                    return
+                }
+                await MainActor.run {
+                    self.startDraftEditing(filePath: filePath, adapter: TextMateAdapter(), startLine: cursorLine)
+                }
+            }
+        } else if useObsidian {
+            Task {
+                // Get cursor and file path from the companion plugin (both async-safe)
+                let cursorData = await ObsidianAdapter.getCursorAndFile()
+                let cursorLine = cursorData?.line
+                guard let filePath = cursorData?.file, !filePath.isEmpty else {
+                    let notification = NSUserNotification()
+                    notification.title = "Draft Editing"
+                    notification.informativeText = "No markdown file found in Obsidian. Make sure the Murmur Bridge plugin is enabled."
+                    NSUserNotificationCenter.default.deliver(notification)
+                    return
+                }
+                await MainActor.run {
+                    self.startDraftEditing(filePath: filePath, adapter: ObsidianAdapter(), startLine: cursorLine)
+                }
+            }
+        } else {
+            let notification = NSUserNotification()
+            notification.title = "Draft Editing"
+            notification.informativeText = "No supported editor found. Open a markdown file in TextMate or Obsidian."
+            NSUserNotificationCenter.default.deliver(notification)
+        }
+    }
+
+    func startDraftEditing(filePath: String, adapter: EditorAdapter, startLine: Int? = nil) {
+        NSLog("DraftEditing: starting session for \(filePath)")
+
+        let manager = DraftEditingManager()
+        manager.delegate = self
+        draftEditingManager = manager
+
+        let overlay = DraftEditingOverlayWindow()
+        overlay.onStop = { [weak self] in
+            self?.stopDraftEditing()
+        }
+        overlay.onPlayPause = { [weak self] in
+            self?.draftEditingManager?.togglePause()
+            if let isPaused = self?.draftEditingManager?.isPaused {
+                self?.draftEditingOverlay?.updatePaused(isPaused)
+            }
+        }
+        overlay.onNext = { [weak self] in
+            self?.draftEditingManager?.nextParagraph()
+        }
+        overlay.onPrev = { [weak self] in
+            self?.draftEditingManager?.prevParagraph()
+        }
+        overlay.onUndoEdit = { [weak self] index in
+            self?.draftEditingManager?.undoEdit(historyIndex: index)
+        }
+        overlay.onExportAudio = { [weak self] in
+            guard let data = self?.draftEditingManager?.combinedAudioData() else { return }
+            DispatchQueue.main.async {
+                let savePanel = NSSavePanel()
+                savePanel.allowedContentTypes = [.wav]
+                savePanel.nameFieldStringValue = "Draft Editing.wav"
+                savePanel.begin { response in
+                    if response == .OK, let url = savePanel.url {
+                        try? data.write(to: url)
+                    }
+                }
+            }
+        }
+        draftEditingOverlay = overlay
+        overlay.show(state: .loading)
+
+        startWaveformAnimation()
+        manager.startSession(filePath: filePath, adapter: adapter, startLine: startLine)
+    }
+
+    private func stopDraftEditing() {
+        draftEditingManager?.stop()
+        draftEditingOverlay?.dismiss()
+        draftEditingManager = nil
+        draftEditingOverlay = nil
+        draftEditInterruptActive = false
+        stopWaveformAnimation()
+    }
+
+    func startDraftEditInterrupt() {
+        guard let manager = draftEditingManager, manager.isActive else {
+            resetLeftOptionState()
+            return
+        }
+
+        if audioManager.isRecording || openClawRecordingManager?.isRecording == true {
+            print("DraftEdit interrupt: blocked - another recording is active")
+            resetLeftOptionState()
+            return
+        }
+
+        print("DraftEdit interrupt: started (double-tap-hold)")
+        PTTTonePlayer.shared.playStartTone()
+        draftEditInterruptActive = true
+        draftEditingOverlay?.updateState(.listening)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            guard let self = self, self.draftEditInterruptActive else { return }
+            manager.beginEditInterrupt()
+            self.stopTranscriptionIndicator()
+            self.audioManager.toggleRecording()
+        }
+    }
+
+    func stopDraftEditInterrupt() {
+        guard audioManager.isRecording else {
+            if draftEditInterruptActive {
+                print("DraftEdit interrupt: cancelled — released before recording started")
+                draftEditInterruptActive = false
+                if let managerState = draftEditingManager?.state {
+                    draftEditingOverlay?.updateState(managerState)
+                }
+            }
+            return
+        }
+
+        print("DraftEdit interrupt: released — stopping")
+        PTTTonePlayer.shared.playInterruptTone()
+        audioManager.toggleRecording()
+    }
+
+    // MARK: - DraftEditingManagerDelegate
+
+    func draftDidChangeState(_ state: DraftEditingState) {
+        draftEditingOverlay?.updateState(state)
+        switch state {
+        case .reading:
+            startWaveformAnimation()
+        case .idle:
+            // Session was stopped (e.g. by Escape key)
+            stopDraftEditing()
+        case .complete:
+            stopWaveformAnimation()
+            // Auto-dismiss after 5 seconds, clearing highlights
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                if self?.draftEditingManager?.state == .complete {
+                    self?.stopDraftEditing()
+                }
+            }
+        case .error:
+            stopWaveformAnimation()
+        default:
+            break
+        }
+    }
+
+    func draftDidLoadDocument(_ document: MarkdownDocument) {
+        draftEditingOverlay?.loadDocument(document)
+    }
+
+    func draftDidActivateParagraph(index: Int, paragraph: MarkdownParagraph) {
+        draftEditingOverlay?.activateParagraph(index: index, paragraph: paragraph)
+    }
+
+    func draftDidActivateSegment(_ segment: TTSSegment, inParagraph index: Int) {
+        // Could update overlay with current segment info if needed
+    }
+
+    func draftDidCompleteEdit(paragraphIndex: Int, original: String, replacement: String) {
+        draftEditingOverlay?.completeEdit(paragraphIndex: paragraphIndex, original: original, replacement: replacement)
+        if let history = draftEditingManager?.editHistory {
+            draftEditingOverlay?.updateEditHistory(history)
+        }
+    }
+
+    func draftDidUpdateStreamingEdit(_ text: String) {
+        draftEditingOverlay?.updateStreamingEdit(text)
+    }
+
+    func draftDidError(_ message: String) {
+        let notification = NSUserNotification()
+        notification.title = "Draft Editing Error"
+        notification.informativeText = message
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+
+    // MARK: - HTTP Server
+
+    private func setupHTTPServer() {
+        let server = MurmurHTTPServer()
+
+        server.get("/api/v1/health") { _ in
+            return (200, MurmurHTTPServer.jsonResponse(["ok": true, "version": "1.0"]))
+        }
+
+        server.get("/api/v1/draft/status") { [weak self] _ in
+            guard let manager = self?.draftEditingManager, manager.isActive,
+                  let doc = manager.document else {
+                return (200, MurmurHTTPServer.jsonResponse([
+                    "active": false
+                ]))
+            }
+            return (200, MurmurHTTPServer.jsonResponse([
+                "active": true,
+                "sessionId": manager.sessionId.uuidString,
+                "currentParagraph": manager.currentParagraphIndex,
+                "totalParagraphs": doc.paragraphs.count,
+                "state": manager.state.displayName
+            ]))
+        }
+
+        server.post("/api/v1/draft/start") { [weak self] body in
+            guard let json = MurmurHTTPServer.parseJSON(body),
+                  let filePath = json["filePath"] as? String else {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "Missing filePath"]))
+            }
+
+            guard self?.draftEditingManager?.isActive != true else {
+                return (409, MurmurHTTPServer.jsonResponse(["error": "Session already active"]))
+            }
+
+            let startLine = json["startLine"] as? Int
+            let editorName = json["editor"] as? String ?? "textmate"
+            let adapter: EditorAdapter = editorName.lowercased() == "obsidian"
+                ? ObsidianAdapter()
+                : TextMateAdapter()
+            await MainActor.run {
+                self?.startDraftEditing(filePath: filePath, adapter: adapter, startLine: startLine)
+            }
+
+            // Wait briefly for parsing
+            try? await Task.sleep(nanoseconds: 500_000_000)
+
+            let paragraphCount = await MainActor.run { self?.draftEditingManager?.document?.paragraphs.count ?? 0 }
+            let sessionId = await MainActor.run { self?.draftEditingManager?.sessionId.uuidString ?? "" }
+
+            return (200, MurmurHTTPServer.jsonResponse([
+                "sessionId": sessionId,
+                "totalParagraphs": paragraphCount
+            ]))
+        }
+
+        server.post("/api/v1/draft/stop") { [weak self] _ in
+            await MainActor.run { self?.stopDraftEditing() }
+            return (200, MurmurHTTPServer.jsonResponse(["ok": true]))
+        }
+
+        server.post("/api/v1/draft/navigate") { [weak self] body in
+            guard let json = MurmurHTTPServer.parseJSON(body),
+                  let action = json["action"] as? String else {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "Missing action"]))
+            }
+
+            await MainActor.run {
+                switch action {
+                case "next": self?.draftEditingManager?.nextParagraph()
+                case "prev": self?.draftEditingManager?.prevParagraph()
+                case "goto":
+                    if let paragraph = json["paragraph"] as? Int {
+                        self?.draftEditingManager?.navigateTo(paragraph: paragraph)
+                    }
+                default: break
+                }
+            }
+
+            let current = await MainActor.run { self?.draftEditingManager?.currentParagraphIndex ?? 0 }
+            return (200, MurmurHTTPServer.jsonResponse(["currentParagraph": current]))
+        }
+
+        server.post("/api/v1/draft/pause") { [weak self] _ in
+            await MainActor.run {
+                self?.draftEditingManager?.togglePause()
+                if let isPaused = self?.draftEditingManager?.isPaused {
+                    self?.draftEditingOverlay?.updatePaused(isPaused)
+                }
+            }
+            return (200, MurmurHTTPServer.jsonResponse(["ok": true, "paused": true]))
+        }
+
+        server.post("/api/v1/draft/resume") { [weak self] _ in
+            await MainActor.run {
+                if self?.draftEditingManager?.isPaused == true {
+                    self?.draftEditingManager?.togglePause()
+                    self?.draftEditingOverlay?.updatePaused(false)
+                }
+            }
+            return (200, MurmurHTTPServer.jsonResponse(["ok": true, "paused": false]))
+        }
+
+        server.post("/api/v1/draft/cursor-sync") { [weak self] body in
+            guard let json = MurmurHTTPServer.parseJSON(body),
+                  let line = json["line"] as? Int else {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "Missing line"]))
+            }
+
+            await MainActor.run {
+                self?.draftEditingManager?.jumpToCursorLine(line)
+            }
+
+            let current = await MainActor.run { self?.draftEditingManager?.currentParagraphIndex ?? 0 }
+            return (200, MurmurHTTPServer.jsonResponse(["paragraph": current]))
+        }
+
+        do {
+            try server.start()
+            httpServer = server
+        } catch {
+            NSLog("[HTTP] Failed to start server: \(error)")
+        }
     }
 
 }

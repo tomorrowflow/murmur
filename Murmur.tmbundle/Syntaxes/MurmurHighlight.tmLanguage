@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>injectionSelector</key>
+	<string>L:text.html.markdown</string>
+	<key>patterns</key>
+	<array>
+		<dict>
+			<key>match</key>
+			<string>^(.+)\x{200B}$</string>
+			<key>name</key>
+			<string>markup.inserted.murmur</string>
+		</dict>
+	</array>
+	<key>scopeName</key>
+	<string>source.murmur-highlight</string>
+	<key>uuid</key>
+	<string>E1F2A3B4-C5D6-E7F8-0912-3A4B5C6D7E8F</string>
+</dict>
+</plist>

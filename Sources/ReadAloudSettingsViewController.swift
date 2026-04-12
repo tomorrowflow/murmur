@@ -98,6 +98,46 @@ struct ReadAloudSettingsView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
+
+                Section("Draft Editing") {
+                    HStack(spacing: 8) {
+                        Text("Default Editor")
+                            .frame(width: 120, alignment: .leading)
+                        Picker("", selection: $viewModel.draftEditingEditor) {
+                            Text("Auto-detect").tag("auto")
+                            Text("TextMate").tag("textmate")
+                            Text("Obsidian").tag("obsidian")
+                        }
+                        .labelsHidden()
+                    }
+
+                    Text("Cmd+Opt+D starts draft editing. Auto-detect checks TextMate first, then Obsidian.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+
+                    if viewModel.draftEditingEditor == "obsidian" || viewModel.draftEditingEditor == "auto" {
+                        Text("Obsidian requires the Murmur Bridge plugin installed in your vault.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+
+                        HStack(spacing: 8) {
+                            Text("Plugin Status")
+                                .frame(width: 120, alignment: .leading)
+                            Circle()
+                                .fill(viewModel.obsidianPluginReachable ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(viewModel.obsidianPluginReachable ? "Connected" : "Not reachable")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Button(action: { viewModel.checkObsidianPlugin() }) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Check connection to Murmur Bridge plugin")
+                        }
+                    }
+                }
             }
             .formStyle(.grouped)
 
@@ -127,6 +167,8 @@ class ReadAloudSettingsViewModel: ObservableObject {
     @Published var webSearchEnabled: Bool = false
     @Published var ollamaAPIKey: String = ""
     @Published var resumeBehavior: String = "ask"
+    @Published var draftEditingEditor: String = "auto"
+    @Published var obsidianPluginReachable: Bool = false
     @Published var availableModels: [String] = []
     @Published var isLoadingModels: Bool = false
 
@@ -137,6 +179,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         webSearchEnabled = defaults.bool(forKey: "readAloud.webSearchEnabled")
         ollamaAPIKey = defaults.string(forKey: "readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"
+        draftEditingEditor = defaults.string(forKey: "draftEditing.editor") ?? "auto"
     }
 
     func save() {
@@ -146,6 +189,16 @@ class ReadAloudSettingsViewModel: ObservableObject {
         defaults.set(webSearchEnabled, forKey: "readAloud.webSearchEnabled")
         defaults.set(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey")
         defaults.set(resumeBehavior, forKey: "readAloud.resumeBehavior")
+        defaults.set(draftEditingEditor, forKey: "draftEditing.editor")
+    }
+
+    func checkObsidianPlugin() {
+        Task {
+            let reachable = ObsidianAdapter.isCompanionRunning()
+            await MainActor.run {
+                self.obsidianPluginReachable = reachable
+            }
+        }
     }
 
     func refreshModels() {

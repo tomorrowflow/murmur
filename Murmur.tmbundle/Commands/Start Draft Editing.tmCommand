@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Start Draft Editing</string>
+	<key>uuid</key>
+	<string>8A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D</string>
+	<key>scope</key>
+	<string>text.html.markdown</string>
+	<key>input</key>
+	<string>none</string>
+	<key>output</key>
+	<string>showAsTooltip</string>
+	<key>keyEquivalent</key>
+	<string></string>
+	<key>command</key>
+	<string>#!/bin/bash
+# Check if a session is already active — if so, stop it (toggle behavior)
+STATUS=$(curl -s -m 2 http://127.0.0.1:7878/api/v1/draft/status 2>/dev/null)
+ACTIVE=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('active', False))" 2>/dev/null)
+
+if [ "$ACTIVE" = "True" ]; then
+  curl -s -m 2 -X POST http://127.0.0.1:7878/api/v1/draft/stop >/dev/null 2>&amp;1
+  echo "Draft editing stopped."
+  exit 0
+fi
+
+# Start a new session from cursor position
+RESPONSE=$(curl -s -m 3 -X POST http://127.0.0.1:7878/api/v1/draft/start \
+  -H "Content-Type: application/json" \
+  -d "{\"filePath\": \"$TM_FILEPATH\", \"startLine\": $TM_LINE_NUMBER}" 2>/dev/null)
+
+if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+  echo "Failed to connect. Is Murmur running?"
+  exit 0
+fi
+
+echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if 'error' in d:
+        print(f'Error: {d[\"error\"]}')
+    else:
+        print(f'Draft editing started: {d.get(\"totalParagraphs\", \"?\")} paragraphs')
+except:
+    print('Unexpected response from Murmur')
+" 2>/dev/null
+</string>
+</dict>
+</plist>

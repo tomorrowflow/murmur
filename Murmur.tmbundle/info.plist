@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Murmur</string>
+	<key>uuid</key>
+	<string>D4E8F1A2-3B5C-4D6E-9F0A-1B2C3D4E5F6A</string>
+	<key>description</key>
+	<string>Voice-driven draft editing with Murmur</string>
+	<key>contactName</key>
+	<string>Murmur</string>
+	<key>ordering</key>
+	<array>
+		<string>8A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D</string>
+		<string>9B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E</string>
+		<string>AC3D4E5F-6A7B-8C9D-0E1F-2A3B4C5D6E7F</string>
+		<string>BD4E5F6A-7B8C-9D0E-1F2A-3B4C5D6E7F80</string>
+		<string>CE5F6A7B-8C9D-0E1F-2A3B-4C5D6E7F8091</string>
+		<string>DF6A7B8C-9D0E-1F2A-3B4C-5D6E7F8091A2</string>
+	</array>
+</dict>
+</plist>

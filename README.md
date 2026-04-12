@@ -47,6 +47,20 @@ macOS voice assistant that lives in your menu bar. Transcribe speech to text wit
 - Full audio download and markdown transcript export
 - Self-hosted backend (`podcastd`) with Docker deployment
 
+**Draft Editing Mode**
+- Voice-driven writing assistant for markdown documents in TextMate or Obsidian
+- Paragraph-by-paragraph TTS with structural cues ("Section:", "List:", "Table:", "Quote:")
+- Persistent line highlighting in the editor follows the current paragraph
+- Voice-edit paragraphs: double-tap Left Option, speak an instruction, LLM rewrites the paragraph in-place
+- Start reading from cursor position, skip forward/back, pause/resume
+- Escape key stops the session and clears highlights
+- Export full reading as WAV audio
+- Markdown-aware: skips front matter, HTML comments, horizontal rules; handles tables, code blocks, lists, blockquotes
+- Auto-detects active editor (TextMate or Obsidian) or configurable default in Settings
+- Local HTTP API on port 7878 for editor integration
+- TextMate integration via `Murmur.tmbundle` (grammar injection for highlighting)
+- Obsidian integration via `murmur-obsidian-plugin` (CodeMirror 6 decorations, no file modification)
+
 **Transcription History**
 - Browse, copy, and delete past transcriptions
 - Persisted to disk (up to 100 entries)
@@ -61,9 +75,10 @@ macOS voice assistant that lives in your menu bar. Transcribe speech to text wit
 | **Cmd+Opt+O** | Start/stop OpenClaw voice recording |
 | **Cmd+Opt+A** | Show transcription history |
 | **Cmd+Opt+V** | Paste last transcription at cursor |
+| **Cmd+Opt+D** | Toggle draft editing mode |
 | **Right Option** (double-tap) | STT push-to-talk (hold or toggle) |
-| **Left Option** (double-tap) | OpenClaw push-to-talk (hold or toggle) |
-| **Escape** | Cancel active recording |
+| **Left Option** (double-tap) | OpenClaw / Draft Edit / Read Aloud push-to-talk |
+| **Escape** | Cancel active recording or stop draft editing |
 
 All shortcuts are customizable in Settings.
 
@@ -119,7 +134,7 @@ Access via the menu bar icon > Settings:
 | **Audio Devices** | Input/output device, Kokoro TTS voice selection with preview |
 | **OpenClaw** | Connection URL, token, password, session key, device ID |
 | **Podcast** | Server URL, host names, voice sample upload with preview, podcast length, LLM model |
-| **Read Aloud** | Ollama model selection, resume behavior after Q&A |
+| **Read Aloud** | Ollama model selection, resume behavior after Q&A, draft editing editor default |
 
 ### Transcription Engines
 
@@ -175,7 +190,14 @@ Enables Gemini streaming TTS, cloud transcription fallback, and OpenClaw TTS via
   - `PodcastSettingsViewController.swift` — Podcast server and voice configuration
   - `ReadAloudManager.swift` — Interactive read aloud with Q&A and pause/resume
   - `ReadAloudOverlayWindow.swift` — Read aloud overlay with sentence highlighting
-  - `ReadAloudSettingsViewController.swift` — Read aloud and Ollama settings
+  - `ReadAloudSettingsViewController.swift` — Read aloud, Ollama, and draft editing settings
+  - `DraftEditingManager.swift` — Draft editing session state machine, paragraph TTS, LLM edit flow
+  - `DraftEditingOverlayWindow.swift` — Draft editing overlay with paragraph view, edit preview, controls
+  - `MarkdownParagraphParser.swift` — Markdown-aware paragraph splitting with line ranges
+  - `MarkdownTTSRenderer.swift` — Structured TTS rendering with cues, silence, and speed control
+  - `MurmurHTTPServer.swift` — Local HTTP server (port 7878) for editor integration
+  - `EditorAdapter.swift` — Editor adapter protocol with TextMate and Obsidian implementations
+  - `FileEditController.swift` — Atomic file write with paragraph replacement
   - `OllamaClient.swift` — Ollama LLM client for Q&A and prompt refinement
   - `TranscriptionHistory.swift` — JSON-based transcription storage
   - `TextReplacements.swift` — Post-transcription text corrections
@@ -192,6 +214,8 @@ Enables Gemini streaming TTS, cloud transcription fallback, and OpenClaw TTS via
   - `server.py` — WebSocket server with script generation and TTS pipeline
   - `prompts/` — LLM system prompts for podcast script generation
   - `docker-compose.yml` — Docker deployment with Traefik reverse proxy
+- `Murmur.tmbundle/` — TextMate bundle for draft editing (grammar injection, highlight commands)
+- `murmur-obsidian-plugin/` — Obsidian companion plugin (CodeMirror 6 decorations, HTTP server on port 27125)
 - `docs/` — Documentation
   - `PODCAST_SPEC.md` — Full podcast mode specification
 

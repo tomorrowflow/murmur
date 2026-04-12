@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Previous Paragraph</string>
+	<key>uuid</key>
+	<string>DF6A7B8C-9D0E-1F2A-3B4C-5D6E7F8091A2</string>
+	<key>scope</key>
+	<string>text.html.markdown</string>
+	<key>input</key>
+	<string>none</string>
+	<key>output</key>
+	<string>showAsTooltip</string>
+	<key>command</key>
+	<string>#!/bin/bash
+RESPONSE=$(curl -s -m 3 -X POST http://127.0.0.1:7878/api/v1/draft/navigate \
+  -H "Content-Type: application/json" \
+  -d '{"action": "prev"}' 2>/dev/null)
+
+if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+  echo "Failed to connect."
+else
+  PARA=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentParagraph', '?'))" 2>/dev/null)
+  echo "Paragraph $PARA"
+fi
+</string>
+</dict>
+</plist>

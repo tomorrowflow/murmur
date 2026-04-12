@@ -102,6 +102,8 @@ struct PodcastOverlayView: View {
                         Image(systemName: viewModel.state == .complete || viewModel.isPaused ? "play.fill" : "pause.fill")
                             .foregroundColor(.secondary)
                             .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(viewModel.state == .complete ? "Replay" : (viewModel.isPaused ? "Resume" : "Pause"))
@@ -115,6 +117,8 @@ struct PodcastOverlayView: View {
                         Image(systemName: "arrow.down.doc.fill")
                             .foregroundColor(viewModel.state == .complete ? .secondary : .secondary.opacity(0.3))
                             .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.state != .complete)
@@ -124,6 +128,8 @@ struct PodcastOverlayView: View {
                         Image(systemName: "arrow.down.doc")
                             .foregroundColor(.secondary)
                             .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("Export transcript as Markdown")
@@ -133,6 +139,8 @@ struct PodcastOverlayView: View {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.secondary)
                         .font(.system(size: 14))
+                        .frame(width: 28, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Stop and close")

@@ -1,0 +1,23 @@
+/* Line-level highlight (works for plain text, headings, lists, etc.) */
+.murmur-highlight-line {
+	background-color: rgba(100, 200, 100, 0.15);
+}
+
+.theme-dark .murmur-highlight-line {
+	background-color: rgba(100, 200, 100, 0.12);
+}
+
+/* Widget-level highlight (for rendered tables, callouts, embeds in live preview) */
+.murmur-highlight-widget,
+.murmur-highlight-widget table,
+.murmur-highlight-widget td,
+.murmur-highlight-widget th {
+	background-color: rgba(100, 200, 100, 0.15) !important;
+}
+
+.theme-dark .murmur-highlight-widget,
+.theme-dark .murmur-highlight-widget table,
+.theme-dark .murmur-highlight-widget td,
+.theme-dark .murmur-highlight-widget th {
+	background-color: rgba(100, 200, 100, 0.12) !important;
+}

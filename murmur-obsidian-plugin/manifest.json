@@ -1,0 +1,9 @@
+{
+	"id": "murmur-bridge",
+	"name": "Murmur Bridge",
+	"version": "1.0.0",
+	"minAppVersion": "1.0.0",
+	"description": "Companion plugin for Murmur draft editing — exposes cursor position, line highlighting, and navigation via a local HTTP API.",
+	"author": "Murmur",
+	"isDesktopOnly": true
+}

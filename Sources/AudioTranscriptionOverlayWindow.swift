@@ -114,6 +114,8 @@ struct AudioTranscriptionOverlayView: View {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.secondary)
                         .font(.system(size: 14))
+                        .frame(width: 28, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }

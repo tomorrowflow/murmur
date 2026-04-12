@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Murmur Active Paragraph</string>
+	<key>scope</key>
+	<string>meta.murmur.active-paragraph</string>
+	<key>settings</key>
+	<dict>
+		<key>background</key>
+		<string>#2A4A6B40</string>
+		<key>foreground</key>
+		<string>#E8E8E8</string>
+	</dict>
+	<key>uuid</key>
+	<string>F2A3B4C5-D6E7-F809-1234-5A6B7C8D9E0F</string>
+</dict>
+</plist>

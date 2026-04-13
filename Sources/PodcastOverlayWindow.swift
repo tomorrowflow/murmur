@@ -146,8 +146,7 @@ struct PodcastOverlayView: View {
                 .help("Stop and close")
             }
             .padding(.horizontal, 12)
-            .padding(.bottom, 6)
-            .padding(.top, -12)
+            .padding(.vertical, 10)
 
             Divider()
 

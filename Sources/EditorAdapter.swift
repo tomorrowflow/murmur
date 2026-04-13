@@ -5,6 +5,7 @@ import AppKit
 
 protocol EditorAdapter {
     var editorName: String { get }
+    var bundleIdentifier: String { get }
 
     /// Navigate the editor to show the given line.
     func navigateToLine(_ line: Int, column: Int) async
@@ -32,8 +33,8 @@ extension EditorAdapter {
 
 class TextMateAdapter: EditorAdapter {
     let editorName = "TextMate"
+    let bundleIdentifier = "com.macromates.TextMate"
 
-    private let bundleIdentifier = "com.macromates.TextMate"
     private static let matePath = "/Applications/TextMate.app/Contents/MacOS/mate"
 
     /// Zero-width space used as an invisible line marker for the Murmur grammar injection.
@@ -294,8 +295,8 @@ class TextMateAdapter: EditorAdapter {
 
 class ObsidianAdapter: EditorAdapter {
     let editorName = "Obsidian"
+    let bundleIdentifier = "md.obsidian"
 
-    private let bundleIdentifier = "md.obsidian"
     private static let companionBase = "http://127.0.0.1:27125"
 
     private static let session: URLSession = {

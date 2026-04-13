@@ -1189,11 +1189,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         updateStatusBarWithLevel(db: db)
         if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
             if useCursorAnchoredOverlay {
+                audioOverlay?.dismiss()
                 if cursorAnchoredOverlay == nil {
                     cursorAnchoredOverlay = CursorAnchoredOverlayWindow()
                 }
                 cursorAnchoredOverlay?.show()
             } else {
+                cursorAnchoredOverlay?.dismiss()
                 let overlay = ensureAudioOverlay()
                 if overlay.viewModel.targetAppIcon == nil {
                     overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
@@ -1712,11 +1714,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         debugLog("ReadAloud: starting session with \(text.count) chars")
         NSLog("ReadAloud: starting session with \(text.count) chars")
 
+        let sourceApp = NSWorkspace.shared.frontmostApplication
+
         let manager = ReadAloudManager()
         manager.delegate = self
         readAloudManager = manager
 
         let overlay = ReadAloudOverlayWindow()
+        overlay.viewModel.targetAppIcon = sourceApp?.icon
+        overlay.viewModel.targetAppName = sourceApp?.localizedName
         overlay.onStop = { [weak self] in
             self?.readAloudManager?.stop()
             self?.readAloudOverlay?.dismiss()
@@ -2020,6 +2026,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
         draftEditingOverlay = overlay
         overlay.viewModel.editorConnected = true
+        overlay.viewModel.targetAppName = adapter.editorName
+        if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == adapter.bundleIdentifier }) {
+            overlay.viewModel.targetAppIcon = running.icon
+        } else if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: adapter.bundleIdentifier) {
+            overlay.viewModel.targetAppIcon = NSWorkspace.shared.icon(forFile: appURL.path)
+        }
         overlay.show(state: .loading)
 
         startWaveformAnimation()

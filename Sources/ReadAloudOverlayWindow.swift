@@ -29,6 +29,8 @@ class ReadAloudOverlayViewModel: ObservableObject {
     @Published var translationStatus: String = "Detecting language..."
     @Published var isPaused: Bool = false
     @Published var webSearchEnabled: Bool = UserDefaults.standard.bool(forKey: "readAloud.webSearchEnabled")
+    @Published var targetAppIcon: NSImage?
+    @Published var targetAppName: String?
 
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
@@ -96,12 +98,18 @@ struct ReadAloudOverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            HStack {
-                Image(systemName: "book.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                Text("Read Aloud")
-                    .font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                AppIconView(icon: viewModel.targetAppIcon, size: 20)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Read Aloud")
+                        .font(.system(size: 13, weight: .semibold))
+                    if let name = viewModel.targetAppName {
+                        Text(name)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
 
                 Spacer()
 
@@ -159,8 +167,7 @@ struct ReadAloudOverlayView: View {
                 .help("Stop and close")
             }
             .padding(.horizontal, 12)
-            .padding(.bottom, 6)
-            .padding(.top, -12)
+            .padding(.vertical, 10)
 
             Divider()
 

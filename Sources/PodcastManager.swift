@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import MediaPlayer
 
@@ -100,6 +101,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private(set) var activeLineId: UUID?
     private var audioSegments: [Data] = []  // collected audio for full download
 
+    // Escape key monitors
+    private var escapeGlobalMonitor: Any?
+    private var escapeLocalMonitor: Any?
+
     // Settings (from UserDefaults)
     private var podcastdURL: String {
         UserDefaults.standard.string(forKey: "podcast.wsURL") ?? ""
@@ -158,6 +163,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
         reset()
         state = .connecting
+        installEscapeMonitor()
         connect()
 
         // Send INGEST after connection is established
@@ -184,6 +190,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     }
 
     func stopSession() {
+        removeEscapeMonitor()
         guard let sessionId = sessionId else {
             reset()
             return
@@ -194,6 +201,33 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             "session_id": sessionId
         ])
         reset()
+    }
+
+    // MARK: - Escape Key
+
+    private func installEscapeMonitor() {
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            if event.keyCode == 53 {
+                NSLog("Podcast: Escape key pressed — stopping session")
+                DispatchQueue.main.async { self?.stopSession() }
+            }
+        }
+        escapeGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+        escapeLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            handler(event)
+            return event.keyCode == 53 ? nil : event
+        }
+    }
+
+    private func removeEscapeMonitor() {
+        if let monitor = escapeGlobalMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeGlobalMonitor = nil
+        }
+        if let monitor = escapeLocalMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeLocalMonitor = nil
+        }
     }
 
     var audioSegmentCount: Int { audioSegments.count }
@@ -923,6 +957,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     }
 
     private func reset() {
+        removeEscapeMonitor()
         disconnect()
         player?.stop()
         cancelLineAdvanceTimers()

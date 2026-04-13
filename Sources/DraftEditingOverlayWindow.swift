@@ -32,6 +32,8 @@ class DraftEditingOverlayViewModel: ObservableObject {
     @Published var editHistory: [DraftEditEntry] = []
     @Published var isPaused: Bool = false
     @Published var editorConnected: Bool = false
+    @Published var targetAppIcon: NSImage?
+    @Published var targetAppName: String?
 
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
@@ -174,19 +176,26 @@ struct DraftEditingOverlayView: View {
     // MARK: - Header
 
     private var headerView: some View {
-        HStack {
-            Image(systemName: "pencil.and.outline")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-            Text("Draft Editing")
-                .font(.system(size: 13, weight: .semibold))
-
-            if !viewModel.fileName.isEmpty {
-                Text(viewModel.fileName)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary.opacity(0.7))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        HStack(spacing: 8) {
+            AppIconView(icon: viewModel.targetAppIcon, size: 20)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text("Draft Editing")
+                        .font(.system(size: 13, weight: .semibold))
+                    if let name = viewModel.targetAppName {
+                        Text(name)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                if !viewModel.fileName.isEmpty {
+                    Text(viewModel.fileName)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
 
             Spacer()
@@ -231,16 +240,19 @@ struct DraftEditingOverlayView: View {
                 .help(viewModel.isPaused ? "Resume" : "Pause")
             }
 
-            // Export audio button
-            if viewModel.state == .reading || viewModel.state == .paused || viewModel.state == .complete {
+            // Export audio button — visible once reading, disabled until complete
+            if viewModel.state == .reading || viewModel.state == .paused
+                || viewModel.state == .listening || viewModel.state == .processingEdit
+                || viewModel.state == .applyingEdit || viewModel.state == .complete {
                 Button(action: { viewModel.onExportAudio?() }) {
                     Image(systemName: "arrow.down.doc.fill")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(viewModel.state == .complete ? .secondary : .secondary.opacity(0.3))
                         .font(.system(size: 13))
                         .frame(width: 28, height: 24)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(viewModel.state != .complete)
                 .help("Download full audio")
             }
 
@@ -255,8 +267,7 @@ struct DraftEditingOverlayView: View {
             .help("Stop and close")
         }
         .padding(.horizontal, 12)
-        .padding(.bottom, 6)
-        .padding(.top, -12)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Content View

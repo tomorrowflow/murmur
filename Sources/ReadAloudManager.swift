@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import SharedModels
 
@@ -100,6 +101,10 @@ class ReadAloudManager {
     // Audio collection for export
     private(set) var audioSegments: [Data] = []
 
+    // Escape key monitors
+    private var escapeGlobalMonitor: Any?
+    private var escapeLocalMonitor: Any?
+
     // Ollama
     private let ollamaClient = OllamaClient()
 
@@ -122,6 +127,7 @@ class ReadAloudManager {
         fullText = text
         // Start with translating state — we need to detect language first
         state = .translating
+        installEscapeMonitor()
 
         readingTask = Task { [weak self] in
             guard let self = self else { return }
@@ -167,11 +173,39 @@ class ReadAloudManager {
 
     func stop() {
         NSLog("ReadAloud: stopping session")
+        removeEscapeMonitor()
         readingTask?.cancel()
         answerTask?.cancel()
         readingTask = nil
         answerTask = nil
         reset()
+    }
+
+    // MARK: - Escape Key
+
+    private func installEscapeMonitor() {
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            if event.keyCode == 53 {
+                NSLog("ReadAloud: Escape key pressed — stopping session")
+                DispatchQueue.main.async { self?.stop() }
+            }
+        }
+        escapeGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+        escapeLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            handler(event)
+            return event.keyCode == 53 ? nil : event
+        }
+    }
+
+    private func removeEscapeMonitor() {
+        if let monitor = escapeGlobalMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeGlobalMonitor = nil
+        }
+        if let monitor = escapeLocalMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeLocalMonitor = nil
+        }
     }
 
     func togglePause() {
@@ -686,6 +720,7 @@ class ReadAloudManager {
     // MARK: - Reset
 
     private func reset() {
+        removeEscapeMonitor()
         currentPlayer?.stop()
         currentPlayer = nil
         readingTask?.cancel()

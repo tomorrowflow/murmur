@@ -66,8 +66,7 @@ struct ListeningIndicatorView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Color.red.opacity(0.05))
     }
 }

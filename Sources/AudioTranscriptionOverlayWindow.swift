@@ -18,6 +18,8 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
     @Published var state: AudioTranscriptionOverlayState = .hidden
     @Published var errorText: String = ""
     @Published var elapsedSeconds: Int = 0
+    @Published var targetAppIcon: NSImage?
+    @Published var targetAppName: String?
 
     var onDismiss: (() -> Void)?
 
@@ -54,6 +56,8 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
         stopRecordingTimer()
         state = .hidden
         errorText = ""
+        targetAppIcon = nil
+        targetAppName = nil
         onDismiss?()
     }
 
@@ -97,160 +101,131 @@ struct AudioTranscriptionOverlayView: View {
     @AppStorage("ptt.stt.promptRefinement") private var promptRefinementEnabled = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             // Header
-            HStack {
-                Image(systemName: "waveform")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.secondary)
-                Text("Audio Transcription")
+            HStack(spacing: 8) {
+                AppIconView(icon: viewModel.targetAppIcon, size: 20)
+
+                Text(viewModel.targetAppName ?? "Audio Transcription")
                     .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
 
                 Spacer()
 
                 stateIndicator
 
                 Button(action: { viewModel.dismiss() }) {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .font(.system(size: 14))
-                        .frame(width: 28, height: 24)
-                        .contentShape(Rectangle())
+                        .frame(width: 20, height: 20)
+                        .background(.secondary.opacity(0.12))
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 6)
-            .padding(.top, -12)
-
-            Divider()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
 
             // Content
-            Group {
-                switch viewModel.state {
-                case .hidden:
-                    EmptyView()
+            switch viewModel.state {
+            case .hidden:
+                EmptyView()
 
-                case .connecting:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Connecting microphone...")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                case .listening:
-                    ListeningIndicatorView(
-                        prompt: "Recording...",
-                        elapsedTime: viewModel.formattedElapsedTime,
-                        monitor: AudioLevelMonitor.shared
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                case .transcribing:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Transcribing...")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                case .refining:
-                    HStack(spacing: 10) {
-                        Image(systemName: "wand.and.stars")
-                            .foregroundColor(.purple)
-                            .font(.system(size: 20))
-                            .symbolEffect(.pulse)
-                        Text("Refining prompt...")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                case .error:
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
-                        Text(viewModel.errorText)
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            case .connecting:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Connecting microphone...")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(width: 320, height: dynamicHeight)
-    }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
 
-    private var dynamicHeight: CGFloat {
-        switch viewModel.state {
-        case .hidden: return 0
-        case .connecting, .listening, .transcribing, .refining: return 100
-        case .error: return 120
+            case .listening:
+                HStack(spacing: 10) {
+                    LiveWaveformView(monitor: AudioLevelMonitor.shared, barCount: 20, color: .red, height: 22)
+                        .frame(width: 110, height: 22)
+                    Spacer()
+                    Text(viewModel.formattedElapsedTime)
+                        .font(.system(size: 18, weight: .medium).monospacedDigit())
+                        .foregroundColor(.primary.opacity(0.8))
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+
+            case .transcribing:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Transcribing...")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+
+            case .refining:
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars")
+                        .foregroundColor(.purple)
+                        .font(.system(size: 14))
+                        .symbolEffect(.pulse)
+                    Text("Refining prompt...")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+
+            case .error:
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 12))
+                    Text(viewModel.errorText)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
         }
+        .frame(width: 300)
+        .glassBackground()
     }
 
     @ViewBuilder
     private var stateIndicator: some View {
         switch viewModel.state {
         case .connecting:
-            Text("Connecting")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.blue)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.blue.opacity(0.15))
-                .cornerRadius(4)
-
+            StateBadge(text: "Connecting", color: .blue)
         case .listening:
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 6, height: 6)
                 Text("Recording")
                     .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
                 if promptRefinementEnabled {
                     Image(systemName: "wand.and.stars")
                         .font(.system(size: 8))
+                        .foregroundColor(.secondary)
                 }
             }
-            .foregroundColor(.red)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.red.opacity(0.15))
-            .cornerRadius(4)
-
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.red.opacity(0.08))
+            .cornerRadius(10)
         case .transcribing:
-            Text("Transcribing")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.orange)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.15))
-                .cornerRadius(4)
-
+            StateBadge(text: "Transcribing", color: .orange)
         case .refining:
-            HStack(spacing: 3) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 8))
-                Text("Refining")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .foregroundColor(.purple)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.purple.opacity(0.15))
-            .cornerRadius(4)
-
+            StateBadge(text: "Refining", color: .purple)
         case .error:
-            Text("Error")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.orange)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.15))
-                .cornerRadius(4)
-
+            StateBadge(text: "Error", color: .orange)
         case .hidden:
             EmptyView()
         }
@@ -297,28 +272,8 @@ class AudioTranscriptionOverlayWindow {
         if panel != nil { return }
 
         let hostingView = NSHostingView(rootView: AudioTranscriptionOverlayView(viewModel: viewModel))
-
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 100),
-            styleMask: [.nonactivatingPanel, .titled, .hudWindow, .utilityWindow],
-            backing: .buffered,
-            defer: false
-        )
-
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        let panel = createGlassPanel(width: 300, height: 100)
         panel.contentView = hostingView
-        panel.isReleasedWhenClosed = false
-
         self.panel = panel
         repositionPanel()
     }
@@ -327,7 +282,7 @@ class AudioTranscriptionOverlayWindow {
         guard let panel = panel, let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
         let panelHeight = panel.frame.height
-        let x = (screenFrame.width - 320) / 2 + screenFrame.minX
+        let x = (screenFrame.width - 300) / 2 + screenFrame.minX
         let y = screenFrame.maxY - panelHeight - 40
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }

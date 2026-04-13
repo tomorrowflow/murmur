@@ -43,7 +43,7 @@ class AudioDucker {
         guard let volume = savedVolume else { return }
         guard let deviceID = defaultOutputDevice() else { return }
 
-        var size = UInt32(MemoryLayout<Float32>.size)
+        let size = UInt32(MemoryLayout<Float32>.size)
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
             mScope: kAudioObjectPropertyScopeOutput,

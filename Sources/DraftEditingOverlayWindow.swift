@@ -168,6 +168,7 @@ struct DraftEditingOverlayView: View {
             }
         }
         .frame(width: 420, height: dynamicHeight)
+        .glassBackground()
     }
 
     // MARK: - Header
@@ -557,27 +558,8 @@ class DraftEditingOverlayWindow {
         if panel != nil { return }
 
         let hostingView = NSHostingView(rootView: DraftEditingOverlayView(viewModel: viewModel))
-
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
-            styleMask: [.nonactivatingPanel, .titled, .hudWindow, .utilityWindow],
-            backing: .buffered,
-            defer: false
-        )
-
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        let panel = createGlassPanel(width: 420, height: 300)
         panel.contentView = hostingView
-        panel.isReleasedWhenClosed = false
 
         self.panel = panel
         repositionPanel()

@@ -1194,7 +1194,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 }
                 cursorAnchoredOverlay?.show()
             } else {
-                ensureAudioOverlay().show(state: bluetoothWarmingUp ? .connecting : .listening)
+                let overlay = ensureAudioOverlay()
+                if overlay.viewModel.targetAppIcon == nil {
+                    overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
+                    overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
+                }
+                overlay.show(state: bluetoothWarmingUp ? .connecting : .listening)
             }
         }
     }

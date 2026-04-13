@@ -193,9 +193,10 @@ struct OpenClawOverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            HStack {
-                WaveformIcon()
-                    .frame(width: 14, height: 14)
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.secondary)
                 Text("OpenClaw")
                     .font(.system(size: 13, weight: .semibold))
 
@@ -213,19 +214,17 @@ struct OpenClawOverlayView: View {
                     viewModel.onCancel?()
                     viewModel.dismiss()
                 }) {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .font(.system(size: 14))
-                        .frame(width: 28, height: 24)
-                        .contentShape(Rectangle())
+                        .frame(width: 20, height: 20)
+                        .background(.secondary.opacity(0.12))
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 6)
-            .padding(.top, -12)
-
-            Divider()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
 
             // Content
             Group {
@@ -238,26 +237,37 @@ struct OpenClawOverlayView: View {
                         ProgressView()
                             .controlSize(.small)
                         Text("Connecting microphone...")
+                            .font(.system(size: 12))
                             .foregroundColor(.secondary)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 12)
 
                 case .listening:
-                    ListeningIndicatorView(
-                        prompt: "Listening...",
-                        elapsedTime: viewModel.formattedElapsedTime,
-                        monitor: AudioLevelMonitor.shared
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HStack(spacing: 10) {
+                        LiveWaveformView(monitor: AudioLevelMonitor.shared, barCount: 20, color: .red, height: 22)
+                            .frame(width: 110, height: 22)
+                        Text("Listening...")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(viewModel.formattedElapsedTime)
+                            .font(.system(size: 18, weight: .medium).monospacedDigit())
+                            .foregroundColor(.primary.opacity(0.8))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 12)
 
                 case .processing:
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
                         Text("Processing...")
+                            .font(.system(size: 12))
                             .foregroundColor(.secondary)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 12)
 
                 case .streaming, .complete:
                     ZStack(alignment: .topTrailing) {
@@ -301,7 +311,8 @@ struct OpenClawOverlayView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 420, height: dynamicHeight)
+        .frame(width: 400, height: dynamicHeight)
+        .glassBackground()
         .onTapGesture {
             viewModel.pin()
         }
@@ -326,62 +337,13 @@ struct OpenClawOverlayView: View {
     @ViewBuilder
     private var stateIndicator: some View {
         switch viewModel.state {
-        case .connecting:
-            Text("Connecting")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.blue)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.blue.opacity(0.15))
-                .cornerRadius(4)
-
-        case .listening:
-            Text("Listening")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.red)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.red.opacity(0.15))
-                .cornerRadius(4)
-
-        case .processing:
-            Text("Processing")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.orange)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.15))
-                .cornerRadius(4)
-
-        case .streaming:
-            Text("Streaming")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.blue)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.blue.opacity(0.15))
-                .cornerRadius(4)
-
-        case .complete:
-            Text("Complete")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.green)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.15))
-                .cornerRadius(4)
-
-        case .error:
-            Text("Error")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.orange)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.15))
-                .cornerRadius(4)
-
-        case .hidden:
-            EmptyView()
+        case .connecting: StateBadge(text: "Connecting", color: .blue)
+        case .listening: StateBadge(text: "Listening", color: .red)
+        case .processing: StateBadge(text: "Processing", color: .orange)
+        case .streaming: StateBadge(text: "Streaming", color: .blue)
+        case .complete: StateBadge(text: "Complete", color: .green)
+        case .error: StateBadge(text: "Error", color: .orange)
+        case .hidden: EmptyView()
         }
     }
 }
@@ -456,27 +418,8 @@ class OpenClawOverlayWindow {
         if panel != nil { return }
 
         let hostingView = NSHostingView(rootView: OpenClawOverlayView(viewModel: viewModel))
-
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
-            styleMask: [.nonactivatingPanel, .titled, .hudWindow, .utilityWindow],
-            backing: .buffered,
-            defer: false
-        )
-
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        let panel = createGlassPanel(width: 400, height: 300)
         panel.contentView = hostingView
-        panel.isReleasedWhenClosed = false
 
         self.panel = panel
         repositionPanel()
@@ -486,7 +429,7 @@ class OpenClawOverlayWindow {
         guard let panel = panel, let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
         let panelHeight = panel.frame.height
-        let x = (screenFrame.width - 420) / 2 + screenFrame.minX
+        let x = (screenFrame.width - 400) / 2 + screenFrame.minX
         let y = screenFrame.maxY - panelHeight - 40
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }

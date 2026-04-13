@@ -231,6 +231,7 @@ struct ReadAloudOverlayView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: 380, height: dynamicHeight)
+        .glassBackground()
     }
 
     // MARK: - Content Scroll View
@@ -685,27 +686,8 @@ class ReadAloudOverlayWindow {
         if panel != nil { return }
 
         let hostingView = NSHostingView(rootView: ReadAloudOverlayView(viewModel: viewModel))
-
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 300),
-            styleMask: [.nonactivatingPanel, .titled, .hudWindow, .utilityWindow],
-            backing: .buffered,
-            defer: false
-        )
-
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        let panel = createGlassPanel(width: 380, height: 300)
         panel.contentView = hostingView
-        panel.isReleasedWhenClosed = false
 
         self.panel = panel
         repositionPanel()

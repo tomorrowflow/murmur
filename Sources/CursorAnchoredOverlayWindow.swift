@@ -56,8 +56,7 @@ struct CursorAnchoredOverlayView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(width: 180, height: 36)
-        .background(.ultraThinMaterial)
-        .cornerRadius(8)
+        .glassBackground(cornerRadius: 12)
     }
 }
 

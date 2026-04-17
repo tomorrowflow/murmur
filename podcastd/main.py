@@ -70,6 +70,48 @@ def _make_progress_cb(websocket, session_id: str, chunk_label: str):
     return on_progress
 
 
+def _estimate_script_chars(target_minutes: int) -> int:
+    """Heuristic for the expected size of a generated script including JSON wrapper.
+
+    Roughly: spoken dialogue at ~150 wpm * ~6 chars/word = 900 chars/min; JSON
+    overhead (keys, quotes, commas) adds ~75%. Capped by the model's
+    num_predict budget of 8192 tokens (~32k chars). Used only to drive the
+    progress-bar percent — slight misses are fine."""
+    rough = max(2000, int(target_minutes * 1600))
+    return min(rough, 32000)
+
+
+def _make_llm_progress_cb(
+    websocket,
+    session_id: str,
+    stage: str,
+    label: str,
+    estimated_chars: int,
+):
+    """Return a callback the LLM client invokes while streaming tokens.
+
+    We translate (char_count, phase) into a PROGRESS frame so the overlay can
+    show a filling bar + live char count instead of a spinner that seems stuck."""
+    def on_progress(char_count: int, phase: str):
+        denom = max(1, estimated_chars)
+        pct = min(int(char_count / denom * 100), 95)
+        phase_hint = " (thinking)" if phase == "thinking" else ""
+        msg = f"Generating script ({label}){phase_hint} — {char_count:,} chars"
+        try:
+            asyncio.create_task(_safe_send(websocket, {
+                "type": "PROGRESS",
+                "session_id": session_id,
+                "stage": stage,
+                "percent": pct,
+                "message": msg,
+            }))
+        except RuntimeError:
+            # No running event loop (shouldn't happen — callback fires from
+            # inside a coroutine). Drop the update silently.
+            pass
+    return on_progress
+
+
 # ---------- Safe Send ----------
 
 
@@ -255,9 +297,16 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             "stage": "scripting", "percent": -1,
             "message": f"Generating script for ~{target_minutes} min podcast...",
         })
+        script_progress = _make_llm_progress_cb(
+            websocket, session.session_id,
+            stage="scripting",
+            label=f"~{target_minutes} min podcast",
+            estimated_chars=_estimate_script_chars(target_minutes),
+        )
         title, script, _ = await generate_script(
             text, target_length=target_length,
             host_a_name=host_a_name, host_b_name=host_b_name,
+            on_progress=script_progress,
         )
         session.title = title
         session.original_script = script
@@ -493,10 +542,20 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
             "message": "Generating response to your question...",
         })
         progress_cb = _make_progress_cb(websocket, session.session_id, "response")
+        llm_progress = _make_llm_progress_cb(
+            websocket, session.session_id,
+            stage="interrupt_scripting",
+            label="response",
+            estimated_chars=2500,
+        )
         async with gpu_lock:
             if session.session_id not in sessions:
                 return  # session gone while waiting for lock
-            audio_file, response_lines = await handle_interrupt(session, question, on_progress=progress_cb)
+            audio_file, response_lines = await handle_interrupt(
+                session, question,
+                on_progress=progress_cb,
+                on_llm_progress=llm_progress,
+            )
 
         if session.session_id not in sessions:
             return

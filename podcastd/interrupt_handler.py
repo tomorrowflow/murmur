@@ -8,7 +8,7 @@ from audio_generator import ProgressCallback, generate_audio, resolve_preset
 from chunk_manager import split_into_chunks
 from script_generator import sanitize_dialogue
 from config import cfg
-from llm_client import llm_chat
+from llm_client import LLMProgressCallback, llm_chat
 from session import PodcastSession, SessionState
 from web_search import format_search_results, search
 
@@ -17,7 +17,12 @@ log = logging.getLogger(__name__)
 SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "interrupt_system.txt").read_text()
 
 
-async def handle_interrupt(session: PodcastSession, question: str, on_progress: ProgressCallback = None) -> tuple[str, list[dict]]:
+async def handle_interrupt(
+    session: PodcastSession,
+    question: str,
+    on_progress: ProgressCallback = None,
+    on_llm_progress: LLMProgressCallback = None,
+) -> tuple[str, list[dict]]:
     """Process a user interrupt.
 
     Returns (audio_filename, interrupt_response_lines).
@@ -51,7 +56,7 @@ async def handle_interrupt(session: PodcastSession, question: str, on_progress: 
     if web_context:
         user_msg += f"\n\n{web_context}\n\nUse the web search results above to inform and enrich the hosts' response where relevant. Cite specific facts naturally in conversation."
 
-    raw = await llm_chat(system=system, user=user_msg, model=cfg.LLM_MODEL)
+    raw = await llm_chat(system=system, user=user_msg, model=cfg.LLM_MODEL, on_progress=on_llm_progress)
     log.debug("Interrupt LLM raw response: %s", raw[:500])
     result = _parse_interrupt_response(raw)
 

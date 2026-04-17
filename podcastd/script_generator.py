@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from config import cfg
-from llm_client import llm_chat
+from llm_client import LLMProgressCallback, llm_chat
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ async def generate_script(
     target_length: str = "auto",
     host_a_name: str | None = None,
     host_b_name: str | None = None,
+    on_progress: LLMProgressCallback = None,
 ) -> tuple[str, list[dict], int]:
     """Generate a podcast script from source content.
 
@@ -118,7 +119,7 @@ async def generate_script(
 
     user_msg = f"Source content to discuss:\n\n{content[:15000]}"
 
-    raw = await llm_chat(system=system, user=user_msg, model=cfg.LLM_MODEL)
+    raw = await llm_chat(system=system, user=user_msg, model=cfg.LLM_MODEL, on_progress=on_progress)
 
     script = _parse_script(raw)
     title = _extract_title(script)

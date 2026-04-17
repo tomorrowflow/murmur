@@ -52,12 +52,17 @@ def _resolve_target_minutes(target_length: str, content: str) -> int:
       - "medium" → ~15 minutes
       - "long"   → ~30 minutes
 
-    Auto mode scales with content length:
-      - < 500 words   → 5 min
-      - 500-1500      → 8 min
-      - 1500-3000     → 12 min
-      - 3000-6000     → 18 min
-      - > 6000        → 25 min
+    Auto mode scales with content length and tops out at 30 min so a very
+    long, content-dense document (e.g. concept brief + meeting transcript)
+    gets the same depth as picking "long" manually.
+
+    Auto tiers:
+      - < 500 words    →  5 min
+      - 500–1500       →  8 min
+      - 1500–3000      → 12 min
+      - 3000–6000      → 18 min
+      - 6000–10000     → 24 min
+      - > 10000 words  → 30 min
     """
     fixed = {"short": 8, "medium": 15, "long": 30}
     if target_length in fixed:
@@ -73,8 +78,23 @@ def _resolve_target_minutes(target_length: str, content: str) -> int:
         return 12
     elif word_count < 6000:
         return 18
+    elif word_count < 10000:
+        return 24
     else:
-        return 25
+        return 30
+
+
+def _num_predict_for_target(target_minutes: int) -> int:
+    """Scale the LLM output budget so the script isn't truncated mid-dialogue.
+
+    Back-of-the-envelope: ~150 words/min of speech; each word plus its JSON
+    wrapper averages ~3 output tokens; plus a fixed ~2000-token headroom for
+    reasoning models (qwen3) that emit a <think> block before the script.
+    Clamped to [6144, 20480] — below the floor the default is fine; above it
+    we'd blow past qwen3:32b's practical generation budget on a 24 GB card."""
+    dialogue_tokens = int(target_minutes * 150 * 3)
+    thinking_headroom = 2000
+    return max(6144, min(20480, dialogue_tokens + thinking_headroom))
 
 
 def sanitize_dialogue(text: str) -> str:
@@ -237,15 +257,26 @@ async def generate_script(
     # "is this a transcript?" logic; the LLM decides how to structure the brief.
     prepared = await prepare_source_content(content, on_progress=on_distill_progress)
 
+    target_words = target_minutes * 150            # ~150 wpm spoken
+    target_turns = max(6, target_minutes * 5)      # ~30 words/turn
     system = SYSTEM_PROMPT.format(
         HOST_A_NAME=host_a,
         HOST_B_NAME=host_b,
         target_duration_minutes=target_minutes,
+        target_words=target_words,
+        target_turns=target_turns,
     )
 
     user_msg = f"Source content to discuss:\n\n{prepared[:MAX_SCRIPT_CONTEXT_CHARS]}"
 
-    raw = await llm_chat(system=system, user=user_msg, model=cfg.LLM_MODEL, on_progress=on_progress)
+    num_predict = _num_predict_for_target(target_minutes)
+    log.info("Script LLM budget: target=%d min → num_predict=%d tokens",
+             target_minutes, num_predict)
+
+    raw = await llm_chat(
+        system=system, user=user_msg, model=cfg.LLM_MODEL,
+        on_progress=on_progress, num_predict=num_predict,
+    )
 
     script = _parse_script(raw)
     title = _extract_title(script)

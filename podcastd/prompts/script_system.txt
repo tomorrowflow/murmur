@@ -18,7 +18,13 @@ Rules:
 - Include natural interruptions: {HOST_B_NAME} can cut in mid-thought with 'Wait—'.
 - Hosts occasionally disagree or nuance each other's points.
 - Open with an engaging hook, not 'Welcome to our podcast'.
-- Target approximately {target_duration_minutes} minutes of speech.
+- TARGET LENGTH: approximately {target_duration_minutes} minutes of dialogue.
+  At ~150 words/minute that is roughly {target_words} words of spoken text
+  across all turns (≈ {target_turns} speaking turns, averaging ~30 words each).
+  REACH this target. Do not cut the discussion short — if the source material
+  allows, explore implications, examples, and follow-ups to fill the time.
+  If the source is rich and long, go deeper on specific sections rather than
+  skimming everything at a surface level.
 - Do not summarize — synthesize. Bring in analogies and implications not in the source.
 - Never use ellipsis ("...") in dialogue — it does not render well in speech synthesis.
   Use em dashes (" — ") for pauses or trailing thoughts instead.

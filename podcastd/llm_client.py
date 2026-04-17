@@ -25,15 +25,18 @@ async def llm_chat(
     user: str,
     model: str | None = None,
     on_progress: LLMProgressCallback = None,
+    num_predict: int | None = None,
 ) -> str:
     """Send a chat completion request to the configured LLM provider.
 
     If `on_progress` is supplied, streaming mode is used where supported so the
-    caller can surface live progress. The callback is throttled internally."""
+    caller can surface live progress. The callback is throttled internally.
+    `num_predict` overrides the per-call output token budget (Ollama only);
+    omit to use the provider default."""
     model = model or cfg.LLM_MODEL
 
     if cfg.LLM_PROVIDER == "ollama":
-        return await _ollama_chat(system, user, model, on_progress)
+        return await _ollama_chat(system, user, model, on_progress, num_predict)
     elif cfg.LLM_PROVIDER == "anthropic":
         return await _anthropic_chat(system, user, model, on_progress)
     else:
@@ -49,9 +52,11 @@ async def _ollama_chat(
     user: str,
     model: str,
     on_progress: LLMProgressCallback = None,
+    num_predict: int | None = None,
 ) -> str:
     url = f"{cfg.OLLAMA_BASE_URL}/api/chat"
     use_stream = on_progress is not None
+    effective_num_predict = num_predict if num_predict is not None else 8192
     payload = {
         "model": model,
         "messages": [
@@ -61,11 +66,12 @@ async def _ollama_chat(
         "stream": use_stream,
         "options": {
             "temperature": 0.8,
-            "num_predict": 8192,
+            "num_predict": effective_num_predict,
         },
     }
 
-    log.info("Ollama request: model=%s, url=%s, stream=%s", model, url, use_stream)
+    log.info("Ollama request: model=%s, url=%s, stream=%s, num_predict=%d",
+             model, url, use_stream, effective_num_predict)
 
     if not use_stream:
         async with httpx.AsyncClient(timeout=180) as client:

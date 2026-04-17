@@ -206,8 +206,8 @@ struct PodcastOverlayView: View {
                                     .truncationMode(.middle)
                                 Spacer()
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
                         }
                     } else {
                         progressContent(defaultMessage: "Buffering...")
@@ -244,19 +244,20 @@ struct PodcastOverlayView: View {
                         }
                     } else {
                         disconnectedFooter
-                            .padding(12)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
                 case .error(let msg):
-                    HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
                         Text(msg)
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(12)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 14)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
@@ -355,7 +356,7 @@ struct PodcastOverlayView: View {
     // MARK: - Progress Content
 
     private func progressContent(defaultMessage: String) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             if viewModel.progressPercent >= 0 {
                 ProgressView(value: Double(viewModel.progressPercent), total: 100)
                     .controlSize(.small)
@@ -368,7 +369,11 @@ struct PodcastOverlayView: View {
             Text(viewModel.progressMessage.isEmpty ? defaultMessage : viewModel.progressMessage)
                 .foregroundColor(.secondary)
                 .font(.system(size: 12))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -415,8 +420,8 @@ struct PodcastOverlayView: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(Color.orange.opacity(0.05))
     }
 
@@ -441,8 +446,8 @@ struct PodcastOverlayView: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(Color.orange.opacity(0.05))
     }
 
@@ -486,12 +491,12 @@ struct PodcastOverlayView: View {
     private var dynamicHeight: CGFloat {
         switch viewModel.state {
         case .idle: return 0
-        case .connecting, .ingesting: return 100
-        case .buffering: return viewModel.transcript.isEmpty ? 100 : 330
-        case .error: return 120
-        case .disconnected: return viewModel.transcript.isEmpty ? 120 : 330
+        case .connecting, .ingesting: return 120
+        case .buffering: return viewModel.transcript.isEmpty ? 120 : 340
+        case .error: return 130
+        case .disconnected: return viewModel.transcript.isEmpty ? 130 : 340
         case .playing, .complete: return 300
-        case .listening, .processingInterrupt: return 330
+        case .listening, .processingInterrupt: return 340
         }
     }
 

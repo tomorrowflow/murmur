@@ -70,12 +70,52 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private(set) var state: PodcastState = .idle {
         didSet {
             if state != oldValue {
+                handleStateTransition(from: oldValue, to: state)
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     self.delegate?.podcastDidChangeState(self.state)
                 }
             }
         }
+    }
+
+    /// If we stay in .buffering for this long — meaning the next chunk we
+    /// need still hasn't arrived — assume the in-flight download failed
+    /// permanently or we silently missed a CHUNK_READY and ask the server
+    /// to re-stream from our current playback position.
+    private let bufferingStallTimeoutSecs: TimeInterval = 25
+    private var bufferingWatchdog: DispatchWorkItem?
+
+    private func handleStateTransition(from oldState: PodcastState, to newState: PodcastState) {
+        if newState == .buffering {
+            armBufferingWatchdog()
+        } else {
+            disarmBufferingWatchdog()
+        }
+    }
+
+    private func armBufferingWatchdog() {
+        disarmBufferingWatchdog()
+        let item = DispatchWorkItem { [weak self] in
+            self?.handleBufferingStall()
+        }
+        bufferingWatchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + bufferingStallTimeoutSecs, execute: item)
+    }
+
+    private func disarmBufferingWatchdog() {
+        bufferingWatchdog?.cancel()
+        bufferingWatchdog = nil
+    }
+
+    private func handleBufferingStall() {
+        guard state == .buffering else { return }
+        let needed = currentChunkIndex + 1
+        guard needed < totalChunks else { return }
+        NSLog("Podcast: buffering watchdog — stuck waiting for chunk \(needed), re-requesting stream")
+        requestStreamChunks(from: needed)
+        // Re-arm in case the re-stream also stalls (e.g. server-side issue).
+        armBufferingWatchdog()
     }
 
     var isSessionActive: Bool {
@@ -764,6 +804,15 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         if chunkIndex > lastReceivedChunkIndex {
             lastReceivedChunkIndex = chunkIndex
         }
+        // Safety net: SESSION_CREATED races or a missed message can leave
+        // totalChunks = 0, which makes advanceAfterPlayback prematurely
+        // declare the session complete. Keep totalChunks at least one past
+        // the highest chunk index we've seen so playback always has room to
+        // move forward.
+        if chunkIndex + 1 > totalChunks {
+            totalChunks = chunkIndex + 1
+            delegate?.podcastDidUpdateChunkProgress(current: currentChunkIndex + 1, total: totalChunks)
+        }
         NSLog("Podcast: cached chunk \(chunkIndex) (\(chunkAudioByIndex.count)/\(totalChunks))")
         delegate?.podcastDidUpdateCacheStatus(canExport: hasAllChunksCached, hasAny: hasAnyChunkCached)
 
@@ -772,6 +821,11 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             let needed = nextChunkToPlay()
             if chunkIndex == needed {
                 startPlayingChunk(chunkIndex)
+            } else if state == .buffering, chunkAudioByIndex[needed] != nil {
+                // We were buffering for an earlier chunk and it IS cached
+                // (arrived out of order or we missed the wake-up). Resume now.
+                NSLog("Podcast: resuming from cache — needed chunk \(needed) is available")
+                startPlayingChunk(needed)
             }
         }
     }
@@ -1073,15 +1127,21 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private func advanceAfterPlayback() {
         let next = currentChunkIndex + 1
 
-        if next >= totalChunks {
-            NSLog("Podcast: all chunks played, session complete")
-            state = .complete
-            updateNowPlaying(paused: true)
+        // If the next chunk is cached, always play it — even if we'd otherwise
+        // think we were past totalChunks (which can be stale when
+        // SESSION_CREATED was missed and the streaming server is still pushing).
+        if chunkAudioByIndex[next] != nil {
+            startPlayingChunk(next)
             return
         }
 
-        if chunkAudioByIndex[next] != nil {
-            startPlayingChunk(next)
+        // No cached next chunk. Declare complete only if the server has confirmed
+        // we've truly reached the end — i.e. totalChunks is a credible number
+        // and we've actually played the last expected chunk.
+        if totalChunks > 0 && next >= totalChunks {
+            NSLog("Podcast: all chunks played (current=\(currentChunkIndex), total=\(totalChunks)) — session complete")
+            state = .complete
+            updateNowPlaying(paused: true)
             return
         }
 
@@ -1091,7 +1151,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         if state == .disconnected {
             NSLog("Podcast: chunk \(next) not cached and disconnected — staying in .disconnected")
         } else {
-            NSLog("Podcast: chunk \(next) not yet cached — buffering")
+            NSLog("Podcast: chunk \(next) not yet cached — buffering (cache size=\(chunkAudioByIndex.count), total=\(totalChunks))")
             state = .buffering
         }
     }

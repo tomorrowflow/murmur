@@ -1,4 +1,5 @@
 import Cocoa
+import UniformTypeIdentifiers
 
 private struct ParsedEntry {
     let question: String?
@@ -16,6 +17,9 @@ private struct ParsedEntry {
     }
 }
 
+/// Maximum number of preview lines shown before a "show more" ellipsis.
+private let kPreviewLineLimit = 5
+
 class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSource {
     private let tableView: NSTableView
     private let scrollView: NSScrollView
@@ -32,7 +36,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         self.scrollView = NSScrollView()
         self.clearButton = NSButton(title: "Clear History", target: nil, action: #selector(clearHistory))
         self.refreshButton = NSButton(title: "Refresh", target: nil, action: #selector(refreshHistory))
-        self.titleLabel = NSTextField(labelWithString: "Transcription History")
+        self.titleLabel = NSTextField(labelWithString: "History")
 
         super.init(nibName: nil, bundle: nil)
     }
@@ -42,7 +46,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
     }
 
     override func loadView() {
-        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 500))
+        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 560))
         setupUI()
     }
 
@@ -74,8 +78,8 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.selectionHighlightStyle = .regular
         tableView.allowsMultipleSelection = false
-        tableView.target = self
-        tableView.action = #selector(tableRowClicked)
+        tableView.target = nil
+        tableView.action = nil
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("entry"))
         column.title = ""
@@ -84,7 +88,8 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         scrollView.documentView = tableView
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Copy", action: #selector(contextCopy), keyEquivalent: "c"))
+        menu.addItem(NSMenuItem(title: "Copy Text", action: #selector(contextCopy), keyEquivalent: "c"))
+        menu.addItem(NSMenuItem(title: "Save Audio…", action: #selector(contextSaveAudio), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Delete", action: #selector(contextDelete), keyEquivalent: ""))
         tableView.menu = menu
 
@@ -124,10 +129,12 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         tableView.reloadData()
 
         if entries.isEmpty {
-            titleLabel.stringValue = "No transcription history"
+            titleLabel.stringValue = "No history yet"
             clearButton.isEnabled = false
         } else {
-            titleLabel.stringValue = "Transcription History (\(entries.count) entries)"
+            let podcastCount = entries.filter { $0.kind == .podcast }.count
+            let transcriptCount = entries.count - podcastCount
+            titleLabel.stringValue = "History — \(transcriptCount) transcript\(transcriptCount == 1 ? "" : "s"), \(podcastCount) podcast\(podcastCount == 1 ? "" : "s")"
             clearButton.isEnabled = true
         }
     }
@@ -135,7 +142,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
     @objc private func clearHistory() {
         let alert = NSAlert()
         alert.messageText = "Clear History"
-        alert.informativeText = "Are you sure you want to clear all transcription history?"
+        alert.informativeText = "Are you sure you want to clear all history? This also removes saved podcast audio files."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
@@ -150,14 +157,39 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         loadEntries()
     }
 
-    @objc private func tableRowClicked() {
-        let row = tableView.clickedRow
-        guard row >= 0, row < entries.count else { return }
-        copyAnswerAtRow(row)
+    // MARK: - Copy / Save / Delete actions
+
+    private func previewText(at row: Int) -> String {
+        guard row >= 0, row < parsed.count else { return "" }
+        let entry = entries[row]
+        if entry.kind == .podcast {
+            // Strip markdown markers for a cleaner preview while keeping the
+            // full markdown in the clipboard copy.
+            return cleanedPodcastPreview(text: entry.text)
+        }
+        return parsed[row].answer
     }
 
-    private func copyAnswerAtRow(_ row: Int) {
-        let text = parsed[row].answer
+    private func cleanedPodcastPreview(text: String) -> String {
+        // Drop the title header, unwrap **speaker:** bold, drop horizontal rules.
+        var lines: [String] = []
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            var line = String(raw)
+            if line.hasPrefix("# ") { continue }
+            if line == "---" { continue }
+            if line.hasPrefix("**") {
+                line = line.replacingOccurrences(of: "**", with: "")
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { lines.append(trimmed) }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func copyTextForRow(_ row: Int) {
+        guard row >= 0, row < entries.count else { return }
+        let entry = entries[row]
+        let text = entry.kind == .podcast ? entry.text : parsed[row].answer
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -176,17 +208,64 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         }
     }
 
-    @objc private func contextCopy() {
-        let row = tableView.clickedRow
+    private func saveAudioForRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
-        copyAnswerAtRow(row)
+        let entry = entries[row]
+        guard entry.kind == .podcast,
+              let sourceURL = TranscriptionHistory.shared.audioURL(for: entry) else {
+            NSSound.beep()
+            return
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.title = "Save Podcast Audio"
+        if #available(macOS 11.0, *) {
+            savePanel.allowedContentTypes = [UTType.wav]
+        } else {
+            savePanel.allowedFileTypes = ["wav"]
+        }
+        let safeTitle = (entry.title ?? "Podcast")
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        savePanel.nameFieldStringValue = "\(safeTitle).wav"
+
+        savePanel.begin { response in
+            guard response == .OK, let destURL = savePanel.url else { return }
+            do {
+                if FileManager.default.fileExists(atPath: destURL.path) {
+                    try FileManager.default.removeItem(at: destURL)
+                }
+                try FileManager.default.copyItem(at: sourceURL, to: destURL)
+            } catch {
+                NSAlert(error: error).runModal()
+            }
+        }
     }
 
-    @objc private func contextDelete() {
-        let row = tableView.clickedRow
+    private func deleteRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
         TranscriptionHistory.shared.deleteEntry(at: row)
         loadEntries()
+    }
+
+    @objc private func copyButtonClicked(_ sender: NSButton) {
+        copyTextForRow(sender.tag)
+    }
+
+    @objc private func saveAudioButtonClicked(_ sender: NSButton) {
+        saveAudioForRow(sender.tag)
+    }
+
+    @objc private func contextCopy() {
+        copyTextForRow(tableView.clickedRow)
+    }
+
+    @objc private func contextSaveAudio() {
+        saveAudioForRow(tableView.clickedRow)
+    }
+
+    @objc private func contextDelete() {
+        deleteRow(tableView.clickedRow)
     }
 
     // MARK: - NSTableViewDataSource
@@ -197,101 +276,183 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
 
     // MARK: - NSTableViewDelegate
 
+    private let kRowLeadingInset: CGFloat = 10
+    private let kRowTrailingInset: CGFloat = 10
+    private let kRowTopInset: CGFloat = 8
+    private let kRowBottomInset: CGFloat = 8
+    private let kButtonColumnWidth: CGFloat = 170
+    private let kTimeColumnWidth: CGFloat = 108
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < entries.count else { return nil }
         let entry = entries[row]
         let p = parsed[row]
         let isCopied = copiedRow == row
+        let isPodcast = entry.kind == .podcast
 
         let cellView = NSView()
 
-        // Timestamp
+        // --- Header row: time + kind badge + (optional) podcast title ---
         let timeLabel = NSTextField(labelWithString: formatDate(entry.timestamp))
         timeLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         timeLabel.textColor = .secondaryLabelColor
         timeLabel.translatesAutoresizingMaskIntoConstraints = false
-        timeLabel.setContentHuggingPriority(.required, for: .horizontal)
-        timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         cellView.addSubview(timeLabel)
 
+        let badge = NSTextField(labelWithString: isPodcast ? "Podcast" : "Transcript")
+        badge.font = .systemFont(ofSize: 10, weight: .semibold)
+        badge.textColor = isPodcast ? .systemPurple : .systemTeal
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        cellView.addSubview(badge)
+
+        // --- Action buttons (right side) ---
+        let copyButton = NSButton(title: isCopied ? "Copied!" : "Copy Text", target: self, action: #selector(copyButtonClicked(_:)))
+        copyButton.bezelStyle = .rounded
+        copyButton.controlSize = .small
+        copyButton.tag = row
+        copyButton.translatesAutoresizingMaskIntoConstraints = false
+        cellView.addSubview(copyButton)
+
+        var trailingAnchorForPreview: NSLayoutXAxisAnchor = copyButton.leadingAnchor
+
+        if isPodcast {
+            let audioButton = NSButton(title: "Save Audio", target: self, action: #selector(saveAudioButtonClicked(_:)))
+            audioButton.bezelStyle = .rounded
+            audioButton.controlSize = .small
+            audioButton.tag = row
+            audioButton.isEnabled = TranscriptionHistory.shared.audioURL(for: entry) != nil
+            audioButton.translatesAutoresizingMaskIntoConstraints = false
+            cellView.addSubview(audioButton)
+
+            NSLayoutConstraint.activate([
+                audioButton.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
+                audioButton.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -kRowTrailingInset),
+                audioButton.widthAnchor.constraint(equalToConstant: 90),
+                copyButton.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
+                copyButton.trailingAnchor.constraint(equalTo: audioButton.leadingAnchor, constant: -6),
+                copyButton.widthAnchor.constraint(equalToConstant: 80),
+            ])
+            trailingAnchorForPreview = copyButton.leadingAnchor
+        } else {
+            NSLayoutConstraint.activate([
+                copyButton.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
+                copyButton.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -kRowTrailingInset),
+                copyButton.widthAnchor.constraint(equalToConstant: 80),
+            ])
+            trailingAnchorForPreview = copyButton.leadingAnchor
+        }
+
         NSLayoutConstraint.activate([
-            timeLabel.leadingAnchor.constraint(equalTo: cellView.leadingAnchor, constant: 8),
-            timeLabel.topAnchor.constraint(equalTo: cellView.topAnchor, constant: 6),
+            timeLabel.leadingAnchor.constraint(equalTo: cellView.leadingAnchor, constant: kRowLeadingInset),
+            timeLabel.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
+            timeLabel.widthAnchor.constraint(lessThanOrEqualToConstant: kTimeColumnWidth),
+
+            badge.leadingAnchor.constraint(equalTo: timeLabel.trailingAnchor, constant: 8),
+            badge.centerYAnchor.constraint(equalTo: timeLabel.centerYAnchor),
         ])
 
-        if let question = p.question {
-            // Q&A entry: show question (dimmed) then answer below it
+        // --- Body: optional title, optional question, then preview text ---
+        var previousBottom = timeLabel.bottomAnchor
+        let bodyLeading = cellView.leadingAnchor
+        let bodyTrailing = trailingAnchorForPreview
+
+        if isPodcast, let title = entry.title, !title.isEmpty {
+            let titleLabel = NSTextField(labelWithString: title)
+            titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+            titleLabel.textColor = .labelColor
+            titleLabel.maximumNumberOfLines = 1
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            cellView.addSubview(titleLabel)
+
+            NSLayoutConstraint.activate([
+                titleLabel.leadingAnchor.constraint(equalTo: bodyLeading, constant: kRowLeadingInset),
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: bodyTrailing, constant: -8),
+                titleLabel.topAnchor.constraint(equalTo: previousBottom, constant: 6),
+            ])
+            previousBottom = titleLabel.bottomAnchor
+        }
+
+        if !isPodcast, let question = p.question {
             let questionLabel = NSTextField(wrappingLabelWithString: question)
             questionLabel.font = .systemFont(ofSize: 12)
             questionLabel.textColor = .secondaryLabelColor
-            questionLabel.maximumNumberOfLines = 0
+            questionLabel.maximumNumberOfLines = 2
+            questionLabel.lineBreakMode = .byTruncatingTail
             questionLabel.translatesAutoresizingMaskIntoConstraints = false
             cellView.addSubview(questionLabel)
 
-            let answerLabel = NSTextField(wrappingLabelWithString: isCopied ? "Copied!" : p.answer)
-            answerLabel.font = .systemFont(ofSize: 13)
-            answerLabel.textColor = isCopied ? .systemGreen : .labelColor
-            answerLabel.maximumNumberOfLines = 0
-            answerLabel.translatesAutoresizingMaskIntoConstraints = false
-            cellView.addSubview(answerLabel)
-
             NSLayoutConstraint.activate([
-                questionLabel.leadingAnchor.constraint(equalTo: timeLabel.trailingAnchor, constant: 12),
-                questionLabel.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -8),
-                questionLabel.topAnchor.constraint(equalTo: cellView.topAnchor, constant: 6),
-
-                answerLabel.leadingAnchor.constraint(equalTo: questionLabel.leadingAnchor),
-                answerLabel.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -8),
-                answerLabel.topAnchor.constraint(equalTo: questionLabel.bottomAnchor, constant: 4),
-                answerLabel.bottomAnchor.constraint(lessThanOrEqualTo: cellView.bottomAnchor, constant: -6)
+                questionLabel.leadingAnchor.constraint(equalTo: bodyLeading, constant: kRowLeadingInset),
+                questionLabel.trailingAnchor.constraint(lessThanOrEqualTo: bodyTrailing, constant: -8),
+                questionLabel.topAnchor.constraint(equalTo: previousBottom, constant: 4),
             ])
-        } else {
-            // Plain transcription entry
-            let textLabel = NSTextField(wrappingLabelWithString: isCopied ? "Copied!" : p.answer)
-            textLabel.font = .systemFont(ofSize: 13)
-            textLabel.textColor = isCopied ? .systemGreen : .labelColor
-            textLabel.maximumNumberOfLines = 0
-            textLabel.translatesAutoresizingMaskIntoConstraints = false
-            cellView.addSubview(textLabel)
-
-            NSLayoutConstraint.activate([
-                textLabel.leadingAnchor.constraint(equalTo: timeLabel.trailingAnchor, constant: 12),
-                textLabel.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -8),
-                textLabel.topAnchor.constraint(equalTo: cellView.topAnchor, constant: 6),
-                textLabel.bottomAnchor.constraint(lessThanOrEqualTo: cellView.bottomAnchor, constant: -6)
-            ])
+            previousBottom = questionLabel.bottomAnchor
         }
+
+        let preview = previewText(at: row)
+        let previewLabel = NSTextField(wrappingLabelWithString: preview)
+        previewLabel.font = .systemFont(ofSize: 13)
+        previewLabel.textColor = .labelColor
+        previewLabel.maximumNumberOfLines = kPreviewLineLimit
+        previewLabel.lineBreakMode = .byTruncatingTail
+        previewLabel.translatesAutoresizingMaskIntoConstraints = false
+        cellView.addSubview(previewLabel)
+
+        NSLayoutConstraint.activate([
+            previewLabel.leadingAnchor.constraint(equalTo: bodyLeading, constant: kRowLeadingInset),
+            previewLabel.trailingAnchor.constraint(lessThanOrEqualTo: bodyTrailing, constant: -8),
+            previewLabel.topAnchor.constraint(equalTo: previousBottom, constant: 4),
+            previewLabel.bottomAnchor.constraint(lessThanOrEqualTo: cellView.bottomAnchor, constant: -kRowBottomInset),
+        ])
 
         return cellView
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard row < entries.count else { return 30 }
+        guard row < entries.count else { return 48 }
+        let entry = entries[row]
         let p = parsed[row]
-        let availableWidth = max(tableView.bounds.width - 150, 200)
-        let textAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13)]
+        let isPodcast = entry.kind == .podcast
+        let availableWidth = max(tableView.bounds.width - kRowLeadingInset - kButtonColumnWidth - kRowTrailingInset, 200)
 
-        if let question = p.question {
+        var total: CGFloat = kRowTopInset + kRowBottomInset
+        // First row: time + badge (≈ 16pt tall) + 4pt spacer
+        total += 16 + 4
+
+        if isPodcast, let title = entry.title, !title.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
+            let size = (title as NSString).boundingRect(
+                with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attrs
+            )
+            total += min(size.height, 22) + 4
+        }
+
+        if !isPodcast, let question = p.question {
             let qAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
             let qSize = (question as NSString).boundingRect(
                 with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: qAttrs
             )
-            let aSize = (p.answer as NSString).boundingRect(
-                with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: textAttrs
-            )
-            return max(40, qSize.height + aSize.height + 20) // 6 top + 4 gap + 6 bottom + 4 extra
-        } else {
-            let textSize = (p.answer as NSString).boundingRect(
-                with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: textAttrs
-            )
-            return max(30, textSize.height + 16)
+            total += min(qSize.height, 32) + 4 // cap at 2 lines
         }
+
+        // Preview: clamp to the 5-line limit regardless of actual text length.
+        let preview = isPodcast ? cleanedPodcastPreview(text: entry.text) : p.answer
+        let pAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13)]
+        let pSize = (preview as NSString).boundingRect(
+            with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: pAttrs
+        )
+        let lineHeight: CGFloat = 17
+        let maxPreviewHeight = lineHeight * CGFloat(kPreviewLineLimit) + 2
+        total += min(pSize.height, maxPreviewHeight)
+
+        return max(56, total)
     }
 
     private func formatDate(_ date: Date) -> String {

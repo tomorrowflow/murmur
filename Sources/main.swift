@@ -105,6 +105,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var podcastManager: PodcastManager?
     private var podcastOverlay: PodcastOverlayWindow?
     private var podcastInterruptActive = false
+    // Tracks whether the current podcast session has already been persisted
+    // to TranscriptionHistory — reset on each new startSession / dismiss.
+    private var savedCurrentPodcastToHistory = false
     private var sttPushToTalkActive = false
     private var bluetoothWarmingUp = false
     private var sttPushToTalkStartTime: Date?
@@ -1522,11 +1525,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         switch state {
         case .playing:
             startWaveformAnimation()
-        case .complete, .error, .idle:
+        case .complete:
             stopWaveformAnimation()
+            savePodcastToHistoryIfNeeded()
+        case .error, .idle:
+            stopWaveformAnimation()
+        case .disconnected:
+            // The podcast finished and the server dropped us — still worth
+            // preserving the audio+script locally.
+            savePodcastToHistoryIfNeeded()
         default:
             break
         }
+    }
+
+    /// Persist the current podcast's script + audio to history. Idempotent per
+    /// session so repeated .complete transitions (e.g. after a replay) don't
+    /// create duplicate entries.
+    private func savePodcastToHistoryIfNeeded() {
+        guard let manager = podcastManager, !savedCurrentPodcastToHistory else { return }
+        guard let overlay = podcastOverlay else { return }
+        let transcript = overlay.viewModel.transcript
+        guard !transcript.isEmpty else { return }
+        let title = overlay.viewModel.title.isEmpty ? "Podcast" : overlay.viewModel.title
+        let markdown = renderPodcastMarkdown(title: title, lines: transcript)
+        let audioData = manager.combinedAudioData()
+        TranscriptionHistory.shared.addPodcastEntry(
+            title: title,
+            markdown: markdown,
+            audioData: audioData
+        )
+        savedCurrentPodcastToHistory = true
+    }
+
+    private func renderPodcastMarkdown(title: String, lines: [ScriptLine]) -> String {
+        var md = "# Podcast: \(title)\n\n"
+        for line in lines {
+            if line.isInterruptMarker {
+                md += "\n---\n*Interrupt: \(line.text)*\n---\n\n"
+            } else {
+                md += "**\(line.speaker):** \(line.text)\n\n"
+            }
+        }
+        return md
     }
 
     func podcastDidUpdateTranscript(_ lines: [ScriptLine]) {
@@ -1684,6 +1725,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             let preview = String(trimmed.prefix(200))
             NSLog("Podcast: starting session (type=\(contentType), length=\(content.count))")
             NSLog("Podcast: content preview: \(preview)")
+            savedCurrentPodcastToHistory = false
             manager.startSession(contentType: contentType, content: content)
         }
     }

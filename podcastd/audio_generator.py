@@ -34,12 +34,13 @@ DEFAULT_PRESET = "large-q4"
 
 # Rough generation speed: seconds per character of input text, by model.
 # Calibrated from observed generation times on RTX 3090 (diffusion_steps=20).
-# 1.5B measured at ~0.035 s/char; others scaled proportionally.
+# 1.5B measured at ~0.035 s/char; Q4/Q8/Large bumped ~25% after field
+# observation that the original numbers ran short on Q8 in practice.
 _MODEL_SECS_PER_CHAR: dict[str, float] = {
-    "VibeVoice-Large": 0.11,        # ~9 chars/s, slowest
-    "VibeVoice-Large-Q8": 0.07,     # ~14 chars/s
-    "VibeVoice7b-low-vram": 0.05,   # ~20 chars/s
-    "VibeVoice-1.5B": 0.035,        # ~29 chars/s, fastest
+    "VibeVoice-Large": 0.138,        # ~7 chars/s, slowest
+    "VibeVoice-Large-Q8": 0.0875,    # ~11 chars/s
+    "VibeVoice7b-low-vram": 0.0625,  # ~16 chars/s
+    "VibeVoice-1.5B": 0.035,         # ~29 chars/s, fastest
 }
 _OVERHEAD_SECS = 5.0
 

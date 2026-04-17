@@ -12,6 +12,7 @@ protocol PodcastManagerDelegate: AnyObject {
     func podcastDidActivateLine(_ lineId: UUID)
     func podcastDidUpdateProgress(stage: String, percent: Int, message: String?)
     func podcastDidUpdateChunkProgress(current: Int, total: Int)
+    func podcastDidUpdateCacheStatus(canExport: Bool, hasAny: Bool)
     func podcastDidError(_ message: String)
 }
 
@@ -26,6 +27,7 @@ enum PodcastState: Equatable {
     case listening        // user is recording an interrupt question
     case processingInterrupt
     case complete
+    case disconnected     // transient network failure; local chunks still available
     case error(String)
 
     var displayName: String {
@@ -38,8 +40,14 @@ enum PodcastState: Equatable {
         case .listening: return "Listening"
         case .processingInterrupt: return "Processing"
         case .complete: return "Complete"
+        case .disconnected: return "Disconnected"
         case .error: return "Error"
         }
+    }
+
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
     }
 }
 
@@ -72,7 +80,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     var isSessionActive: Bool {
         switch state {
-        case .idle, .complete, .error: return false
+        case .idle, .complete, .error, .disconnected: return false
         default: return true
         }
     }
@@ -82,14 +90,17 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var totalChunks: Int = 0
     private var title: String = ""
     private var transcript: [ScriptLine] = []
-    private var prefetchedAudioURL: URL?
-    private var prefetchedTranscriptLines: [ScriptLine] = []
+    // Eagerly-downloaded chunks, keyed by chunk_index. The canonical store —
+    // populated on CHUNK_READY regardless of playback state so the user can
+    // export/replay even if the connection drops or playback stalls.
+    private var chunkAudioByIndex: [Int: Data] = [:]
+    private var chunkTranscriptByIndex: [Int: [ScriptLine]] = [:]
+    private var lastReceivedChunkIndex: Int = -1
+    private var chunkDownloadGeneration: Int = 0
     private var player: AVAudioPlayer?
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession!
     private var keepaliveTimer: Timer?
-    private var isDownloadingPrefetch = false
-    private var prefetchGeneration: Int = 0
     private var isPlayingInterruptResponse = false
     private var downloadGeneration: Int = 0
     private var preInterruptTranscript: [ScriptLine]?
@@ -99,7 +110,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     private var lineAdvanceTimers: [Timer] = []
     private var currentChunkLines: [ScriptLine] = []
     private(set) var activeLineId: UUID?
-    private var audioSegments: [Data] = []  // collected audio for full download
+    // Audio in playback order — preserves interleaved interrupt responses for export.
+    private var audioSegments: [Data] = []
+
+    // Reconnect bookkeeping
+    private var reconnectAttempt: Int = 0
+    private var reconnectTimer: DispatchSourceTimer?
+    private var isAttemptingReconnect = false
 
     // Escape key monitors
     private var escapeGlobalMonitor: Any?
@@ -232,6 +249,20 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     var audioSegmentCount: Int { audioSegments.count }
 
+    /// Number of chunks whose audio has been fully downloaded to local cache.
+    var cachedChunkCount: Int { chunkAudioByIndex.count }
+
+    /// True when every chunk of the currently-known script is cached locally.
+    /// Export/replay work offline in this state.
+    var hasAllChunksCached: Bool {
+        totalChunks > 0 && chunkAudioByIndex.count >= totalChunks
+    }
+
+    /// True when at least one chunk of audio is cached locally.
+    var hasAnyChunkCached: Bool {
+        !chunkAudioByIndex.isEmpty || !audioSegments.isEmpty
+    }
+
     func pausePlayback() {
         isPaused = true
         player?.pause()
@@ -255,7 +286,14 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             // A chunk was queued while the previous chunk had finished during pause
             pendingPlayData = nil
             NSLog("Podcast: resuming with queued chunk \(pending.chunkIndex)")
-            playAudioData(pending.data, chunkIndex: pending.chunkIndex, alreadyCollected: true)
+            if pending.chunkIndex >= 0 {
+                startPlayingChunk(pending.chunkIndex)
+            } else {
+                playInterruptResponse(data: pending.data)
+            }
+        } else if state == .buffering {
+            // Maybe a chunk arrived while paused — try advancing now.
+            advanceAfterPlayback()
         }
         updateNowPlaying(paused: false)
     }
@@ -322,7 +360,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         preInterruptActiveLineId = nil
 
         state = .buffering
-        requestNextChunk()
+        // Resume eager streaming from the next chunk — server dropped its stream
+        // when the interrupt arrived, so we have to re-trigger it.
+        requestStreamChunks(from: currentChunkIndex + 1)
     }
 
     /// Called when the user starts recording an interrupt (double-tap).
@@ -333,16 +373,18 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         player = nil
         cancelLineAdvanceTimers()
         downloadGeneration += 1  // invalidate any in-flight audio download
+        chunkDownloadGeneration += 1  // invalidate eager-download tasks for stale chunks
         state = .listening
 
-        // Discard stale prefetch — server will invalidate all chunks after current
-        if let prefetchURL = prefetchedAudioURL {
-            try? FileManager.default.removeItem(at: prefetchURL)
-            prefetchedAudioURL = nil
+        // Server invalidates all chunks past current_chunk_index; drop our cache
+        // of those too so the rewritten chunks replace them cleanly.
+        let keepUpTo = currentChunkIndex
+        chunkAudioByIndex = chunkAudioByIndex.filter { $0.key <= keepUpTo }
+        chunkTranscriptByIndex = chunkTranscriptByIndex.filter { $0.key <= keepUpTo }
+        if lastReceivedChunkIndex > keepUpTo {
+            lastReceivedChunkIndex = keepUpTo
         }
-        prefetchedTranscriptLines = []
-        isDownloadingPrefetch = false
-        prefetchGeneration += 1  // invalidate any in-flight prefetch
+        delegate?.podcastDidUpdateCacheStatus(canExport: hasAllChunksCached, hasAny: hasAnyChunkCached)
 
         // Save transcript state for restoration if interrupt is cancelled
         preInterruptTranscript = transcript
@@ -382,7 +424,8 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         sendJSON([
             "type": "INTERRUPT",
             "session_id": sessionId,
-            "question": question
+            "question": question,
+            "at_chunk_index": currentChunkIndex,
         ])
     }
 
@@ -419,14 +462,84 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             case .failure(let error):
                 NSLog("Podcast: WebSocket error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    // Ignore errors from intentional disconnects (state already .idle after reset)
-                    guard self.isSessionActive else { return }
-                    self.delegate?.podcastDidError("Connection lost")
-                    self.disconnect()
-                    self.state = .error("Connection lost: \(error.localizedDescription)")
+                    self.handleWebSocketDrop(reason: error.localizedDescription)
                 }
             }
         }
+    }
+
+    /// Called when the WebSocket unexpectedly drops while a session was active.
+    /// Switches to .disconnected (preserving cached audio + UI) and schedules
+    /// auto-reconnect with exponential backoff.
+    private func handleWebSocketDrop(reason: String) {
+        // Intentional disconnect (reset/stop) — nothing to do.
+        guard sessionId != nil else { return }
+        // Already handled another drop or never connected.
+        guard !isAttemptingReconnect, state != .idle, state != .error(reason) else { return }
+
+        NSLog("Podcast: connection dropped — \(reason). Switching to .disconnected and scheduling reconnect.")
+        disconnect()
+
+        // Preserve the user-facing session: if we have audio cached they can still
+        // export/replay locally; reconnect will try to fetch anything still missing.
+        state = .disconnected
+        delegate?.podcastDidError("Connection lost — reconnecting")
+        scheduleReconnect()
+    }
+
+    private func scheduleReconnect() {
+        cancelReconnect()
+        isAttemptingReconnect = true
+        reconnectAttempt += 1
+        // Exponential backoff capped at 60s. Attempts: 1s, 2s, 4s, 8s, 16s, 32s, 60s…
+        let rawDelay = pow(2.0, Double(min(reconnectAttempt - 1, 6)))
+        let delay = min(rawDelay, 60.0)
+        NSLog("Podcast: reconnect attempt \(reconnectAttempt) in \(delay)s")
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler { [weak self] in
+            self?.attemptReconnect()
+        }
+        timer.resume()
+        reconnectTimer = timer
+    }
+
+    private func cancelReconnect() {
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
+        isAttemptingReconnect = false
+    }
+
+    private func attemptReconnect() {
+        guard let sid = sessionId else {
+            cancelReconnect()
+            return
+        }
+        guard let url = URL(string: podcastdURL) else {
+            cancelReconnect()
+            return
+        }
+
+        NSLog("Podcast: attempting reconnect (session=\(sid), lastReceived=\(lastReceivedChunkIndex))")
+        let task = urlSession.webSocketTask(with: url)
+        task.resume()
+        webSocketTask = task
+        startListening()
+        startKeepalive()
+
+        // Ask server to re-associate this websocket with the existing session
+        // and resume streaming from where we left off.
+        sendJSON([
+            "type": "RESUME_SESSION",
+            "session_id": sid,
+            "last_received_chunk_index": lastReceivedChunkIndex,
+        ])
+
+        // If RESUME fails the server will reply NO_SESSION → ERROR; if it succeeds
+        // SESSION_RESUMED lands in handleServerMessage. Either way we've used our
+        // backoff slot.
+        isAttemptingReconnect = false
     }
 
     private func startKeepalive() {
@@ -462,14 +575,38 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             delegate?.podcastDidUpdateChunkProgress(current: 0, total: totalChunks)
             state = .buffering
             NSLog("Podcast: session created (id=\(sessionId ?? "?"), chunks=\(totalChunks))")
+            // Server auto-streams remaining chunks; no explicit request needed.
 
-            // Request first chunk
-            requestNextChunk()
+        case "SESSION_RESUMED":
+            let total = json["total_chunks"] as? Int ?? totalChunks
+            if total > 0 { totalChunks = total }
+            reconnectAttempt = 0
+            cancelReconnect()
+            NSLog("Podcast: session resumed (total=\(totalChunks), cached=\(chunkAudioByIndex.count))")
+            // Server will re-stream from lastReceivedChunkIndex+1 automatically.
+            // Restore UI state based on what's locally available.
+            if isPaused {
+                updateNowPlaying(paused: true)
+            } else if player?.isPlaying == true {
+                state = .playing
+            } else if hasAllChunksCached {
+                state = .complete
+                updateNowPlaying(paused: true)
+            } else {
+                state = .buffering
+            }
 
         case "CHUNK_READY":
             let chunkIndex = json["chunk_index"] as? Int ?? 0
             guard let audioURL = json["audio_url"] as? String else { return }
-            NSLog("Podcast: CHUNK_READY chunk_index=\(chunkIndex), currentChunkIndex=\(currentChunkIndex), state=\(state.displayName)")
+
+            // End-of-stream sentinel: audio_url is empty string.
+            if audioURL.isEmpty {
+                NSLog("Podcast: end-of-stream sentinel received at chunk \(chunkIndex)")
+                return
+            }
+
+            NSLog("Podcast: CHUNK_READY chunk_index=\(chunkIndex), state=\(state.displayName), cached=\(chunkAudioByIndex.count)/\(totalChunks)")
 
             // Ignore stale chunks that arrive during/after interrupt processing
             if state == .processingInterrupt || state == .listening {
@@ -477,7 +614,12 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 return
             }
 
-            // Parse transcript lines from the chunk
+            // Already cached? Skip download (e.g. server re-sent on RESUME).
+            if chunkAudioByIndex[chunkIndex] != nil {
+                NSLog("Podcast: chunk \(chunkIndex) already cached, skipping download")
+                return
+            }
+
             let lines: [ScriptLine]
             if let transcriptData = json["transcript"] as? [[String: Any]] {
                 lines = transcriptData.compactMap { dict -> ScriptLine? in
@@ -488,19 +630,8 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             } else {
                 lines = []
             }
-
-            if !isPaused && (state == .buffering || player == nil || !(player?.isPlaying ?? false)) {
-                // We need audio now — play immediately
-                if !lines.isEmpty {
-                    transcript.append(contentsOf: lines)
-                    currentChunkLines = lines
-                    delegate?.podcastDidUpdateTranscript(transcript)
-                }
-                downloadAndPlay(audioURL: audioURL, chunkIndex: chunkIndex)
-            } else {
-                // Currently playing — prefetch for later
-                prefetchAudio(audioURL: audioURL, lines: lines)
-            }
+            chunkTranscriptByIndex[chunkIndex] = lines
+            downloadChunkAudio(audioURL: audioURL, chunkIndex: chunkIndex)
 
         case "INTERRUPT_PROCESSING":
             state = .processingInterrupt
@@ -522,7 +653,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             }
 
             isPlayingInterruptResponse = true
-            downloadAndPlay(audioURL: audioURL, chunkIndex: -1) // -1 = interrupt response
+            downloadAndPlayInterruptResponse(audioURL: audioURL)
 
         case "SCRIPT_UPDATED":
             if let remaining = json["remaining_chunks"] as? Int {
@@ -535,6 +666,26 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             let code = json["code"] as? String ?? "UNKNOWN"
             let message = json["message"] as? String ?? "Unknown error"
             NSLog("Podcast: server error [\(code)] \(message)")
+
+            // Session expired past the server's reconnect grace period. If we
+            // have everything cached the user can still export/replay, so
+            // settle into .complete instead of blowing the overlay away.
+            if code == "NO_SESSION" && hasAllChunksCached {
+                NSLog("Podcast: server dropped session but audio is complete locally")
+                cancelReconnect()
+                state = .complete
+                updateNowPlaying(paused: true)
+                return
+            }
+            if code == "NO_SESSION" && hasAnyChunkCached {
+                cancelReconnect()
+                // Partial audio — keep UI usable for export.
+                state = .disconnected
+                delegate?.podcastDidError("Session expired — \(chunkAudioByIndex.count)/\(totalChunks) chunks cached")
+                return
+            }
+
+            cancelReconnect()
             state = .error(message)
             delegate?.podcastDidError(message)
 
@@ -554,69 +705,114 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     // MARK: - Audio Playback
 
-    private func downloadAndPlay(audioURL: String, chunkIndex: Int) {
+    /// Resolve a server-relative or absolute audio URL to a full URL.
+    private func resolveAudioURL(_ audioURL: String) -> URL? {
         let fullURL: String
         if audioURL.hasPrefix("http") {
             fullURL = audioURL
         } else {
-            let base = audioBaseURL.isEmpty ? podcastdURL.replacingOccurrences(of: "ws://", with: "http://").replacingOccurrences(of: "wss://", with: "https://") : audioBaseURL
+            let base = audioBaseURL.isEmpty
+                ? podcastdURL.replacingOccurrences(of: "ws://", with: "http://").replacingOccurrences(of: "wss://", with: "https://")
+                : audioBaseURL
             fullURL = "\(base)/audio/\(audioURL)"
         }
+        return URL(string: fullURL)
+    }
 
-        guard let url = URL(string: fullURL) else {
-            NSLog("Podcast: invalid audio URL: \(fullURL)")
+    /// Download a chunk's audio bytes and store them in chunkAudioByIndex.
+    /// If the chunk is the one we're currently waiting to play, kick playback.
+    /// Playback state (paused, active) is not a factor — we always download.
+    /// Retries up to `maxAttempts` times on network failure before giving up.
+    private func downloadChunkAudio(audioURL: String, chunkIndex: Int, attempt: Int = 1) {
+        guard let url = resolveAudioURL(audioURL) else {
+            NSLog("Podcast: invalid audio URL: \(audioURL)")
             return
         }
 
-        state = .buffering
-        delegate?.podcastDidUpdateProgress(stage: "download", percent: -1, message: "Downloading audio...")
-        let generation = downloadGeneration
-
+        let generation = chunkDownloadGeneration
+        let maxAttempts = 4
         Task {
             do {
                 let (data, _) = try await urlSession.data(from: url)
                 await MainActor.run {
-                    guard self.downloadGeneration == generation else {
-                        NSLog("Podcast: discarding stale audio download (interrupted)")
+                    guard self.chunkDownloadGeneration == generation else {
+                        NSLog("Podcast: discarding stale chunk download (interrupt/reset)")
                         return
                     }
-                    self.playAudioData(data, chunkIndex: chunkIndex)
+                    self.storeDownloadedChunk(data: data, chunkIndex: chunkIndex)
                 }
             } catch {
                 await MainActor.run {
-                    guard self.downloadGeneration == generation else { return }
-                    NSLog("Podcast: audio download failed: \(error)")
-                    self.state = .error("Audio download failed")
-                    self.delegate?.podcastDidError("Failed to download audio")
+                    guard self.chunkDownloadGeneration == generation else { return }
+                    if attempt < maxAttempts {
+                        let delay = pow(2.0, Double(attempt))
+                        NSLog("Podcast: chunk \(chunkIndex) download failed (attempt \(attempt)/\(maxAttempts)): \(error) — retrying in \(delay)s")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            self?.downloadChunkAudio(audioURL: audioURL, chunkIndex: chunkIndex, attempt: attempt + 1)
+                        }
+                    } else {
+                        NSLog("Podcast: chunk \(chunkIndex) download permanently failed: \(error)")
+                        // Stay in session; user can export partial or reconnect later.
+                    }
                 }
             }
         }
     }
 
-    private func playAudioData(_ data: Data, chunkIndex: Int, alreadyCollected: Bool = false) {
-        // Collect audio segment for full download
-        if !alreadyCollected {
-            audioSegments.append(data)
+    private func storeDownloadedChunk(data: Data, chunkIndex: Int) {
+        chunkAudioByIndex[chunkIndex] = data
+        if chunkIndex > lastReceivedChunkIndex {
+            lastReceivedChunkIndex = chunkIndex
+        }
+        NSLog("Podcast: cached chunk \(chunkIndex) (\(chunkAudioByIndex.count)/\(totalChunks))")
+        delegate?.podcastDidUpdateCacheStatus(canExport: hasAllChunksCached, hasAny: hasAnyChunkCached)
+
+        // If we're buffering for this chunk, play it now.
+        if !isPaused && !isPlayingInterruptResponse && (state == .buffering || (player?.isPlaying != true && state != .listening && state != .processingInterrupt && state != .idle)) {
+            let needed = nextChunkToPlay()
+            if chunkIndex == needed {
+                startPlayingChunk(chunkIndex)
+            }
+        }
+    }
+
+    /// Index of the chunk that should play next based on currentChunkIndex
+    /// and whether a player is currently active.
+    private func nextChunkToPlay() -> Int {
+        if player != nil {
+            return currentChunkIndex + 1
+        }
+        // No player yet — either session just started or resumed after drain.
+        return currentChunkIndex
+    }
+
+    /// Begin playback of an already-downloaded chunk. Updates state, transcript,
+    /// line-advancement timers, and appends to audioSegments for export.
+    private func startPlayingChunk(_ chunkIndex: Int) {
+        guard let data = chunkAudioByIndex[chunkIndex] else {
+            NSLog("Podcast: startPlayingChunk called for uncached chunk \(chunkIndex)")
+            state = .buffering
+            return
         }
 
-        // If paused, queue this chunk to play when resumed
+        audioSegments.append(data)
+        let lines = chunkTranscriptByIndex[chunkIndex] ?? []
+
+        if !lines.isEmpty {
+            transcript.append(contentsOf: lines)
+            currentChunkLines = lines
+            delegate?.podcastDidUpdateTranscript(transcript)
+        }
+
         if isPaused {
             NSLog("Podcast: queuing chunk \(chunkIndex) (paused)")
             pendingPlayData = (data: data, chunkIndex: chunkIndex)
             currentChunkIndex = chunkIndex
-            if chunkIndex >= 0 {
-                delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
-            }
-            // Still prefetch the next chunk
-            if chunkIndex >= 0 && currentChunkIndex + 1 < totalChunks {
-                requestNextChunk()
-            }
+            delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
             return
         }
 
         do {
-            // For the first chunk, prepend silence so the audio device wakes up
-            // before speech begins (prevents first words being swallowed)
             let playData: Data
             if chunkIndex == 0, let silenced = prependSilence(to: data) {
                 playData = silenced
@@ -630,24 +826,84 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             player?.play()
             state = .playing
             updateNowPlaying()
-            if chunkIndex >= 0 {
-                delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
-            }
 
-            // Schedule line-by-line advancement through the current chunk
+            currentChunkIndex = chunkIndex
+            delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
+            sendChunkPlayed(chunkIndex)
+
             scheduleLineAdvancement(duration: player?.duration ?? 0, hasPrependedSilence: chunkIndex == 0)
-
-            // Request next chunk while playing (prefetch)
-            if chunkIndex >= 0 {
-                currentChunkIndex = chunkIndex
-                if currentChunkIndex + 1 < totalChunks {
-                    requestNextChunk()
-                }
-            }
         } catch {
-            NSLog("Podcast: playback error: \(error)")
+            NSLog("Podcast: playback error for chunk \(chunkIndex): \(error)")
             state = .error("Playback failed")
             delegate?.podcastDidError("Audio playback failed")
+        }
+    }
+
+    /// Play an ad-hoc data blob that isn't a numbered chunk — used for interrupt
+    /// responses. Still appended to audioSegments so export preserves order.
+    private func playInterruptResponse(data: Data) {
+        audioSegments.append(data)
+
+        if isPaused {
+            NSLog("Podcast: queuing interrupt response (paused)")
+            pendingPlayData = (data: data, chunkIndex: -1)
+            return
+        }
+
+        do {
+            player = try AVAudioPlayer(data: data)
+            player?.delegate = self
+            player?.prepareToPlay()
+            player?.play()
+            state = .playing
+            updateNowPlaying()
+            scheduleLineAdvancement(duration: player?.duration ?? 0, hasPrependedSilence: false)
+        } catch {
+            NSLog("Podcast: interrupt playback error: \(error)")
+            state = .error("Playback failed")
+            delegate?.podcastDidError("Audio playback failed")
+        }
+    }
+
+    private func sendChunkPlayed(_ chunkIndex: Int) {
+        guard let sessionId = sessionId else { return }
+        sendJSON([
+            "type": "CHUNK_PLAYED",
+            "session_id": sessionId,
+            "chunk_index": chunkIndex,
+        ])
+    }
+
+    /// Download the interrupt-response audio (not part of the numbered chunk
+    /// stream) and play it inline. On failure, drops back to buffering so the
+    /// eager streamer can deliver the revised next chunk.
+    private func downloadAndPlayInterruptResponse(audioURL: String) {
+        guard let url = resolveAudioURL(audioURL) else {
+            NSLog("Podcast: invalid interrupt audio URL: \(audioURL)")
+            return
+        }
+        state = .buffering
+        delegate?.podcastDidUpdateProgress(stage: "download", percent: -1, message: "Downloading response...")
+        let generation = downloadGeneration
+
+        Task {
+            do {
+                let (data, _) = try await urlSession.data(from: url)
+                await MainActor.run {
+                    guard self.downloadGeneration == generation else {
+                        NSLog("Podcast: discarding stale interrupt download")
+                        return
+                    }
+                    self.playInterruptResponse(data: data)
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.downloadGeneration == generation else { return }
+                    NSLog("Podcast: interrupt response download failed: \(error)")
+                    self.isPlayingInterruptResponse = false
+                    self.state = .buffering
+                }
+            }
         }
     }
 
@@ -706,51 +962,14 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         lineAdvanceTimers.removeAll()
     }
 
-    private func prefetchAudio(audioURL: String, lines: [ScriptLine]) {
-        let fullURL: String
-        if audioURL.hasPrefix("http") {
-            fullURL = audioURL
-        } else {
-            let base = audioBaseURL.isEmpty ? podcastdURL.replacingOccurrences(of: "ws://", with: "http://").replacingOccurrences(of: "wss://", with: "https://") : audioBaseURL
-            fullURL = "\(base)/audio/\(audioURL)"
-        }
-
-        guard let url = URL(string: fullURL) else { return }
-
-        isDownloadingPrefetch = true
-        let generation = prefetchGeneration
-        Task {
-            do {
-                let (data, _) = try await urlSession.data(from: url)
-                let tempFile = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("podcast_prefetch_\(UUID().uuidString).mp3")
-                try data.write(to: tempFile)
-                await MainActor.run {
-                    // Discard if an interrupt happened while downloading
-                    guard self.prefetchGeneration == generation else {
-                        try? FileManager.default.removeItem(at: tempFile)
-                        NSLog("Podcast: discarding stale prefetch (interrupted)")
-                        return
-                    }
-                    self.prefetchedAudioURL = tempFile
-                    self.prefetchedTranscriptLines = lines
-                    self.isDownloadingPrefetch = false
-                    NSLog("Podcast: prefetched next chunk")
-                }
-            } catch {
-                await MainActor.run {
-                    self.isDownloadingPrefetch = false
-                    NSLog("Podcast: prefetch failed: \(error)")
-                }
-            }
-        }
-    }
-
-    private func requestNextChunk() {
+    /// Request the server eagerly stream all chunks from `fromIndex` onward.
+    /// The server will push CHUNK_READY for each chunk as audio is generated.
+    private func requestStreamChunks(from fromIndex: Int) {
         guard let sessionId = sessionId else { return }
         sendJSON([
-            "type": "NEXT_CHUNK",
-            "session_id": sessionId
+            "type": "STREAM_CHUNKS",
+            "session_id": sessionId,
+            "from_index": fromIndex,
         ])
     }
 
@@ -817,50 +1036,46 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             return
         }
 
-        guard isSessionActive else { return }
-
-        // After interrupt response finishes, request next chunk from revised script
+        // Interrupt response finished — resume the podcast from the chunk
+        // after the interrupt point. If the server has already re-streamed
+        // the revised chunks they're in our cache; otherwise buffer.
         if isPlayingInterruptResponse {
             isPlayingInterruptResponse = false
-            NSLog("Podcast: interrupt response finished, requesting next chunk from revised script")
-            state = .buffering
-            requestNextChunk()
+            NSLog("Podcast: interrupt response finished, advancing to next chunk")
+            advanceAfterPlayback()
             return
         }
 
+        guard isSessionActive || state == .disconnected else { return }
+
         NSLog("Podcast: chunk \(currentChunkIndex) finished playing")
+        advanceAfterPlayback()
+    }
 
-        // Check if we have a prefetched chunk ready
-        if let prefetchURL = prefetchedAudioURL {
-            prefetchedAudioURL = nil
-            currentChunkIndex += 1
+    /// Shared "a chunk/interrupt just finished" handler — picks the next chunk
+    /// from cache, buffers if missing, or completes if at end of script.
+    private func advanceAfterPlayback() {
+        let next = currentChunkIndex + 1
 
-            // Add prefetched transcript lines
-            if !prefetchedTranscriptLines.isEmpty {
-                transcript.append(contentsOf: prefetchedTranscriptLines)
-                currentChunkLines = prefetchedTranscriptLines
-                delegate?.podcastDidUpdateTranscript(transcript)
-                prefetchedTranscriptLines = []
-            }
-
-            do {
-                let data = try Data(contentsOf: prefetchURL)
-                try? FileManager.default.removeItem(at: prefetchURL)
-                NSLog("Podcast: playing prefetched chunk \(currentChunkIndex)")
-                playAudioData(data, chunkIndex: currentChunkIndex)
-            } catch {
-                NSLog("Podcast: failed to play prefetched audio: \(error)")
-                state = .buffering
-                requestNextChunk()
-            }
-        } else if currentChunkIndex + 1 >= totalChunks {
-            // No more chunks
+        if next >= totalChunks {
             NSLog("Podcast: all chunks played, session complete")
             state = .complete
             updateNowPlaying(paused: true)
+            return
+        }
+
+        if chunkAudioByIndex[next] != nil {
+            startPlayingChunk(next)
+            return
+        }
+
+        // Cache miss — could be a slow network / still-generating on server
+        // or a disconnected state. If disconnected, stay that way; otherwise
+        // fall through to buffering.
+        if state == .disconnected {
+            NSLog("Podcast: chunk \(next) not cached and disconnected — staying in .disconnected")
         } else {
-            // Waiting for prefetch to complete
-            NSLog("Podcast: waiting for next chunk (prefetch not ready)")
+            NSLog("Podcast: chunk \(next) not yet cached — buffering")
             state = .buffering
         }
     }
@@ -869,11 +1084,26 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     /// Combine all collected audio segments into a single WAV file.
     /// Uses AVAudioFile to decode any format (WAV, FLAC, etc.) to PCM.
+    ///
+    /// Selection logic:
+    ///  - If playback-order audio (`audioSegments`) has at least as many
+    ///    entries as `totalChunks`, use it — preserves inline interrupt responses.
+    ///  - Otherwise fall back to `chunkAudioByIndex` in chunk order. This is
+    ///    the path taken when the user exports a podcast they downloaded but
+    ///    never fully played through (e.g. cached offline on disconnect).
     func combinedAudioData() -> Data? {
-        guard !audioSegments.isEmpty else { return nil }
+        let segments: [Data]
+        if totalChunks > 0 && audioSegments.count >= totalChunks {
+            segments = audioSegments
+        } else if !chunkAudioByIndex.isEmpty {
+            segments = chunkAudioByIndex.keys.sorted().compactMap { chunkAudioByIndex[$0] }
+        } else {
+            segments = audioSegments
+        }
+        guard !segments.isEmpty else { return nil }
 
         // Single segment — return as-is
-        if audioSegments.count == 1 { return audioSegments[0] }
+        if segments.count == 1 { return segments[0] }
 
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("podcast_export_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -883,7 +1113,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         var pcmBuffers: [AVAudioPCMBuffer] = []
         var processingFormat: AVAudioFormat?
 
-        for (i, segment) in audioSegments.enumerated() {
+        for (i, segment) in segments.enumerated() {
             let tmpFile = tmpDir.appendingPathComponent("seg\(i).mp3")
             do {
                 try segment.write(to: tmpFile)
@@ -958,6 +1188,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     private func reset() {
         removeEscapeMonitor()
+        cancelReconnect()
         disconnect()
         player?.stop()
         cancelLineAdvanceTimers()
@@ -973,13 +1204,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         title = ""
         transcript = []
         audioSegments = []
-        isDownloadingPrefetch = false
-
-        if let prefetchURL = prefetchedAudioURL {
-            try? FileManager.default.removeItem(at: prefetchURL)
-            prefetchedAudioURL = nil
-        }
-        prefetchedTranscriptLines = []
+        chunkAudioByIndex = [:]
+        chunkTranscriptByIndex = [:]
+        lastReceivedChunkIndex = -1
+        chunkDownloadGeneration &+= 1
 
         state = .idle
         clearNowPlaying()

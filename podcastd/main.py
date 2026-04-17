@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 import websockets
@@ -32,12 +33,21 @@ gpu_lock = asyncio.Lock()
 # Track in-flight prefetch tasks per session so we can await them
 prefetch_tasks: dict[str, asyncio.Task] = {}
 
-# Track background work tasks (chunk delivery, interrupt) per session
+# Track background work tasks (chunk delivery, interrupt, stream) per session
 # so we can cancel them on disconnect
 work_tasks: dict[str, list[asyncio.Task]] = {}
 
 # Guard against duplicate NEXT_CHUNK — only one delivery in-flight per session
 chunk_delivery_active: set[str] = set()
+
+# Guard against duplicate eager streaming work per session
+stream_active: set[str] = set()
+
+# How long we keep a disconnected session alive so the client can RESUME_SESSION.
+# Generation work is cancelled on disconnect; the grace period only preserves
+# already-generated chunk audio + transcript for resume.
+RECONNECT_GRACE_SECS = 300
+SESSION_SWEEP_INTERVAL = 60
 
 
 # ---------- Progress Reporting ----------
@@ -97,7 +107,49 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
                 elif msg_type == "INGEST":
                     session = await _handle_ingest(websocket, msg)
 
+                elif msg_type == "STREAM_CHUNKS":
+                    sid = msg.get("session_id")
+                    from_index = int(msg.get("from_index", 0))
+                    s = sessions.get(sid)
+                    if s:
+                        # Cancel any in-flight single-chunk delivery — stream takes over
+                        _cancel_work_tasks(sid)
+                        _spawn_work(sid, _stream_chunks(websocket, s, from_index))
+                    else:
+                        await _safe_send(websocket, {"type": "ERROR", "code": "NO_SESSION", "message": "Session not found"})
+
+                elif msg_type == "RESUME_SESSION":
+                    sid = msg.get("session_id")
+                    last_received = int(msg.get("last_received_chunk_index", -1))
+                    s = sessions.get(sid)
+                    if s:
+                        s.disconnected_at = None
+                        session = s  # so the finally handler marks it disconnected on exit
+                        total = len(s.chunks)
+                        log.info("Resuming session %s (last_received=%d, total=%d)", sid, last_received, total)
+                        await _safe_send(websocket, {
+                            "type": "SESSION_RESUMED",
+                            "session_id": sid,
+                            "title": s.title,
+                            "total_chunks": total,
+                            "current_chunk_index": s.current_chunk_index,
+                            "last_streamed_chunk_index": s.last_streamed_chunk_index,
+                        })
+                        # Re-stream from the chunk after the last one the client confirmed.
+                        _cancel_work_tasks(sid)
+                        _spawn_work(sid, _stream_chunks(websocket, s, last_received + 1))
+                    else:
+                        await _safe_send(websocket, {"type": "ERROR", "code": "NO_SESSION", "message": "Session not found or expired"})
+
+                elif msg_type == "CHUNK_PLAYED":
+                    sid = msg.get("session_id")
+                    idx = int(msg.get("chunk_index", -1))
+                    s = sessions.get(sid)
+                    if s and 0 <= idx < len(s.chunks):
+                        s.mark_chunk_delivered(idx)
+
                 elif msg_type == "NEXT_CHUNK":
+                    # Legacy one-at-a-time delivery — kept for backward compatibility.
                     sid = msg.get("session_id")
                     s = sessions.get(sid)
                     if s:
@@ -111,9 +163,15 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
                 elif msg_type == "INTERRUPT":
                     sid = msg.get("session_id")
                     question = msg.get("question", "")
+                    at_chunk_index = msg.get("at_chunk_index")
                     s = sessions.get(sid)
                     if s and question:
-                        # Cancel ALL in-flight work (prefetch + on-demand chunk delivery)
+                        if isinstance(at_chunk_index, int) and 0 <= at_chunk_index < len(s.chunks):
+                            # Client tells us the actual playback position. Clamp so we
+                            # never move backwards (a late CHUNK_PLAYED could still win).
+                            if at_chunk_index > s.current_chunk_index:
+                                s.mark_chunk_delivered(at_chunk_index)
+                        # Cancel ALL in-flight work (prefetch + delivery + stream)
                         # before starting interrupt, so nothing holds the gpu_lock
                         _cancel_prefetches(sid)
                         _cancel_work_tasks(sid)
@@ -139,8 +197,18 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
     except websockets.ConnectionClosed:
         log.info("Client disconnected")
     finally:
+        # Don't immediately cleanup — keep the session alive for RECONNECT_GRACE_SECS
+        # so the client can RESUME_SESSION after a transient network failure.
+        # In-flight GPU work is cancelled so the lock doesn't stall future requests;
+        # already-generated chunk audio is preserved.
         if session and session.session_id in sessions:
-            _cleanup_session(session.session_id)
+            sid = session.session_id
+            _cancel_prefetches(sid)
+            _cancel_work_tasks(sid)
+            chunk_delivery_active.discard(sid)
+            stream_active.discard(sid)
+            session.mark_disconnected()
+            log.info("Session %s disconnected — grace period %ds", sid, RECONNECT_GRACE_SECS)
 
 
 async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
@@ -227,10 +295,12 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             "audio_url": audio_file,
             "transcript": session.chunks[0],
         })
+        session.last_streamed_chunk_index = 0
 
-        # Start prefetching chunk 1 in background
+        # Eagerly generate and push remaining chunks so the client can cache
+        # the full podcast without needing to ask chunk-by-chunk.
         if len(session.chunks) > 1:
-            _start_prefetch(session, 1)
+            _spawn_work(session.session_id, _stream_chunks(websocket, session, 1))
 
         return session
 
@@ -249,6 +319,84 @@ async def _deliver_next_chunk(websocket, session: PodcastSession) -> None:
         await _deliver_next_chunk_inner(websocket, session)
     finally:
         chunk_delivery_active.discard(sid)
+
+
+async def _stream_chunks(websocket, session: PodcastSession, from_index: int) -> None:
+    """Eagerly generate and push every chunk from from_index until the end.
+
+    One chunk at a time under gpu_lock. Skips chunks already generated
+    (chunk_audio_files cache). Stops cleanly on websocket closure so the
+    session can be resumed; on cancellation propagates CancelledError."""
+    sid = session.session_id
+    if sid in stream_active:
+        log.info("Stream already active for session %s — skipping duplicate", sid)
+        return
+    stream_active.add(sid)
+    idx = max(from_index, 0)
+    try:
+        total = len(session.chunks)
+        while idx < total:
+            if sid not in sessions:
+                return
+
+            if idx in session.chunk_audio_files:
+                audio_file = session.chunk_audio_files[idx]
+            else:
+                chunk_model, chunk_quantize = resolve_preset(session.model_preset)
+                await _safe_send(websocket, {
+                    "type": "PROGRESS", "session_id": sid,
+                    "stage": "audio_generating", "percent": -1,
+                    "message": f"Generating audio (chunk {idx + 1}/{total})...",
+                })
+                progress_cb = _make_progress_cb(websocket, sid, f"chunk {idx + 1}/{total}")
+                async with gpu_lock:
+                    if sid not in sessions:
+                        return
+                    audio_file = await generate_audio(
+                        session.chunks[idx], model=chunk_model,
+                        quantize_llm=chunk_quantize, session_id=sid,
+                        on_progress=progress_cb,
+                        host_a_name=getattr(session, "host_a_name", None),
+                    )
+                session.chunk_audio_files[idx] = audio_file
+
+            if sid not in sessions:
+                return
+
+            sent = await _safe_send(websocket, {
+                "type": "CHUNK_READY",
+                "session_id": sid,
+                "chunk_index": idx,
+                "audio_url": audio_file,
+                "transcript": session.chunks[idx],
+            })
+            if not sent:
+                # WebSocket closed — stop eager streaming. The connection-close
+                # handler marks the session disconnected; remaining chunks can
+                # be resumed via RESUME_SESSION.
+                log.info("Stream halted — websocket closed at chunk %d", idx)
+                return
+
+            if idx > session.last_streamed_chunk_index:
+                session.last_streamed_chunk_index = idx
+            idx += 1
+
+        # All chunks streamed — send end-of-stream sentinel
+        if sid in sessions:
+            session.state = SessionState.COMPLETE
+            await _safe_send(websocket, {
+                "type": "CHUNK_READY",
+                "session_id": sid,
+                "chunk_index": total,
+                "audio_url": "",
+                "transcript": [],
+            })
+            log.info("Stream complete for session %s (%d chunks)", sid, total)
+    except asyncio.CancelledError:
+        log.info("Stream cancelled for session %s at chunk %d", sid, idx)
+        raise
+    finally:
+        stream_active.discard(sid)
 
 
 async def _deliver_next_chunk_inner(websocket, session: PodcastSession) -> None:
@@ -371,10 +519,14 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
 
         session.state = SessionState.PLAYING
 
-        # Start prefetching next chunk after interrupt
+        # Interrupt replaced all chunks past current_chunk_index; the client
+        # must drop its cache of those indices too. Resume eager streaming
+        # so the revised chunks are pushed down to the client without another
+        # round-trip.
         next_idx = session.current_chunk_index + 1
-        if next_idx < len(session.chunks) and next_idx not in session.chunk_audio_files:
-            _start_prefetch(session, next_idx)
+        session.last_streamed_chunk_index = session.current_chunk_index
+        if next_idx < len(session.chunks):
+            _spawn_work(session.session_id, _stream_chunks(websocket, session, next_idx))
 
     except Exception as e:
         log.exception("Interrupt handling failed")
@@ -463,6 +615,7 @@ def _cleanup_session(session_id: str) -> None:
     # Remove session first so in-flight tasks see it's gone and bail out
     session = sessions.pop(session_id, None)
     chunk_delivery_active.discard(session_id)
+    stream_active.discard(session_id)
     _cancel_prefetches(session_id)
     _cancel_work_tasks(session_id)
     # Cancel queued prompts AND interrupt the currently running GPU job
@@ -470,6 +623,26 @@ def _cleanup_session(session_id: str) -> None:
     asyncio.create_task(interrupt_comfyui())
     if session:
         log.info("Cleaned up session %s", session_id)
+
+
+async def _session_sweeper() -> None:
+    """Evict sessions that have been disconnected longer than RECONNECT_GRACE_SECS."""
+    while True:
+        try:
+            await asyncio.sleep(SESSION_SWEEP_INTERVAL)
+            now = time.monotonic()
+            expired = [
+                sid for sid, s in sessions.items()
+                if s.disconnected_at is not None
+                and now - s.disconnected_at > RECONNECT_GRACE_SECS
+            ]
+            for sid in expired:
+                log.info("Evicting disconnected session %s after grace period", sid)
+                _cleanup_session(sid)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Session sweeper iteration failed")
 
 
 # ---------- HTTP Server ----------
@@ -596,10 +769,15 @@ async def main() -> None:
     site = web.TCPSite(runner, cfg.HTTP_HOST, cfg.HTTP_PORT)
     await site.start()
 
+    sweeper_task = asyncio.create_task(_session_sweeper())
+
     # Start WebSocket server
-    async with websockets.serve(ws_handler, cfg.WS_HOST, cfg.WS_PORT):
-        log.info("podcastd ready")
-        await asyncio.Future()  # run forever
+    try:
+        async with websockets.serve(ws_handler, cfg.WS_HOST, cfg.WS_PORT):
+            log.info("podcastd ready")
+            await asyncio.Future()  # run forever
+    finally:
+        sweeper_task.cancel()
 
 
 if __name__ == "__main__":

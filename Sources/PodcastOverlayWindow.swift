@@ -13,6 +13,11 @@ class PodcastOverlayViewModel: ObservableObject {
     @Published var progressMessage: String = ""
     @Published var progressPercent: Int = -1
     @Published var chunkProgress: String = ""
+    // True when the full podcast audio is available locally and can be exported.
+    // Decoupled from state so .disconnected / .error with cached chunks still enable export.
+    @Published var canExportAudio: Bool = false
+    // True when at least one chunk is cached — enables partial export, replay from start, etc.
+    @Published var hasAnyAudio: Bool = false
 
     @Published var isPaused: Bool = false
 
@@ -95,34 +100,43 @@ struct PodcastOverlayView: View {
 
                 stateBadge
 
-                if viewModel.state == .playing || viewModel.state == .complete {
+                if viewModel.state == .playing
+                    || viewModel.state == .complete
+                    || (viewModel.state == .disconnected && viewModel.hasAnyAudio) {
                     Button(action: {
                         viewModel.onPlayPause?()
                     }) {
-                        Image(systemName: viewModel.state == .complete || viewModel.isPaused ? "play.fill" : "pause.fill")
+                        Image(systemName: (viewModel.state == .complete || viewModel.state == .disconnected || viewModel.isPaused) ? "play.fill" : "pause.fill")
                             .foregroundColor(.secondary)
                             .font(.system(size: 13))
                             .frame(width: 28, height: 24)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help(viewModel.state == .complete ? "Replay" : (viewModel.isPaused ? "Resume" : "Pause"))
+                    .help((viewModel.state == .complete || viewModel.state == .disconnected) ? "Replay" : (viewModel.isPaused ? "Resume" : "Pause"))
                 }
 
-                // Export buttons — always visible once playing, audio greyed out until complete
-                if viewModel.state == .playing || viewModel.state == .complete
-                    || viewModel.state == .buffering || viewModel.state == .listening
-                    || viewModel.state == .processingInterrupt {
+                // Export buttons — visible once the session is producing audio, or
+                // after a disconnect/error if any audio made it to the local cache.
+                // Enabled whenever all chunks are cached locally (canExportAudio).
+                let showExportRow = viewModel.state == .playing
+                    || viewModel.state == .complete
+                    || viewModel.state == .buffering
+                    || viewModel.state == .listening
+                    || viewModel.state == .processingInterrupt
+                    || viewModel.state == .disconnected
+                    || (viewModel.state.isError && viewModel.hasAnyAudio)
+                if showExportRow {
                     Button(action: { viewModel.onExportAudio?() }) {
                         Image(systemName: "arrow.down.doc.fill")
-                            .foregroundColor(viewModel.state == .complete ? .secondary : .secondary.opacity(0.3))
+                            .foregroundColor(viewModel.canExportAudio ? .secondary : .secondary.opacity(0.3))
                             .font(.system(size: 13))
                             .frame(width: 28, height: 24)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.state != .complete)
-                    .help("Download full audio")
+                    .disabled(!viewModel.canExportAudio)
+                    .help(viewModel.canExportAudio ? "Download full audio" : "Download (waiting for all chunks)")
 
                     Button(action: { viewModel.onExportMarkdown?() }) {
                         Image(systemName: "arrow.down.doc")
@@ -219,6 +233,19 @@ struct PodcastOverlayView: View {
                         transcriptView
                         Divider()
                         interruptProgressIndicator
+                    }
+
+                case .disconnected:
+                    if !viewModel.transcript.isEmpty {
+                        VStack(spacing: 0) {
+                            transcriptView
+                            Divider()
+                            disconnectedFooter
+                        }
+                    } else {
+                        disconnectedFooter
+                            .padding(12)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
                 case .error(let msg):
@@ -393,6 +420,32 @@ struct PodcastOverlayView: View {
         .background(Color.orange.opacity(0.05))
     }
 
+    private var disconnectedFooter: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi.slash")
+                .foregroundColor(.orange)
+                .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(viewModel.canExportAudio
+                     ? "Reconnecting… full audio cached locally"
+                     : (viewModel.hasAnyAudio
+                        ? "Reconnecting… partial audio cached"
+                        : "Reconnecting…"))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                Text(viewModel.canExportAudio
+                     ? "You can export or replay without waiting."
+                     : "Playback will resume when the connection comes back.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.05))
+    }
+
     private var pttHint: some View {
         VStack(spacing: 0) {
             Divider()
@@ -436,6 +489,7 @@ struct PodcastOverlayView: View {
         case .connecting, .ingesting: return 100
         case .buffering: return viewModel.transcript.isEmpty ? 100 : 330
         case .error: return 120
+        case .disconnected: return viewModel.transcript.isEmpty ? 120 : 330
         case .playing, .complete: return 300
         case .listening, .processingInterrupt: return 330
         }
@@ -470,6 +524,7 @@ struct PodcastOverlayView: View {
         case .listening: return ("Listening", .red)
         case .processingInterrupt: return ("Processing", .orange)
         case .complete: return ("Complete", .blue)
+        case .disconnected: return ("Reconnecting", .orange)
         case .error: return ("Error", .red)
         }
     }
@@ -549,6 +604,13 @@ class PodcastOverlayWindow {
     func updateChunkProgress(current: Int, total: Int) {
         DispatchQueue.main.async { [self] in
             viewModel.updateChunkProgress(current: current, total: total)
+        }
+    }
+
+    func updateCacheStatus(canExport: Bool, hasAny: Bool) {
+        DispatchQueue.main.async { [self] in
+            viewModel.canExportAudio = canExport
+            viewModel.hasAnyAudio = hasAny
         }
     }
 

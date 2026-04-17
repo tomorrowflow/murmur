@@ -1545,6 +1545,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         podcastOverlay?.updateChunkProgress(current: current, total: total)
     }
 
+    func podcastDidUpdateCacheStatus(canExport: Bool, hasAny: Bool) {
+        podcastOverlay?.updateCacheStatus(canExport: canExport, hasAny: hasAny)
+    }
+
     func podcastDidError(_ message: String) {
         stopWaveformAnimation()
         // Error is shown inline in the podcast overlay — no separate notification needed

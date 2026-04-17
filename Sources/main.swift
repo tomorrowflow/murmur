@@ -617,7 +617,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             recordingManager.toggleRecording()
         } else {
             PTTTonePlayer.shared.playStartTone()
-            recordingManager.toggleRecording()
+            DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) {
+                recordingManager.toggleRecording()
+            }
         }
     }
 
@@ -686,7 +688,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             audioManager.toggleRecording()
         } else {
             PTTTonePlayer.shared.playStartTone()
-            audioManager.toggleRecording()
+            DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) { [weak self] in
+                self?.audioManager.toggleRecording()
+            }
         }
     }
 
@@ -1800,7 +1804,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         readAloudInterruptActive = true
         readAloudOverlay?.updateState(.listening)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) { [weak self] in
             guard let self = self, self.readAloudInterruptActive else { return }
             manager.beginInterrupt()
             self.stopTranscriptionIndicator()
@@ -1886,7 +1890,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         podcastOverlay?.updateState(.listening)
 
         // Delay interrupt + recording start slightly so the start tone is audible
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) { [weak self] in
             guard let self = self, self.podcastInterruptActive else { return }
             manager.beginInterrupt()
             self.stopTranscriptionIndicator()
@@ -2068,7 +2072,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         draftEditInterruptActive = true
         draftEditingOverlay?.updateState(.listening)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) { [weak self] in
             guard let self = self, self.draftEditInterruptActive else { return }
             manager.beginEditInterrupt()
             self.stopTranscriptionIndicator()

@@ -11,22 +11,49 @@ class PTTTonePlayer {
 
     private init() {}
 
+    // Silence prepended before any Bluetooth tone so the output device has
+    // time to wake up AND so the tone doesn't arrive before the user has
+    // registered the interaction. AirPods in particular need a long lead-in.
+    private let bluetoothLeadInSecs: Double = 1.0
+
+    /// Extra buffer after the tone ends before callers should start recording.
+    /// The AVAudioPlayer finishes playback slightly before the bytes hit the
+    /// output device, so we pad to avoid clipping the tone when the mic opens.
+    private let postToneBufferSecs: Double = 0.25
+
+    // Note durations used by each tone. Callers need these to compute how long
+    // the tone will audibly play so they can schedule the recording after it.
+    private let startToneNoteDuration: Double = 0.07
+    private let stopToneNoteDuration: Double = 0.09
+    private let interruptToneNoteDuration: Double = 0.06
+
     /// Play a short rising two-tone beep (recording started).
     func playStartTone() {
         let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
-        playTone(frequencies: [880, 1175], noteDuration: 0.07, prependSilence: bluetooth ? 0.5 : 0)
+        playTone(frequencies: [880, 1175], noteDuration: startToneNoteDuration, prependSilence: bluetooth ? bluetoothLeadInSecs : 0)
     }
 
     /// Play a short falling single-tone beep (recording stopped).
     func playStopTone() {
         let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
-        playTone(frequencies: [784], noteDuration: 0.09, prependSilence: bluetooth ? 0.5 : 0)
+        playTone(frequencies: [784], noteDuration: stopToneNoteDuration, prependSilence: bluetooth ? bluetoothLeadInSecs : 0)
     }
 
     /// Play a confirmation chirp (podcast interrupt received, processing started).
     func playInterruptTone() {
         let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
-        playTone(frequencies: [660, 880, 660], noteDuration: 0.06, prependSilence: bluetooth ? 0.5 : 0)
+        playTone(frequencies: [660, 880, 660], noteDuration: interruptToneNoteDuration, prependSilence: bluetooth ? bluetoothLeadInSecs : 0)
+    }
+
+    /// How long callers should wait after `playStartTone()` before opening the
+    /// microphone. On Bluetooth this covers the lead-in silence + note
+    /// duration + a small buffer so the tone is not cut when the output device
+    /// switches from A2DP to HFP.
+    func startToneDelayBeforeRecording() -> TimeInterval {
+        let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
+        let leadIn = bluetooth ? bluetoothLeadInSecs : 0
+        let toneDuration = 2 * startToneNoteDuration
+        return leadIn + toneDuration + postToneBufferSecs
     }
 
     private func playTone(frequencies: [Double], noteDuration: Double, prependSilence: Double = 0) {

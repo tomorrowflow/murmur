@@ -156,16 +156,6 @@ struct PodcastSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-
-            Divider()
-
-            HStack {
-                Spacer()
-                Button("Save") {
-                    viewModel.save()
-                }
-                .padding()
-            }
         }
         .onAppear {
             viewModel.load()
@@ -174,13 +164,18 @@ struct PodcastSettingsView: View {
 }
 
 class PodcastSettingsViewModel: NSObject, ObservableObject, AVAudioPlayerDelegate {
-    @Published var wsURL: String = ""
-    @Published var audioBaseURL: String = ""
-    @Published var hostAName: String = ""
-    @Published var hostBName: String = ""
-    @Published var selectedModel: String = "large-q4"
-    @Published var podcastLength: String = "auto"
-    @Published var webSearchEnabled: Bool = false
+    // Settings persist to UserDefaults immediately on change via didSet —
+    // no explicit Save button. `isLoading` suppresses the write-back during
+    // initial population so load() stays idempotent.
+    private var isLoading = false
+
+    @Published var wsURL: String = "" { didSet { persist(wsURL, forKey: "podcast.wsURL"); refreshStatusIfLoaded() } }
+    @Published var audioBaseURL: String = "" { didSet { persist(audioBaseURL, forKey: "podcast.audioBaseURL") } }
+    @Published var hostAName: String = "" { didSet { persist(hostAName, forKey: "podcast.hostAName") } }
+    @Published var hostBName: String = "" { didSet { persist(hostBName, forKey: "podcast.hostBName") } }
+    @Published var selectedModel: String = "large-q4" { didSet { persist(selectedModel, forKey: "podcast.model") } }
+    @Published var podcastLength: String = "auto" { didSet { persist(podcastLength, forKey: "podcast.length") } }
+    @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, forKey: "podcast.webSearchEnabled") } }
     @Published var statusText: String = "Not configured"
     @Published var statusColor: Color = .gray
     @Published var speaker1VoiceStatus: String = "Using default voice"
@@ -190,7 +185,19 @@ class PodcastSettingsViewModel: NSObject, ObservableObject, AVAudioPlayerDelegat
     @Published var playingSpeaker: Int? = nil
     private var samplePlayer: AVAudioPlayer?
 
+    private func persist(_ value: Any, forKey key: String) {
+        guard !isLoading else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func refreshStatusIfLoaded() {
+        guard !isLoading else { return }
+        refreshStatus()
+    }
+
     func load() {
+        isLoading = true
+        defer { isLoading = false }
         let defaults = UserDefaults.standard
         wsURL = defaults.string(forKey: "podcast.wsURL") ?? ""
         audioBaseURL = defaults.string(forKey: "podcast.audioBaseURL") ?? ""
@@ -201,18 +208,6 @@ class PodcastSettingsViewModel: NSObject, ObservableObject, AVAudioPlayerDelegat
         webSearchEnabled = defaults.bool(forKey: "podcast.webSearchEnabled")
         refreshStatus()
         fetchVoiceSampleStatus()
-    }
-
-    func save() {
-        let defaults = UserDefaults.standard
-        defaults.set(wsURL, forKey: "podcast.wsURL")
-        defaults.set(audioBaseURL, forKey: "podcast.audioBaseURL")
-        defaults.set(hostAName, forKey: "podcast.hostAName")
-        defaults.set(hostBName, forKey: "podcast.hostBName")
-        defaults.set(selectedModel, forKey: "podcast.model")
-        defaults.set(podcastLength, forKey: "podcast.length")
-        defaults.set(webSearchEnabled, forKey: "podcast.webSearchEnabled")
-        refreshStatus()
     }
 
     func refreshStatus() {

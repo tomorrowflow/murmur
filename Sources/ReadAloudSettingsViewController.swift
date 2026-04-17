@@ -140,16 +140,6 @@ struct ReadAloudSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-
-            Divider()
-
-            HStack {
-                Spacer()
-                Button("Save") {
-                    viewModel.save()
-                }
-                .padding()
-            }
         }
         .onAppear {
             viewModel.load()
@@ -162,17 +152,29 @@ struct ReadAloudSettingsView: View {
 }
 
 class ReadAloudSettingsViewModel: ObservableObject {
-    @Published var ollamaURL: String = ""
-    @Published var ollamaModel: String = ""
-    @Published var webSearchEnabled: Bool = false
-    @Published var ollamaAPIKey: String = ""
-    @Published var resumeBehavior: String = "ask"
-    @Published var draftEditingEditor: String = "auto"
+    // Changes to these properties are persisted to UserDefaults immediately
+    // via didSet — no explicit Save action is exposed. `isLoading` suppresses
+    // the write-back during initial population so load() stays idempotent.
+    private var isLoading = false
+
+    @Published var ollamaURL: String = "" { didSet { persist(ollamaURL, forKey: "readAloud.ollamaURL") } }
+    @Published var ollamaModel: String = "" { didSet { persist(ollamaModel, forKey: "readAloud.ollamaModel") } }
+    @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, forKey: "readAloud.webSearchEnabled") } }
+    @Published var ollamaAPIKey: String = "" { didSet { persist(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
+    @Published var resumeBehavior: String = "ask" { didSet { persist(resumeBehavior, forKey: "readAloud.resumeBehavior") } }
+    @Published var draftEditingEditor: String = "auto" { didSet { persist(draftEditingEditor, forKey: "draftEditing.editor") } }
     @Published var obsidianPluginReachable: Bool = false
     @Published var availableModels: [String] = []
     @Published var isLoadingModels: Bool = false
 
+    private func persist(_ value: Any, forKey key: String) {
+        guard !isLoading else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
     func load() {
+        isLoading = true
+        defer { isLoading = false }
         let defaults = UserDefaults.standard
         ollamaURL = defaults.string(forKey: "readAloud.ollamaURL") ?? "http://localhost:11434"
         ollamaModel = defaults.string(forKey: "readAloud.ollamaModel") ?? ""
@@ -180,16 +182,6 @@ class ReadAloudSettingsViewModel: ObservableObject {
         ollamaAPIKey = defaults.string(forKey: "readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"
         draftEditingEditor = defaults.string(forKey: "draftEditing.editor") ?? "auto"
-    }
-
-    func save() {
-        let defaults = UserDefaults.standard
-        defaults.set(ollamaURL, forKey: "readAloud.ollamaURL")
-        defaults.set(ollamaModel, forKey: "readAloud.ollamaModel")
-        defaults.set(webSearchEnabled, forKey: "readAloud.webSearchEnabled")
-        defaults.set(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey")
-        defaults.set(resumeBehavior, forKey: "readAloud.resumeBehavior")
-        defaults.set(draftEditingEditor, forKey: "draftEditing.editor")
     }
 
     func checkObsidianPlugin() {

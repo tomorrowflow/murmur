@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from config import cfg
@@ -10,6 +11,37 @@ from llm_client import LLMProgressCallback, llm_chat
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "script_system.txt").read_text()
+
+# Below this size the raw source goes straight into the script LLM call.
+# Above it, we distill the content first so nothing is lost to truncation.
+DISTILL_THRESHOLD_CHARS = 18_000
+
+# Target size for each distillation LLM call. Chosen to leave headroom for the
+# system prompt + output budget inside qwen3:32b's context window.
+DISTILL_CHUNK_CHARS = 22_000
+
+# Max size of the final source content fed to the script LLM call, regardless
+# of whether it was distilled or passed through.
+MAX_SCRIPT_CONTEXT_CHARS = 32_000
+
+DISTILL_SYSTEM_PROMPT = (
+    "You receive source material (an article, paper, transcript, meeting notes, "
+    "or any mix of these). Extract a dense, structured brief that preserves "
+    "everything a later writer would need to discuss the material faithfully.\n\n"
+    "Preserve:\n"
+    "- Named entities (people, projects, organisations, places, dates)\n"
+    "- Specific numbers, commitments, decisions, quotes\n"
+    "- Distinctive phrasings from the author or speakers\n"
+    "- Logical structure and distinct sections. If the material clearly contains "
+    "  separate parts (e.g. framing narrative and a discussion/transcript), keep "
+    "  them visibly separated in your output.\n\n"
+    "Rules:\n"
+    "- Do NOT summarise in your own words when you can cite original phrasing.\n"
+    "- Do NOT collapse multiple speakers or perspectives into one voice.\n"
+    "- Do NOT add interpretation, opinion, or facts not in the source.\n"
+    "- Output plain prose and bullet points. No JSON, no markdown headers.\n"
+    "- Target ~30% of the input length — compress carefully, not aggressively."
+)
 
 
 def _resolve_target_minutes(target_length: str, content: str) -> int:
@@ -93,12 +125,102 @@ def sanitize_dialogue(text: str) -> str:
     return text.strip()
 
 
+def _split_on_boundaries(text: str, target_chars: int) -> list[str]:
+    """Split text into ≤ target_chars chunks, preferring natural boundaries.
+
+    Tries paragraph breaks first, then single newlines, then sentence ends,
+    finally a hard cut. Never returns an empty chunk."""
+    if len(text) <= target_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > target_chars:
+        # Look at the target-chars window and walk backwards for a good split.
+        window = remaining[:target_chars]
+        # Preference order: paragraph, line, sentence end, whitespace, hard cut.
+        split_at = -1
+        for pattern in (r"\n\s*\n", r"\n", r"[\.!\?]\s", r"\s"):
+            for m in re.finditer(pattern, window):
+                split_at = m.end()
+        if split_at <= 0 or split_at < target_chars // 2:
+            # No sensible boundary in the second half of the window —
+            # just hard-cut at target so we don't end up with lopsided chunks.
+            split_at = target_chars
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:]
+    if remaining.strip():
+        chunks.append(remaining.strip())
+    return chunks
+
+
+def _wrap_distill_progress(
+    outer: LLMProgressCallback,
+    part_index: int,
+    part_count: int,
+) -> LLMProgressCallback:
+    """Forward LLM streaming progress with a part-number label folded in."""
+    if outer is None:
+        return None
+
+    def inner(char_count: int, phase: str):
+        # Encode part info into the phase string so the main.py callback can
+        # render e.g. "Distilling source (part 2/3) — 1,234 chars".
+        label = f"distill:{part_index + 1}/{part_count}"
+        if phase == "thinking":
+            label += ":thinking"
+        try:
+            outer(char_count, label)
+        except Exception:
+            log.exception("distill progress wrapper raised")
+    return inner
+
+
+async def prepare_source_content(
+    content: str,
+    on_progress: LLMProgressCallback = None,
+) -> str:
+    """Return content ready for the script LLM, distilling if it's long.
+
+    Below DISTILL_THRESHOLD_CHARS the source is passed through untouched.
+    Above it, the source is split into chunks and each chunk is distilled via
+    the same LLM the script generator uses. The distilled parts are
+    concatenated with explicit separators so the script writer can see which
+    pieces of source material were distinct."""
+    if len(content) <= DISTILL_THRESHOLD_CHARS:
+        return content
+
+    parts = _split_on_boundaries(content, DISTILL_CHUNK_CHARS)
+    log.info("Distilling source: %d chars → %d parts (target ≤%d chars each)",
+             len(content), len(parts), DISTILL_CHUNK_CHARS)
+
+    briefs: list[str] = []
+    for i, part in enumerate(parts):
+        user_msg = (
+            f"Source part {i + 1} of {len(parts)} "
+            f"({len(part)} characters).\n\n{part}"
+        )
+        brief = await llm_chat(
+            system=DISTILL_SYSTEM_PROMPT,
+            user=user_msg,
+            model=cfg.LLM_MODEL,
+            on_progress=_wrap_distill_progress(on_progress, i, len(parts)),
+        )
+        briefs.append(brief.strip())
+        log.info("Distilled part %d/%d: %d chars → %d chars",
+                 i + 1, len(parts), len(part), len(brief))
+
+    separator = "\n\n--- Next section of source material ---\n\n"
+    return separator.join(briefs)
+
+
 async def generate_script(
     content: str,
     target_length: str = "auto",
     host_a_name: str | None = None,
     host_b_name: str | None = None,
     on_progress: LLMProgressCallback = None,
+    on_distill_progress: LLMProgressCallback = None,
 ) -> tuple[str, list[dict], int]:
     """Generate a podcast script from source content.
 
@@ -111,13 +233,17 @@ async def generate_script(
     log.info("Target length: %s → %d minutes (content: %d words, hosts: %s/%s)",
              target_length, target_minutes, len(content.split()), host_a, host_b)
 
+    # Distill long content so the full document survives — no hard-coded
+    # "is this a transcript?" logic; the LLM decides how to structure the brief.
+    prepared = await prepare_source_content(content, on_progress=on_distill_progress)
+
     system = SYSTEM_PROMPT.format(
         HOST_A_NAME=host_a,
         HOST_B_NAME=host_b,
         target_duration_minutes=target_minutes,
     )
 
-    user_msg = f"Source content to discuss:\n\n{content[:15000]}"
+    user_msg = f"Source content to discuss:\n\n{prepared[:MAX_SCRIPT_CONTEXT_CHARS]}"
 
     raw = await llm_chat(system=system, user=user_msg, model=cfg.LLM_MODEL, on_progress=on_progress)
 

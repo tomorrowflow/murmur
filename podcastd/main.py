@@ -81,6 +81,41 @@ def _estimate_script_chars(target_minutes: int) -> int:
     return min(rough, 32000)
 
 
+def _make_distill_progress_cb(websocket, session_id: str, source_chars: int):
+    """Callback that reports source-distillation progress.
+
+    The distillation step's progress callback encodes part info in the `phase`
+    string (e.g. "distill:2/3:thinking"), so we decode it here into a PROGRESS
+    message the overlay can render alongside its spinner."""
+    # Rough estimate: each distilled part outputs ~30% of the input chunk size.
+    # This is only used to drive the progress bar percent.
+    estimated_out = max(2000, int(source_chars * 0.30))
+
+    def on_progress(char_count: int, phase: str):
+        parts_info = ""
+        is_thinking = False
+        if phase.startswith("distill:"):
+            body = phase[len("distill:"):]
+            if ":" in body:
+                body, suffix = body.split(":", 1)
+                is_thinking = suffix == "thinking"
+            parts_info = f" ({body})"
+        pct = min(int(char_count / max(1, estimated_out) * 100), 95)
+        phase_hint = " (thinking)" if is_thinking else ""
+        msg = f"Distilling source{parts_info}{phase_hint} — {char_count:,} chars"
+        try:
+            asyncio.create_task(_safe_send(websocket, {
+                "type": "PROGRESS",
+                "session_id": session_id,
+                "stage": "distilling",
+                "percent": pct,
+                "message": msg,
+            }))
+        except RuntimeError:
+            pass
+    return on_progress
+
+
 def _make_llm_progress_cb(
     websocket,
     session_id: str,
@@ -303,10 +338,15 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             label=f"~{target_minutes} min podcast",
             estimated_chars=_estimate_script_chars(target_minutes),
         )
+        distill_progress = _make_distill_progress_cb(
+            websocket, session.session_id,
+            source_chars=len(text),
+        )
         title, script, _ = await generate_script(
             text, target_length=target_length,
             host_a_name=host_a_name, host_b_name=host_b_name,
             on_progress=script_progress,
+            on_distill_progress=distill_progress,
         )
         session.title = title
         session.original_script = script

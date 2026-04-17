@@ -910,6 +910,16 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     /// The duration of silence prepended to the first chunk / replay audio.
     private let prependedSilenceDuration: TimeInterval = 0.4
 
+    /// Multiplier applied to each line's scheduled start offset to nudge
+    /// highlights slightly later than the raw char-weighted estimate.
+    /// Field observation: purely char-proportional timing ran ~5-10% ahead
+    /// of the actual audio, so highlights arrived before the speaker did.
+    private let lineAdvanceDelayFactor: Double = 1.07
+
+    /// Keep the last-line timer this far before the chunk's audio end so it
+    /// still fires before the chunk-finished delegate cancels pending timers.
+    private let lineAdvanceTailBuffer: TimeInterval = 0.15
+
     private func scheduleLineAdvancement(duration: TimeInterval, hasPrependedSilence: Bool = false) {
         cancelLineAdvanceTimers()
         let lines = currentChunkLines
@@ -942,18 +952,24 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             delegate?.podcastDidActivateLine(first.id)
         }
 
-        var elapsed: TimeInterval = silenceOffset
+        // Clamp subsequent timers so the last line always fires before the
+        // audio player finishes the chunk (otherwise cancelLineAdvanceTimers
+        // would swallow a highlight that was shifted past the chunk end).
+        let maxDelay = silenceOffset + max(0, speechDuration - lineAdvanceTailBuffer)
+
+        var speechElapsed: TimeInterval = 0
         for (i, line) in lines.enumerated() {
             let lineId = line.id
-            let delay = elapsed
             if i > 0 { // first line already activated above
+                let raw = silenceOffset + speechElapsed * lineAdvanceDelayFactor
+                let delay = min(raw, maxDelay)
                 let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                     self?.activeLineId = lineId
                     self?.delegate?.podcastDidActivateLine(lineId)
                 }
                 lineAdvanceTimers.append(timer)
             }
-            elapsed += (weights[i] / totalWeight) * speechDuration
+            speechElapsed += (weights[i] / totalWeight) * speechDuration
         }
     }
 

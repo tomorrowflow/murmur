@@ -3,3 +3,12 @@
 build/
 .vscode/
 .env
+
+# Screenshots and personal test material dropped into docs/ should never
+# land in git history. Icons/logos live elsewhere; anything image-ish in
+# docs/ is assumed local-only.
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/*.docx
+docs/*.doc

@@ -14,7 +14,10 @@ log = logging.getLogger(__name__)
 
 
 # Callback fired periodically while an LLM response is streaming.
-# Args: (char_count_so_far, thinking_or_output_phase)
+# Args: (token_count_so_far, thinking_or_output_phase)
+# Ollama's /api/chat streaming emits one JSON message per generated token;
+# the count here is literally the number of tokens observed, matching the
+# provider's own eval_count field in the final done-message.
 # phase is "thinking" while the model is inside a <think> block,
 # "output" otherwise. Callbacks MUST be non-blocking.
 LLMProgressCallback = Optional[Callable[[int, str], None]]
@@ -83,9 +86,9 @@ async def _ollama_chat(
         log.info("Ollama response: %d chars", len(content))
         return content
 
-    # Streaming path — accumulate chunks, fire throttled progress callbacks.
+    # Streaming path — one chunk per token, fire throttled progress callbacks.
     parts: list[str] = []
-    total_chars = 0
+    total_tokens = 0
     in_think = False
     think_depth = 0
     last_emit = 0.0
@@ -108,7 +111,10 @@ async def _ollama_chat(
                 piece = (chunk.get("message") or {}).get("content", "")
                 if piece:
                     parts.append(piece)
-                    total_chars += len(piece)
+                    # Each non-empty streaming message from Ollama carries exactly
+                    # one generated token's text, so this counter matches what the
+                    # model reports as eval_count when done=True arrives.
+                    total_tokens += 1
                     # Rough think-block detection — good enough for a progress label.
                     if "<think>" in piece:
                         think_depth += piece.count("<think>")
@@ -119,7 +125,7 @@ async def _ollama_chat(
                     now = time.monotonic()
                     if now - last_emit >= _PROGRESS_THROTTLE_SECS:
                         try:
-                            on_progress(total_chars, "thinking" if in_think else "output")
+                            on_progress(total_tokens, "thinking" if in_think else "output")
                         except Exception:
                             log.exception("LLM progress callback raised")
                         last_emit = now
@@ -130,7 +136,8 @@ async def _ollama_chat(
     content = "".join(parts)
     # Strip thinking blocks from models that emit <think>...</think>
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-    log.info("Ollama response: %d chars (streamed)", len(content))
+    log.info("Ollama response: %d tokens (%d chars after stripping think)",
+             total_tokens, len(content))
     return content
 
 
@@ -154,7 +161,9 @@ async def _anthropic_chat(
         )
         return message.content[0].text
 
-    # Streaming path mirrors the Ollama branch.
+    # Streaming path mirrors the Ollama branch. Anthropic's text_stream yields
+    # text deltas of varying size (not necessarily one token per event), so we
+    # approximate tokens from character count at ~4 chars/token.
     total_chars = 0
     last_emit = 0.0
     collected: list[str] = []
@@ -169,8 +178,9 @@ async def _anthropic_chat(
             total_chars += len(text)
             now = time.monotonic()
             if now - last_emit >= _PROGRESS_THROTTLE_SECS:
+                approx_tokens = max(1, total_chars // 4)
                 try:
-                    on_progress(total_chars, "output")
+                    on_progress(approx_tokens, "output")
                 except Exception:
                     log.exception("LLM progress callback raised")
                 last_emit = now

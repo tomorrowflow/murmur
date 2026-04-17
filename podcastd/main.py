@@ -70,15 +70,15 @@ def _make_progress_cb(websocket, session_id: str, chunk_label: str):
     return on_progress
 
 
-def _estimate_script_chars(target_minutes: int) -> int:
-    """Heuristic for the expected size of a generated script including JSON wrapper.
+def _estimate_script_tokens(target_minutes: int) -> int:
+    """Heuristic for expected generated-script token count (including JSON wrapper).
 
-    Roughly: spoken dialogue at ~150 wpm * ~6 chars/word = 900 chars/min; JSON
-    overhead (keys, quotes, commas) adds ~75%. Capped by the model's
-    num_predict budget of 8192 tokens (~32k chars). Used only to drive the
-    progress-bar percent — slight misses are fine."""
-    rough = max(2000, int(target_minutes * 1600))
-    return min(rough, 32000)
+    Rough: ~150 spoken words/min × ~1.3 tokens/word = ~200 tokens/min of dialogue,
+    plus ~75% JSON-wrapper overhead ≈ 350 tokens/min. Capped at the practical
+    num_predict budget. Used only to drive the progress-bar percent — slight
+    misses are fine."""
+    rough = max(500, int(target_minutes * 350))
+    return min(rough, 16000)
 
 
 def _make_distill_progress_cb(websocket, session_id: str, source_chars: int):
@@ -87,11 +87,11 @@ def _make_distill_progress_cb(websocket, session_id: str, source_chars: int):
     The distillation step's progress callback encodes part info in the `phase`
     string (e.g. "distill:2/3:thinking"), so we decode it here into a PROGRESS
     message the overlay can render alongside its spinner."""
-    # Rough estimate: each distilled part outputs ~30% of the input chunk size.
-    # This is only used to drive the progress bar percent.
-    estimated_out = max(2000, int(source_chars * 0.30))
+    # Rough output size estimate (tokens). Per-chunk input is ~22k chars ≈
+    # ~5.5k tokens; distilled output ~30% of input ≈ 1.6k tokens/part.
+    estimated_out_tokens = max(500, int(source_chars * 0.30 / 4))
 
-    def on_progress(char_count: int, phase: str):
+    def on_progress(token_count: int, phase: str):
         parts_info = ""
         is_thinking = False
         if phase.startswith("distill:"):
@@ -100,9 +100,9 @@ def _make_distill_progress_cb(websocket, session_id: str, source_chars: int):
                 body, suffix = body.split(":", 1)
                 is_thinking = suffix == "thinking"
             parts_info = f" ({body})"
-        pct = min(int(char_count / max(1, estimated_out) * 100), 95)
+        pct = min(int(token_count / max(1, estimated_out_tokens) * 100), 95)
         phase_hint = " (thinking)" if is_thinking else ""
-        msg = f"Distilling source{parts_info}{phase_hint} — {char_count:,} chars"
+        msg = f"Distilling source{parts_info}{phase_hint} — {token_count:,} tokens"
         try:
             asyncio.create_task(_safe_send(websocket, {
                 "type": "PROGRESS",
@@ -121,17 +121,17 @@ def _make_llm_progress_cb(
     session_id: str,
     stage: str,
     label: str,
-    estimated_chars: int,
+    estimated_tokens: int,
 ):
     """Return a callback the LLM client invokes while streaming tokens.
 
-    We translate (char_count, phase) into a PROGRESS frame so the overlay can
-    show a filling bar + live char count instead of a spinner that seems stuck."""
-    def on_progress(char_count: int, phase: str):
-        denom = max(1, estimated_chars)
-        pct = min(int(char_count / denom * 100), 95)
+    We translate (token_count, phase) into a PROGRESS frame so the overlay can
+    show a filling bar + live token count instead of a spinner that seems stuck."""
+    def on_progress(token_count: int, phase: str):
+        denom = max(1, estimated_tokens)
+        pct = min(int(token_count / denom * 100), 95)
         phase_hint = " (thinking)" if phase == "thinking" else ""
-        msg = f"Generating script ({label}){phase_hint} — {char_count:,} chars"
+        msg = f"Generating script ({label}){phase_hint} — {token_count:,} tokens"
         try:
             asyncio.create_task(_safe_send(websocket, {
                 "type": "PROGRESS",
@@ -189,8 +189,12 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol) -> None:
                     from_index = int(msg.get("from_index", 0))
                     s = sessions.get(sid)
                     if s:
-                        # Cancel any in-flight single-chunk delivery — stream takes over
-                        _cancel_work_tasks(sid)
+                        # Cancel any in-flight stream/delivery and wait for it to
+                        # finish its finally{} cleanup before starting a new one —
+                        # otherwise the new stream hits the stream_active guard
+                        # and no-ops, which is exactly the "stuck buffering" bug
+                        # the client's watchdog tries to recover from.
+                        await _cancel_work_tasks_and_wait(sid)
                         _spawn_work(sid, _stream_chunks(websocket, s, from_index))
                     else:
                         await _safe_send(websocket, {"type": "ERROR", "code": "NO_SESSION", "message": "Session not found"})
@@ -336,7 +340,7 @@ async def _handle_ingest(websocket, msg: dict) -> PodcastSession:
             websocket, session.session_id,
             stage="scripting",
             label=f"~{target_minutes} min podcast",
-            estimated_chars=_estimate_script_chars(target_minutes),
+            estimated_tokens=_estimate_script_tokens(target_minutes),
         )
         distill_progress = _make_distill_progress_cb(
             websocket, session.session_id,
@@ -586,7 +590,8 @@ async def _handle_interrupt(websocket, session: PodcastSession, question: str) -
             websocket, session.session_id,
             stage="interrupt_scripting",
             label="response",
-            estimated_chars=2500,
+            # Interrupt replies are short dialogue (~30–60 seconds of speech).
+            estimated_tokens=600,
         )
         async with gpu_lock:
             if session.session_id not in sessions:
@@ -663,6 +668,26 @@ def _cancel_work_tasks(session_id: str) -> None:
         if not task.done():
             task.cancel()
             log.info("Cancelled work task for session %s", session_id)
+
+
+async def _cancel_work_tasks_and_wait(session_id: str) -> None:
+    """Cancel background work tasks and await their finally{} cleanup.
+
+    Needed before respawning a stream: the old task's stream_active.discard()
+    (and any other finally handlers) must run before the new task starts,
+    otherwise the new stream's `if sid in stream_active: return` guard
+    swallows the request."""
+    tasks = work_tasks.pop(session_id, [])
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    # Await each cancelled task so its finally blocks finish. Swallow the
+    # CancelledError that cancellation raises.
+    for task in tasks:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 # ---------- Prefetch Management ----------

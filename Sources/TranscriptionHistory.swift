@@ -5,6 +5,7 @@ import Foundation
 enum HistoryEntryKind: String, Codable {
     case transcript   // STT / OpenClaw / audio transcription
     case podcast      // podcast session with script markdown + audio WAV
+    case recap        // Claude Code assistant final message via Stop hook
 }
 
 struct TranscriptionEntry: Codable {
@@ -16,9 +17,12 @@ struct TranscriptionEntry: Codable {
     /// Filename (not path) of the audio file within
     /// TranscriptionHistory.audioDirectory. nil for transcript entries.
     let audioFilename: String?
+    /// For recap entries only: the LLM-rewritten version that was actually
+    /// spoken. `text` always holds the raw assistant message.
+    let spokenText: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, text, timestamp, kind, title, audioFilename
+        case id, text, timestamp, kind, title, audioFilename, spokenText
     }
 
     init(text: String) {
@@ -28,6 +32,7 @@ struct TranscriptionEntry: Codable {
         self.kind = .transcript
         self.title = nil
         self.audioFilename = nil
+        self.spokenText = nil
     }
 
     init(podcastTitle: String, markdown: String, audioFilename: String?) {
@@ -37,6 +42,17 @@ struct TranscriptionEntry: Codable {
         self.kind = .podcast
         self.title = podcastTitle
         self.audioFilename = audioFilename
+        self.spokenText = nil
+    }
+
+    init(recap: String, spokenText: String? = nil) {
+        self.id = UUID()
+        self.text = recap
+        self.timestamp = Date()
+        self.kind = .recap
+        self.title = nil
+        self.audioFilename = nil
+        self.spokenText = spokenText
     }
 
     init(from decoder: Decoder) throws {
@@ -47,6 +63,7 @@ struct TranscriptionEntry: Codable {
         kind = try c.decodeIfPresent(HistoryEntryKind.self, forKey: .kind) ?? .transcript
         title = try c.decodeIfPresent(String.self, forKey: .title)
         audioFilename = try c.decodeIfPresent(String.self, forKey: .audioFilename)
+        spokenText = try c.decodeIfPresent(String.self, forKey: .spokenText)
     }
 }
 
@@ -109,6 +126,12 @@ class TranscriptionHistory {
         let entry = TranscriptionEntry(text: text)
         insertEntry(entry)
         print("Added transcription to history: \(text)")
+    }
+
+    func addRecapEntry(_ text: String, spokenText: String? = nil) {
+        let entry = TranscriptionEntry(recap: text, spokenText: spokenText)
+        insertEntry(entry)
+        print("Added Claude recap to history (\(text.count) chars, spoken=\(spokenText?.count ?? 0) chars)")
     }
 
     /// Record a completed podcast. Persists audio WAV alongside the markdown

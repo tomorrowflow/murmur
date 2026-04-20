@@ -539,6 +539,7 @@ struct PodcastOverlayView: View {
 
 class PodcastOverlayWindow {
     private var panel: NSPanel?
+    private var panelResizeObserver: NSObjectProtocol?
     let viewModel = PodcastOverlayViewModel()
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
@@ -676,16 +677,13 @@ class PodcastOverlayWindow {
         panel.contentView = hostingView
 
         self.panel = panel
-        repositionPanel()
+        panel.positionTopCentered()
+        panelResizeObserver = observePanelResize(panel) { [weak self] in
+            self?.panel?.positionTopCentered()
+        }
     }
 
     private func repositionPanel() {
-        guard let panel = panel, let screen = NSScreen.main else { return }
-        let screenFrame = screen.visibleFrame
-        let panelHeight = panel.frame.height
-        // Center horizontally, top of screen (same position as OpenClaw overlay)
-        let x = (screenFrame.width - 380) / 2 + screenFrame.minX
-        let y = screenFrame.maxY - panelHeight - 40
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel?.positionTopCentered()
     }
 }

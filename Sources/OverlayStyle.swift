@@ -1,6 +1,45 @@
 import Cocoa
 import SwiftUI
 
+// MARK: - Consistent top-anchored positioning
+
+/// Distance between the top of the menu bar and the top of any floating
+/// overlay panel. Keep this shared so every overlay (Podcast, Read Aloud,
+/// STT, OpenClaw, Draft Editing) lands at the same Y regardless of its
+/// current content height.
+let kOverlayTopInset: CGFloat = 40
+
+extension NSPanel {
+    /// Center horizontally and pin the top edge `kOverlayTopInset` below the
+    /// menu bar. Call after the panel's content view is set AND whenever the
+    /// panel resizes (SwiftUI content changes cause NSHostingView to request a
+    /// new intrinsic size, which NSPanel honours — but it keeps the bottom-left
+    /// origin fixed, so the TOP edge drifts unless we re-anchor).
+    func positionTopCentered(topInset: CGFloat = kOverlayTopInset) {
+        guard let screen = self.screen ?? NSScreen.main else { return }
+        let screenFrame = screen.visibleFrame
+        let x = (screenFrame.width - self.frame.width) / 2 + screenFrame.minX
+        let y = screenFrame.maxY - self.frame.height - topInset
+        self.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+}
+
+/// Observes the panel's resize events so the given reposition closure fires
+/// every time SwiftUI content resizes the window. Returns the observer token
+/// so callers can retain it (NotificationCenter holds a weak reference when
+/// using the block API — keeping the token ensures the observer stays alive
+/// for the lifetime of the overlay).
+@discardableResult
+func observePanelResize(_ panel: NSPanel, reposition: @escaping () -> Void) -> NSObjectProtocol {
+    return NotificationCenter.default.addObserver(
+        forName: NSWindow.didResizeNotification,
+        object: panel,
+        queue: .main
+    ) { _ in
+        reposition()
+    }
+}
+
 // MARK: - Glass Panel Factory
 
 /// Creates a modern translucent floating panel, replacing the old HUD window style.

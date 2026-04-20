@@ -99,6 +99,23 @@ struct ReadAloudSettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                Section("Claude Code Recap") {
+                    HStack(spacing: 8) {
+                        Text("Preprocess")
+                            .frame(width: 120, alignment: .leading)
+                        Picker("", selection: $viewModel.recapPreprocessMode) {
+                            Text("None (raw text)").tag("none")
+                            Text("Regex cleanup").tag("regex")
+                            Text("Ollama (LLM summary)").tag("ollama")
+                        }
+                        .labelsHidden()
+                    }
+
+                    Text("Cleans up the assistant's final message before it's spoken. Regex strips code blocks, paths, markdown, and PIDs. Ollama rewrites it as a spoken summary using the model above.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+
                 Section("Draft Editing") {
                     HStack(spacing: 8) {
                         Text("Default Editor")
@@ -163,6 +180,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
     @Published var ollamaAPIKey: String = "" { didSet { persist(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
     @Published var resumeBehavior: String = "ask" { didSet { persist(resumeBehavior, forKey: "readAloud.resumeBehavior") } }
     @Published var draftEditingEditor: String = "auto" { didSet { persist(draftEditingEditor, forKey: "draftEditing.editor") } }
+    @Published var recapPreprocessMode: String = "none" { didSet { persist(recapPreprocessMode, forKey: "recap.preprocessMode") } }
     @Published var obsidianPluginReachable: Bool = false
     @Published var availableModels: [String] = []
     @Published var isLoadingModels: Bool = false
@@ -182,6 +200,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         ollamaAPIKey = defaults.string(forKey: "readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"
         draftEditingEditor = defaults.string(forKey: "draftEditing.editor") ?? "auto"
+        recapPreprocessMode = defaults.string(forKey: "recap.preprocessMode") ?? "none"
     }
 
     func checkObsidianPlugin() {

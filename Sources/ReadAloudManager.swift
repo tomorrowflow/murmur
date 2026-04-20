@@ -116,7 +116,7 @@ class ReadAloudManager {
 
     // MARK: - Public API
 
-    func startReading(text: String) {
+    func startReading(text: String, skipTranslation: Bool = false) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             state = .error("No text to read")
             delegate?.readAloudDidError("No text to read")
@@ -125,14 +125,16 @@ class ReadAloudManager {
 
         reset()
         fullText = text
-        // Start with translating state — we need to detect language first
-        state = .translating
+        state = skipTranslation ? .reading : .translating
         installEscapeMonitor()
 
         readingTask = Task { [weak self] in
             guard let self = self else { return }
 
             let readText: String
+            if skipTranslation {
+                readText = text
+            } else {
             await MainActor.run {
                 self.delegate?.readAloudDidUpdateTranslationStatus("Detecting language...")
             }
@@ -155,6 +157,7 @@ class ReadAloudManager {
                 }
             } else {
                 readText = text
+            }
             }
 
             guard !Task.isCancelled else { return }

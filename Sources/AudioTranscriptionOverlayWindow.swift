@@ -236,6 +236,7 @@ struct AudioTranscriptionOverlayView: View {
 
 class AudioTranscriptionOverlayWindow {
     private var panel: NSPanel?
+    private var panelResizeObserver: NSObjectProtocol?
     let viewModel = AudioTranscriptionOverlayViewModel()
 
     init() {
@@ -275,15 +276,13 @@ class AudioTranscriptionOverlayWindow {
         let panel = createGlassPanel(width: 300, height: 100)
         panel.contentView = hostingView
         self.panel = panel
-        repositionPanel()
+        panel.positionTopCentered()
+        panelResizeObserver = observePanelResize(panel) { [weak self] in
+            self?.panel?.positionTopCentered()
+        }
     }
 
     private func repositionPanel() {
-        guard let panel = panel, let screen = NSScreen.main else { return }
-        let screenFrame = screen.visibleFrame
-        let panelHeight = panel.frame.height
-        let x = (screenFrame.width - 300) / 2 + screenFrame.minX
-        let y = screenFrame.maxY - panelHeight - 40
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel?.positionTopCentered()
     }
 }

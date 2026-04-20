@@ -551,6 +551,7 @@ struct ReadAloudOverlayView: View {
 
 class ReadAloudOverlayWindow {
     private var panel: NSPanel?
+    private var panelResizeObserver: NSObjectProtocol?
     let viewModel = ReadAloudOverlayViewModel()
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
@@ -558,10 +559,15 @@ class ReadAloudOverlayWindow {
     var onExportAudio: (() -> Void)?
     var onExportMarkdown: (() -> Void)?
     private var autoDismissTimer: Timer?
+    private var escapeGlobalMonitor: Any?
+    private var escapeLocalMonitor: Any?
 
     init() {
         viewModel.onStop = { [weak self] in
             self?.onStop?()
+            // Always hide the panel ourselves so the X button can't be orphaned
+            // if the external onStop handler's references are stale.
+            self?.dismissNow()
         }
         viewModel.onPlayPause = { [weak self] in
             self?.onPlayPause?()
@@ -584,6 +590,37 @@ class ReadAloudOverlayWindow {
             ensurePanel()
             if wasHidden { repositionPanel() }
             panel?.orderFront(nil)
+            installEscapeMonitor()
+        }
+    }
+
+    private func installEscapeMonitor() {
+        if escapeLocalMonitor != nil || escapeGlobalMonitor != nil { return }
+        let fire: () -> Void = { [weak self] in
+            NSLog("ReadAloudOverlay: Escape monitor fired — dismissing")
+            DispatchQueue.main.async { self?.viewModel.dismiss() }
+        }
+        escapeGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { fire() }
+        }
+        escapeLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 {
+                fire()
+                return nil
+            }
+            return event
+        }
+        NSLog("ReadAloudOverlay: Escape monitors installed (global: \(escapeGlobalMonitor != nil), local: \(escapeLocalMonitor != nil))")
+    }
+
+    private func removeEscapeMonitor() {
+        if let m = escapeGlobalMonitor {
+            NSEvent.removeMonitor(m)
+            escapeGlobalMonitor = nil
+        }
+        if let m = escapeLocalMonitor {
+            NSEvent.removeMonitor(m)
+            escapeLocalMonitor = nil
         }
     }
 
@@ -685,8 +722,15 @@ class ReadAloudOverlayWindow {
     func dismiss() {
         DispatchQueue.main.async { [self] in
             autoDismissTimer?.invalidate()
+            removeEscapeMonitor()
             panel?.orderOut(nil)
         }
+    }
+
+    func dismissNow() {
+        autoDismissTimer?.invalidate()
+        removeEscapeMonitor()
+        panel?.orderOut(nil)
     }
 
     private func ensurePanel() {
@@ -697,15 +741,13 @@ class ReadAloudOverlayWindow {
         panel.contentView = hostingView
 
         self.panel = panel
-        repositionPanel()
+        panel.positionTopCentered()
+        panelResizeObserver = observePanelResize(panel) { [weak self] in
+            self?.panel?.positionTopCentered()
+        }
     }
 
     private func repositionPanel() {
-        guard let panel = panel, let screen = NSScreen.main else { return }
-        let screenFrame = screen.visibleFrame
-        let panelHeight = panel.frame.height
-        let x = (screenFrame.width - 380) / 2 + screenFrame.minX
-        let y = screenFrame.maxY - panelHeight - 40
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel?.positionTopCentered()
     }
 }

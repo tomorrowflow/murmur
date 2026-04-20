@@ -18,18 +18,24 @@ private struct ParsedEntry {
 }
 
 /// Maximum number of preview lines shown before a "show more" ellipsis.
-private let kPreviewLineLimit = 5
+private let kPreviewLineLimit = 2
 
-class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSource {
+class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate, NSTableViewDataSource, NSSearchFieldDelegate {
     private let tableView: NSTableView
     private let scrollView: NSScrollView
     private let clearButton: NSButton
     private let refreshButton: NSButton
     private let titleLabel: NSTextField
+    private let filterControl: NSSegmentedControl
+    private let searchField: NSSearchField
+    private var allEntries: [TranscriptionEntry] = []
+    private var allParsed: [ParsedEntry] = []
     private var entries: [TranscriptionEntry] = []
     private var parsed: [ParsedEntry] = []
     private var copiedRow: Int? = nil
     private var copiedResetTimer: Timer?
+    private var activeFilter: HistoryEntryKind? = nil
+    private var searchQuery: String = ""
 
     init() {
         self.tableView = NSTableView()
@@ -37,6 +43,8 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         self.clearButton = NSButton(title: "Clear History", target: nil, action: #selector(clearHistory))
         self.refreshButton = NSButton(title: "Refresh", target: nil, action: #selector(refreshHistory))
         self.titleLabel = NSTextField(labelWithString: "History")
+        self.filterControl = NSSegmentedControl(labels: ["All", "Transcripts", "Recaps", "Podcasts"], trackingMode: .selectOne, target: nil, action: #selector(filterChanged))
+        self.searchField = NSSearchField()
 
         super.init(nibName: nil, bundle: nil)
     }
@@ -65,6 +73,19 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         titleLabel.alignment = .left
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(titleLabel)
+
+        filterControl.target = self
+        filterControl.action = #selector(filterChanged)
+        filterControl.selectedSegment = 0
+        filterControl.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(filterControl)
+
+        searchField.placeholderString = "Search text…"
+        searchField.delegate = self
+        searchField.sendsSearchStringImmediately = false
+        searchField.sendsWholeSearchString = false
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(searchField)
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
@@ -108,7 +129,14 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
             titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             titleLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
 
-            scrollView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
+            filterControl.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
+            filterControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+
+            searchField.centerYAnchor.constraint(equalTo: filterControl.centerYAnchor),
+            searchField.leadingAnchor.constraint(equalTo: filterControl.trailingAnchor, constant: 12),
+            searchField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            scrollView.topAnchor.constraint(equalTo: filterControl.bottomAnchor, constant: 10),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             scrollView.bottomAnchor.constraint(equalTo: clearButton.topAnchor, constant: -20),
@@ -124,19 +152,58 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
     }
 
     private func loadEntries() {
-        entries = TranscriptionHistory.shared.getEntries()
-        parsed = entries.map { ParsedEntry(text: $0.text) }
-        tableView.reloadData()
+        allEntries = TranscriptionHistory.shared.getEntries()
+        allParsed = allEntries.map { ParsedEntry(text: $0.text) }
+        applyFilter()
 
-        if entries.isEmpty {
+        if allEntries.isEmpty {
             titleLabel.stringValue = "No history yet"
             clearButton.isEnabled = false
         } else {
-            let podcastCount = entries.filter { $0.kind == .podcast }.count
-            let transcriptCount = entries.count - podcastCount
-            titleLabel.stringValue = "History — \(transcriptCount) transcript\(transcriptCount == 1 ? "" : "s"), \(podcastCount) podcast\(podcastCount == 1 ? "" : "s")"
+            let podcastCount = allEntries.filter { $0.kind == .podcast }.count
+            let recapCount = allEntries.filter { $0.kind == .recap }.count
+            let transcriptCount = allEntries.count - podcastCount - recapCount
+            var parts: [String] = []
+            parts.append("\(transcriptCount) transcript\(transcriptCount == 1 ? "" : "s")")
+            parts.append("\(recapCount) recap\(recapCount == 1 ? "" : "s")")
+            parts.append("\(podcastCount) podcast\(podcastCount == 1 ? "" : "s")")
+            titleLabel.stringValue = "History — " + parts.joined(separator: ", ")
             clearButton.isEnabled = true
         }
+    }
+
+    private func applyFilter() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var filtered: [(TranscriptionEntry, ParsedEntry)] = []
+        for (entry, p) in zip(allEntries, allParsed) {
+            if let kind = activeFilter, entry.kind != kind { continue }
+            if !query.isEmpty {
+                let haystack = [entry.text, entry.title ?? "", entry.spokenText ?? ""]
+                    .joined(separator: " ")
+                    .lowercased()
+                if !haystack.contains(query) { continue }
+            }
+            filtered.append((entry, p))
+        }
+        entries = filtered.map { $0.0 }
+        parsed = filtered.map { $0.1 }
+        tableView.reloadData()
+    }
+
+    @objc private func filterChanged() {
+        switch filterControl.selectedSegment {
+        case 1: activeFilter = .transcript
+        case 2: activeFilter = .recap
+        case 3: activeFilter = .podcast
+        default: activeFilter = nil
+        }
+        applyFilter()
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSSearchField, field === searchField else { return }
+        searchQuery = field.stringValue
+        applyFilter()
     }
 
     @objc private func clearHistory() {
@@ -244,7 +311,10 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
 
     private func deleteRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
-        TranscriptionHistory.shared.deleteEntry(at: row)
+        let targetID = entries[row].id
+        if let storageIndex = allEntries.firstIndex(where: { $0.id == targetID }) {
+            TranscriptionHistory.shared.deleteEntry(at: storageIndex)
+        }
         loadEntries()
     }
 
@@ -254,6 +324,18 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
 
     @objc private func saveAudioButtonClicked(_ sender: NSButton) {
         saveAudioForRow(sender.tag)
+    }
+
+    @objc private func copySpokenButtonClicked(_ sender: NSButton) {
+        copySpokenForRow(sender.tag)
+    }
+
+    private func copySpokenForRow(_ row: Int) {
+        guard row >= 0, row < entries.count,
+              let spoken = entries[row].spokenText else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(spoken, forType: .string)
     }
 
     @objc private func contextCopy() {
@@ -276,10 +358,10 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
 
     // MARK: - NSTableViewDelegate
 
-    private let kRowLeadingInset: CGFloat = 10
+    private let kRowLeadingInset: CGFloat = 12
     private let kRowTrailingInset: CGFloat = 10
-    private let kRowTopInset: CGFloat = 8
-    private let kRowBottomInset: CGFloat = 8
+    private let kRowTopInset: CGFloat = 6
+    private let kRowBottomInset: CGFloat = 6
     private let kButtonColumnWidth: CGFloat = 170
     private let kTimeColumnWidth: CGFloat = 108
 
@@ -289,6 +371,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         let p = parsed[row]
         let isCopied = copiedRow == row
         let isPodcast = entry.kind == .podcast
+        let isRecap = entry.kind == .recap
 
         let cellView = NSView()
 
@@ -299,9 +382,21 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         timeLabel.translatesAutoresizingMaskIntoConstraints = false
         cellView.addSubview(timeLabel)
 
-        let badge = NSTextField(labelWithString: isPodcast ? "Podcast" : "Transcript")
+        let badgeText: String
+        let badgeColor: NSColor
+        if isPodcast {
+            badgeText = "Podcast"
+            badgeColor = .systemPurple
+        } else if isRecap {
+            badgeText = "Claude Recap"
+            badgeColor = .systemOrange
+        } else {
+            badgeText = "Transcript"
+            badgeColor = .systemTeal
+        }
+        let badge = NSTextField(labelWithString: badgeText)
         badge.font = .systemFont(ofSize: 10, weight: .semibold)
-        badge.textColor = isPodcast ? .systemPurple : .systemTeal
+        badge.textColor = badgeColor
         badge.translatesAutoresizingMaskIntoConstraints = false
         cellView.addSubview(badge)
 
@@ -330,6 +425,23 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
                 audioButton.widthAnchor.constraint(equalToConstant: 90),
                 copyButton.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
                 copyButton.trailingAnchor.constraint(equalTo: audioButton.leadingAnchor, constant: -6),
+                copyButton.widthAnchor.constraint(equalToConstant: 80),
+            ])
+            trailingAnchorForPreview = copyButton.leadingAnchor
+        } else if isRecap, entry.spokenText != nil {
+            let spokenButton = NSButton(title: "Copy Spoken", target: self, action: #selector(copySpokenButtonClicked(_:)))
+            spokenButton.bezelStyle = .rounded
+            spokenButton.controlSize = .small
+            spokenButton.tag = row
+            spokenButton.translatesAutoresizingMaskIntoConstraints = false
+            cellView.addSubview(spokenButton)
+
+            NSLayoutConstraint.activate([
+                spokenButton.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
+                spokenButton.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -kRowTrailingInset),
+                spokenButton.widthAnchor.constraint(equalToConstant: 100),
+                copyButton.topAnchor.constraint(equalTo: cellView.topAnchor, constant: kRowTopInset),
+                copyButton.trailingAnchor.constraint(equalTo: spokenButton.leadingAnchor, constant: -6),
                 copyButton.widthAnchor.constraint(equalToConstant: 80),
             ])
             trailingAnchorForPreview = copyButton.leadingAnchor
@@ -392,7 +504,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
 
         let preview = previewText(at: row)
         let previewLabel = NSTextField(wrappingLabelWithString: preview)
-        previewLabel.font = .systemFont(ofSize: 13)
+        previewLabel.font = .systemFont(ofSize: 14)
         previewLabel.textColor = .labelColor
         previewLabel.maximumNumberOfLines = kPreviewLineLimit
         previewLabel.lineBreakMode = .byTruncatingTail
@@ -440,19 +552,14 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
             total += min(qSize.height, 32) + 4 // cap at 2 lines
         }
 
-        // Preview: clamp to the 5-line limit regardless of actual text length.
-        let preview = isPodcast ? cleanedPodcastPreview(text: entry.text) : p.answer
-        let pAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13)]
-        let pSize = (preview as NSString).boundingRect(
-            with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: pAttrs
-        )
-        let lineHeight: CGFloat = 17
-        let maxPreviewHeight = lineHeight * CGFloat(kPreviewLineLimit) + 2
-        total += min(pSize.height, maxPreviewHeight)
+        // Preview: always reserve 2 lines of space so short and long entries
+        // render at a consistent height (longer ones tail-truncate).
+        _ = isPodcast ? cleanedPodcastPreview(text: entry.text) : p.answer
+        let lineHeight: CGFloat = 18
+        let previewHeight = lineHeight * CGFloat(kPreviewLineLimit) + 2
+        total += previewHeight
 
-        return max(56, total)
+        return total
     }
 
     private func formatDate(_ date: Date) -> String {

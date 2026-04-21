@@ -119,6 +119,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var pendingAutoRecordAfterReadAloud = false
     private var recapTargetApp: NSRunningApplication?
     private var recapTargetWindow: AXUIElement?
+
+    // FIFO queue for Claude Code recap requests arriving via /api/v1/read-aloud.
+    // Audio device is single-user: TTS → STT → paste for one recap runs to
+    // completion before the next pops. Queue survives only in-memory.
+    private struct QueuedRecap {
+        let id: UUID
+        let text: String
+        let autoRecordAfter: Bool
+        let targetApp: NSRunningApplication?
+        let targetWindow: AXUIElement?
+    }
+    private var recapQueue: [QueuedRecap] = []
     private var draftEditingManager: DraftEditingManager?
     private var draftEditingOverlay: DraftEditingOverlayWindow?
     private var draftEditInterruptActive = false
@@ -729,7 +741,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     @discardableResult
     private func ensureAudioOverlay() -> AudioTranscriptionOverlayWindow {
         if audioOverlay == nil {
-            audioOverlay = AudioTranscriptionOverlayWindow()
+            let overlay = AudioTranscriptionOverlayWindow()
+            // X button on the STT overlay: cancel the underlying recording
+            // rather than just hiding the panel. Without this the recording
+            // keeps running invisibly until Right Option stops it.
+            overlay.viewModel.onUserClose = { [weak self] in
+                guard let self = self else { return }
+                if self.audioManager.isRecording {
+                    self.audioManager.cancelRecording()
+                }
+                self.audioOverlay?.dismiss()
+            }
+            audioOverlay = overlay
         }
         return audioOverlay!
     }
@@ -1327,6 +1350,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         } else {
             pasteTextIntoApp(text, targetApp: targetApp, targetWindow: targetWindow, shouldSendReturn: shouldSendReturn)
             showTranscriptionNotification(text)
+            drainRecapQueueIfIdle()
         }
     }
 
@@ -1357,6 +1381,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                         audioOverlay?.dismiss()
                         pasteTextIntoApp(text, targetApp: targetApp, targetWindow: targetWindow, shouldSendReturn: shouldSendReturn)
                         showTranscriptionNotification(text)
+                        drainRecapQueueIfIdle()
                     }
                 } else {
                     print("Prompt refinement: \"\(text)\" → \"\(result)\"")
@@ -1364,6 +1389,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                         audioOverlay?.dismiss()
                         pasteTextIntoApp(result, targetApp: targetApp, targetWindow: targetWindow, shouldSendReturn: shouldSendReturn)
                         showTranscriptionNotification(result)
+                        drainRecapQueueIfIdle()
                     }
                 }
             } catch {
@@ -1372,6 +1398,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     audioOverlay?.dismiss()
                     pasteTextIntoApp(text, targetApp: targetApp, targetWindow: targetWindow, shouldSendReturn: shouldSendReturn)
                     showTranscriptionNotification(text)
+                    drainRecapQueueIfIdle()
                 }
             }
         }
@@ -1447,6 +1474,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             ensureAudioOverlay().showError(error)
         }
         showTranscriptionError(error)
+
+        recapTargetApp = nil
+        recapTargetWindow = nil
+        pendingAutoRecordAfterReadAloud = false
+        drainRecapQueueIfIdle()
     }
 
     func recordingWasCancelled() {
@@ -1480,6 +1512,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         notification.title = "Recording Cancelled"
         notification.informativeText = "Recording was cancelled"
         NSUserNotificationCenter.default.deliver(notification)
+
+        // If the cancel came from the STT overlay's X button or an interrupt
+        // tail, the recap session tied to this recording is done. Let the
+        // next queued recap proceed.
+        recapTargetApp = nil
+        recapTargetWindow = nil
+        pendingAutoRecordAfterReadAloud = false
+        drainRecapQueueIfIdle()
     }
 
     func recordingWasSkippedDueToSilence() {
@@ -1513,6 +1553,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         notification.title = "Recording Skipped"
         notification.informativeText = "Audio was too quiet to transcribe"
         NSUserNotificationCenter.default.deliver(notification)
+
+        recapTargetApp = nil
+        recapTargetWindow = nil
+        pendingAutoRecordAfterReadAloud = false
+        drainRecapQueueIfIdle()
     }
 
     // MARK: - OpenClawRecordingManagerDelegate
@@ -1831,6 +1876,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             self?.readAloudOverlay = nil
             self?.readAloudInterruptActive = false
             self?.stopWaveformAnimation()
+            // User closed this session — let the next queued recap proceed.
+            self?.drainRecapQueueIfIdle()
         }
         overlay.onPlayPause = { [weak self] in
             guard let self = self, let manager = self.readAloudManager else { return }
@@ -1878,6 +1925,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         startWaveformAnimation()
         manager.startReading(text: text, skipTranslation: skipTranslation)
+    }
+
+    // MARK: - Recap queue
+
+    private func isAudioBusy() -> Bool {
+        if readAloudManager != nil { return true }
+        if sttPushToTalkActive { return true }
+        if audioManager.isRecording { return true }
+        if openClawRecordingManager?.isRecording == true { return true }
+        if openClawRecordingManager?.isProcessing == true { return true }
+        if podcastInterruptActive { return true }
+        if draftEditInterruptActive { return true }
+        return false
+    }
+
+    /// Pops the next queued recap and starts its TTS, or returns silently if
+    /// the audio device is busy. Safe to call from any session-end path.
+    private func drainRecapQueueIfIdle() {
+        guard !isAudioBusy() else { return }
+        while let head = recapQueue.first {
+            recapQueue.removeFirst()
+            if let app = head.targetApp, app.isTerminated {
+                NSLog("Recap queue: dropping entry for terminated app \(app.localizedName ?? "?") — \(recapQueue.count) left")
+                continue
+            }
+            NSLog("Recap queue: starting next (\(recapQueue.count) still queued)")
+            pendingAutoRecordAfterReadAloud = head.autoRecordAfter
+            recapTargetApp = head.targetApp
+            recapTargetWindow = head.targetWindow
+            startReadAloudWithText(head.text, skipTranslation: true, sourceAppOverride: head.targetApp)
+            return
+        }
     }
 
     func startReadAloudInterrupt() {
@@ -2271,6 +2350,87 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         NSUserNotificationCenter.default.deliver(notification)
     }
 
+    // MARK: - Terminal window resolution
+
+    /// Current working directory of a live process, or nil if the process is
+    /// gone or the syscall fails. Uses proc_pidinfo (libSystem) — no shelling
+    /// out to lsof/pwdx.
+    private static func cwd(forPid pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = MemoryLayout<proc_vnodepathinfo>.size
+        let r = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
+            proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, ptr, Int32(size))
+        }
+        guard r == Int32(size) else { return nil }
+        return withUnsafeBytes(of: info.pvi_cdir.vip_path) { raw in
+            let c = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
+            let s = String(cString: c)
+            return s.isEmpty ? nil : s
+        }
+    }
+
+    /// Walk the hook's PPID chain (hook → claude → shell → login → terminal
+    /// app → …) and return the first process whose cwd is readable. We stop
+    /// before reaching the terminal app itself, since terminal apps and
+    /// processes above them (login, launchd) live in the user's home and
+    /// would give the wrong cwd for window matching.
+    private static func resolveShellCwd(sourcePids: [pid_t], ownPid: pid_t, terminalAppPid: pid_t) -> String? {
+        let endIdx = sourcePids.firstIndex(of: terminalAppPid) ?? sourcePids.endIndex
+        for pid in sourcePids[..<endIdx] {
+            if pid == ownPid { continue }
+            if let c = cwd(forPid: pid) {
+                NSLog("Recap: resolved shell cwd \(c) from pid \(pid)")
+                return c
+            }
+        }
+        NSLog("Recap: could not resolve shell cwd from PPID chain")
+        return nil
+    }
+
+    /// Pick the terminal app's window whose AXDocument (a file:// URL of the
+    /// shell's cwd) matches the given path. Both Ghostty and Terminal.app
+    /// expose this standard AX attribute. Falls back to kAXFocusedWindow if
+    /// no match — preserves pre-fix behavior in edge cases (no cwd, home-dir
+    /// shell, unknown terminal app).
+    private static func findTerminalWindow(forAppPid pid: pid_t, matchingCwd cwd: String?) -> AXUIElement? {
+        let appEl = AXUIElementCreateApplication(pid)
+
+        var focusedRaw: AnyObject?
+        let focused: AXUIElement? = {
+            guard AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &focusedRaw) == .success,
+                  let v = focusedRaw,
+                  CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+            return (v as! AXUIElement)
+        }()
+
+        guard let cwd = cwd else { return focused }
+        let normalizedTarget = URL(fileURLWithPath: cwd).standardizedFileURL.path
+
+        var winsRaw: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &winsRaw) == .success,
+              let wins = winsRaw as? [AXUIElement] else {
+            return focused
+        }
+
+        for win in wins {
+            var docRaw: AnyObject?
+            guard AXUIElementCopyAttributeValue(win, kAXDocumentAttribute as CFString, &docRaw) == .success,
+                  let urlStr = docRaw as? String,
+                  let url = URL(string: urlStr) else {
+                continue
+            }
+            let winCwd = url.standardizedFileURL.path
+            if winCwd == normalizedTarget {
+                var titleRaw: AnyObject?
+                AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleRaw)
+                NSLog("Recap: matched window by cwd \(normalizedTarget) — \"\(titleRaw as? String ?? "?")\"")
+                return win
+            }
+        }
+        NSLog("Recap: no window matched cwd \(normalizedTarget) — falling back to focused window")
+        return focused
+    }
+
     // MARK: - Recap preprocessing
 
     private static func preprocessRecap(_ text: String, mode: String) async -> String {
@@ -2506,12 +2666,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 guard let app = app else { return (nil, nil) }
                 NSLog("Recap: bound to \(app.localizedName ?? "?") (pid \(app.processIdentifier), resolved from \(resolved != nil ? "ppid chain" : "frontmost fallback"))")
 
-                let appElement = AXUIElementCreateApplication(app.processIdentifier)
-                var windowValue: AnyObject?
-                if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success {
-                    return (app, (windowValue as! AXUIElement))
-                }
-                return (app, nil)
+                // Match the specific terminal window by the shell's cwd.
+                // kAXFocusedWindowAttribute alone would hand us whichever
+                // window is currently focused in the terminal app — which is
+                // wrong when Claude in window B responds while the user is
+                // typing in window A. Both Ghostty and Terminal.app expose
+                // AXDocument on each window as a file:// URL of the shell's
+                // working directory; we match against that.
+                let shellCwd = Self.resolveShellCwd(
+                    sourcePids: sourcePids,
+                    ownPid: ownPid,
+                    terminalAppPid: app.processIdentifier
+                )
+                let window = Self.findTerminalWindow(
+                    forAppPid: app.processIdentifier,
+                    matchingCwd: shellCwd
+                )
+                return (app, window)
             }
 
             let text = await Self.preprocessRecap(rawText, mode: mode)
@@ -2523,22 +2694,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             TranscriptionHistory.shared.addRecapEntry(rawText, spokenText: storedSpoken)
 
             await MainActor.run {
-                // Stop any in-flight session so the new recap takes over cleanly.
-                if self?.readAloudManager?.isActive == true {
-                    self?.readAloudManager?.stop()
-                    self?.readAloudOverlay?.dismiss()
-                    self?.readAloudManager = nil
-                    self?.readAloudOverlay = nil
-                    self?.readAloudInterruptActive = false
-                    self?.stopWaveformAnimation()
-                }
-                self?.pendingAutoRecordAfterReadAloud = autoRecord
-                self?.recapTargetApp = capturedApp
-                self?.recapTargetWindow = capturedWindow
-                self?.startReadAloudWithText(text, skipTranslation: true, sourceAppOverride: capturedApp)
+                guard let self = self else { return }
+                // Enqueue rather than clobber: FIFO across parallel Claude
+                // terminals. drainRecapQueueIfIdle pops and starts the next
+                // entry whenever the audio device becomes free.
+                let entry = QueuedRecap(
+                    id: UUID(),
+                    text: text,
+                    autoRecordAfter: autoRecord,
+                    targetApp: capturedApp,
+                    targetWindow: capturedWindow
+                )
+                self.recapQueue.append(entry)
+                NSLog("Recap: enqueued (queue depth: \(self.recapQueue.count))")
+                self.drainRecapQueueIfIdle()
             }
 
-            return (200, MurmurHTTPServer.jsonResponse(["ok": true, "autoRecordAfter": autoRecord]))
+            return (200, MurmurHTTPServer.jsonResponse(["ok": true, "autoRecordAfter": autoRecord, "queued": true]))
         }
 
         server.post("/api/v1/draft/cursor-sync") { [weak self] body in

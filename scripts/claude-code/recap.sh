@@ -18,7 +18,9 @@
 #     ]
 #   }
 #
-# Falls back to macOS `say` if Murmur's local HTTP server is unreachable.
+# Silently exits if Murmur's local HTTP server is unreachable — we deliberately
+# don't fall back to macOS `say`, since it would play over the top of any
+# currently-queued recap playing in another terminal.
 
 INPUT=$(cat)
 MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty')
@@ -39,12 +41,9 @@ done
 PAYLOAD=$(jq -n --arg text "$MSG" --arg pids "$ancestors" \
     '{text: $text, autoRecordAfter: true, sourcePids: $pids}')
 
-if ! curl -sS -f --connect-timeout 2 -m 120 \
-        -X POST http://127.0.0.1:7878/api/v1/read-aloud \
-        -H "Content-Type: application/json" \
-        -d "$PAYLOAD" >/dev/null 2>&1; then
-    (printf '%s' "$MSG" | say -r 200) >/dev/null 2>&1 &
-    disown
-fi
+curl -sS -f --connect-timeout 2 -m 120 \
+    -X POST http://127.0.0.1:7878/api/v1/read-aloud \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" >/dev/null 2>&1 || true
 
 exit 0

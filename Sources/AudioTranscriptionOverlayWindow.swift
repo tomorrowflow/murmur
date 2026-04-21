@@ -22,6 +22,10 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
     @Published var targetAppName: String?
 
     var onDismiss: (() -> Void)?
+    /// Invoked when the user clicks the X button on the overlay. If set, the
+    /// button calls this instead of `dismiss()` directly, giving the owner a
+    /// chance to cancel the underlying recording before hiding the panel.
+    var onUserClose: (() -> Void)?
 
     private var autoDismissTimer: Timer?
     private var recordingTimer: Timer?
@@ -114,7 +118,13 @@ struct AudioTranscriptionOverlayView: View {
 
                 stateIndicator
 
-                Button(action: { viewModel.dismiss() }) {
+                Button(action: {
+                    if let onUserClose = viewModel.onUserClose {
+                        onUserClose()
+                    } else {
+                        viewModel.dismiss()
+                    }
+                }) {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)

@@ -50,9 +50,9 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 - A [Claude Code **Stop hook**](https://docs.anthropic.com/claude-code/hooks) pipes the assistant's final message into Murmur's local HTTP API.
 - Murmur speaks the recap, then **auto-starts an STT recording** so you can reply by voice.
 - **Right Option** (single tap) stops the follow-up recording; the transcription pastes into the exact terminal Claude Code ran in.
-- Source-window binding uses the hook's process ancestry — works even when you're focused on a different app (Outlook, browser, etc.) while Claude is thinking.
+- **Parallel Claude sessions**: multiple terminal windows can trigger recaps at the same time. Murmur queues them FIFO — TTS, reply, and paste for one session runs to completion before the next starts. No audio overlap.
+- **Per-window binding**: the target window is resolved by matching the shell's cwd against each terminal window's `AXDocument` attribute — so Claude running in window B stays bound to window B, even if you're focused on window A when it responds. Works with any terminal emulator that exposes `AXDocument` (Ghostty, Terminal.app; falls back to the focused window for others).
 - Optional LLM preprocessing rewrites gnarly assistant output (PIDs, file paths, code blocks, commit hashes, URLs) into a short spoken summary. History keeps both the raw text and the spoken summary with separate copy buttons.
-- Works with any terminal emulator — Ghostty, Terminal.app, iTerm2, Warp, etc.
 
 ### OpenClaw Assistant
 

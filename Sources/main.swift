@@ -2899,6 +2899,75 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             }
         }
 
+        // GET /api/v1/debug/state — snapshot of the recap queue + audio-busy
+        // flags, for diagnosing "hook got 200 but no TTS played" cases. Handy
+        // to curl from another machine when the recap pipeline appears stuck.
+        server.get("/api/v1/debug/state") { [weak self] _ in
+            let state: [String: Any] = await MainActor.run {
+                guard let self = self else { return ["error": "no delegate"] }
+                var activeText: String? = nil
+                if let mgr = self.readAloudManager {
+                    activeText = String(mgr.fullText.prefix(120))
+                }
+                return [
+                    "queueDepth": self.recapQueue.count,
+                    "isAudioBusy": self.isAudioBusy(),
+                    "readAloudActive": self.readAloudManager != nil,
+                    "sttPushToTalkActive": self.sttPushToTalkActive,
+                    "audioManagerRecording": self.audioManager.isRecording,
+                    "openClawRecording": self.openClawRecordingManager?.isRecording ?? false,
+                    "openClawProcessing": self.openClawRecordingManager?.isProcessing ?? false,
+                    "podcastInterruptActive": self.podcastInterruptActive,
+                    "draftEditInterruptActive": self.draftEditInterruptActive,
+                    "activeSessionPreview": activeText ?? "",
+                    "pendingAutoRecordAfterReadAloud": self.pendingAutoRecordAfterReadAloud
+                ]
+            }
+            return (200, MurmurHTTPServer.jsonResponse(state))
+        }
+
+        // POST /api/v1/debug/reset-recap — recovery hatch for a clogged queue.
+        // Tears down any active read-aloud or STT session, clears the pending
+        // queue, and disarms pending auto-record. Returns what it flushed.
+        server.post("/api/v1/debug/reset-recap") { [weak self] _ in
+            let result: [String: Any] = await MainActor.run {
+                guard let self = self else { return ["error": "no delegate"] }
+                let dropped = self.recapQueue.count
+                let wasReading = self.readAloudManager != nil
+                let wasRecording = self.audioManager.isRecording
+
+                self.recapQueue.removeAll()
+                if self.readAloudManager?.isActive == true {
+                    self.readAloudManager?.stop()
+                }
+                self.readAloudOverlay?.dismiss()
+                self.readAloudManager = nil
+                self.readAloudOverlay = nil
+                self.readAloudInterruptActive = false
+                self.stopWaveformAnimation()
+
+                if self.audioManager.isRecording {
+                    self.audioManager.cancelRecording()
+                }
+
+                self.pendingAutoRecordAfterReadAloud = false
+                self.recapTargetApp = nil
+                self.recapTargetWindow = nil
+                self.sttAutoRecordAfterRecap = false
+                self.sttSilenceTimeoutTimer?.invalidate()
+                self.sttSilenceTimeoutTimer = nil
+
+                NSLog("[Recap] Reset via /debug/reset-recap — dropped=\(dropped), wasReading=\(wasReading), wasRecording=\(wasRecording)")
+                return [
+                    "ok": true,
+                    "droppedFromQueue": dropped,
+                    "wasReading": wasReading,
+                    "wasRecording": wasRecording
+                ]
+            }
+            return (200, MurmurHTTPServer.jsonResponse(result))
+        }
+
         do {
             let binding: MurmurHTTPServer.BindingMode = UserDefaults.standard.bool(forKey: "claude.exposeToLan")
                 ? .allInterfaces

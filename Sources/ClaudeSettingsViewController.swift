@@ -139,29 +139,60 @@ struct ClaudeSettingsView: View {
                 .foregroundColor(.secondary)
                 .padding(.vertical, 4)
         } else {
-            Text("Approved (\(viewModel.approved.count) of \(ClaudeHostRegistry.maxApprovedHosts))")
+            Text("Approved")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
             ForEach(viewModel.approved, id: \.ip) { host in
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundColor(.green)
-                        .font(.system(size: 11))
-                    Text(host.ip)
-                        .font(.system(size: 12).monospacedDigit())
-                        .frame(width: 140, alignment: .leading)
-                    TextField("Label (optional)", text: Binding(
-                        get: { host.label },
-                        set: { viewModel.rename(ip: host.ip, label: $0) }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11))
-                    Button("Remove") { viewModel.remove(ip: host.ip) }
-                        .controlSize(.small)
-                }
-                .padding(.vertical, 2)
+                ApprovedHostRow(
+                    host: host,
+                    onLabelCommit: { label in viewModel.rename(ip: host.ip, label: label) },
+                    onRemove: { viewModel.remove(ip: host.ip) }
+                )
             }
         }
+    }
+}
+
+// MARK: - Approved host row
+
+/// One approved-host row with its own local text state so keystrokes don't
+/// round-trip through the registry + notification + list reload (which
+/// would yank the cursor mid-edit). Commits the label on submit (Enter) or
+/// when focus moves away.
+private struct ApprovedHostRow: View {
+    let host: ClaudeHostRegistry.ApprovedHost
+    let onLabelCommit: (String) -> Void
+    let onRemove: () -> Void
+
+    @State private var label: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundColor(.green)
+                .font(.system(size: 11))
+            Text(host.ip)
+                .font(.system(size: 12).monospacedDigit())
+                .frame(width: 140, alignment: .leading)
+            TextField("Label (optional)", text: $label)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .focused($focused)
+                .onSubmit {
+                    onLabelCommit(label)
+                    focused = false
+                }
+                .onChange(of: focused) { isFocused in
+                    if !isFocused && label != host.label {
+                        onLabelCommit(label)
+                    }
+                }
+            Button("Remove") { onRemove() }
+                .controlSize(.small)
+        }
+        .padding(.vertical, 2)
+        .onAppear { label = host.label }
     }
 }
 
@@ -204,14 +235,7 @@ class ClaudeSettingsViewModel: ObservableObject {
     }
 
     func approve(ip: String) {
-        let ok = ClaudeHostRegistry.shared.approve(ip: ip)
-        if !ok {
-            let alert = NSAlert()
-            alert.messageText = "Approved-host limit reached"
-            alert.informativeText = "Remove a host before approving a new one."
-            alert.alertStyle = .warning
-            alert.runModal()
-        }
+        ClaudeHostRegistry.shared.approve(ip: ip)
         reloadHosts()
     }
 

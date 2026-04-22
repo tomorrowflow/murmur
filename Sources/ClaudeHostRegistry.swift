@@ -27,8 +27,6 @@ final class ClaudeHostRegistry {
         var attemptCount: Int
     }
 
-    static let maxApprovedHosts = 10
-
     /// Fires when approved or pending lists change. UI subscribes to refresh.
     static let didChangeNotification = Notification.Name("ClaudeHostRegistryDidChange")
 
@@ -63,17 +61,13 @@ final class ClaudeHostRegistry {
     }
 
     /// Move an IP from pending → approved. No-op if already approved.
-    /// Returns false if the approved list is already at the cap.
-    @discardableResult
-    func approve(ip: String) -> Bool {
+    func approve(ip: String) {
         var approved = approvedHosts
-        if approved.contains(where: { $0.ip == ip }) { return true }
-        if approved.count >= Self.maxApprovedHosts { return false }
+        if approved.contains(where: { $0.ip == ip }) { return }
         let label = queue.sync { _pending.first(where: { $0.ip == ip })?.label }
         approved.append(ApprovedHost(ip: ip, label: label ?? "", approvedAt: Date()))
         writeApproved(approved)
         queue.sync { _pending.removeAll { $0.ip == ip } }
-        return true
     }
 
     func remove(ip: String) {

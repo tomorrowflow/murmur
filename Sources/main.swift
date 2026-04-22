@@ -1205,6 +1205,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         return raw as? String
     }
 
+    /// file:// path exposed by a window's AXDocument attribute, or nil. For
+    /// Ghostty / Terminal this is the shell's current working directory.
+    private static func axDocumentPath(_ el: AXUIElement) -> String? {
+        var raw: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXDocumentAttribute as CFString, &raw) == .success,
+              let s = raw as? String,
+              let url = URL(string: s) else { return nil }
+        return url.path
+    }
+
+    /// Compact, user-facing description of a window for the recording overlay
+    /// footer. Prefers the window title; appends a "~/…/project" suffix when
+    /// a cwd is available. Returns nil if we can't describe the window — the
+    /// footer is hidden entirely in that case.
+    private static func targetWindowDetail(for window: AXUIElement?) -> String? {
+        guard let w = window else { return nil }
+        let rawTitle = axTitle(w)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = (rawTitle?.isEmpty ?? true) ? nil : rawTitle
+
+        let cwdShort: String? = {
+            guard let path = axDocumentPath(w), !path.isEmpty else { return nil }
+            let home = NSHomeDirectory()
+            if path == home { return "~" }
+            if path.hasPrefix(home + "/") {
+                return "~" + path.dropFirst(home.count)
+            }
+            return path
+        }()
+
+        switch (title, cwdShort) {
+        case let (t?, c?): return "\(t) · \(c)"
+        case let (t?, nil): return t
+        case let (nil, c?): return c
+        default: return nil
+        }
+    }
+
     func pasteTextAtCursor(_ text: String) {
         // Save current clipboard contents first
         let pasteboard = NSPasteboard.general
@@ -1315,6 +1352,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 if overlay.viewModel.targetAppIcon == nil {
                     overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
                     overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
+                    overlay.viewModel.targetWindowDetail = Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
                 }
                 overlay.show(state: bluetoothWarmingUp ? .connecting : .listening)
             }

@@ -20,6 +20,12 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
     @Published var elapsedSeconds: Int = 0
     @Published var targetAppIcon: NSImage?
     @Published var targetAppName: String?
+    /// Where the transcription will be pasted — typically the terminal
+    /// window's title and/or cwd. When non-nil, a small footer appears on
+    /// the overlay so the user can tell which Claude session / window
+    /// they're speaking into. Cleared on dismiss so each recording starts
+    /// fresh.
+    @Published var targetWindowDetail: String?
 
     var onDismiss: (() -> Void)?
     /// Invoked when the user clicks the X button on the overlay. If set, the
@@ -62,6 +68,7 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
         errorText = ""
         targetAppIcon = nil
         targetAppName = nil
+        targetWindowDetail = nil
         onDismiss?()
     }
 
@@ -201,6 +208,27 @@ struct AudioTranscriptionOverlayView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 12)
+            }
+
+            // Target footer — tells the user where the transcription will
+            // land. Only shown when we know the target window, so plain
+            // idle/error states don't get a misleading footer.
+            if let detail = viewModel.targetWindowDetail,
+               viewModel.state != .hidden, viewModel.state != .error {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary.opacity(0.6))
+                    Text(detail)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
             }
         }
         .frame(width: 300)

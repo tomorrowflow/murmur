@@ -1110,11 +1110,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
         if needsSwitch, let target = targetApp {
             print("🔀 Switching to target window in: \(target.localizedName ?? "Unknown") for paste")
-            // Raise the specific window first, then activate the app. Using
-            // .activateAllWindows helps restore deeply backgrounded apps that
-            // would otherwise stay hidden behind other windows.
             if let targetWin = targetWindow {
-                AXUIElementPerformAction(targetWin, kAXRaiseAction as CFString)
+                Self.focusWindow(targetWin)
             }
             target.activate(options: [.activateAllWindows])
 
@@ -1133,29 +1130,79 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     self?.notifyPasteSkipped(target: target.localizedName ?? "the target window")
                     return
                 }
-                self?.pasteTextAtCursor(text)
-                if shouldSendReturn {
-                    self?.sendReturnKey()
-                }
-                // Switch back after paste + Return have been processed
-                // pasteTextAtCursor restores clipboard at 0.7s, sendReturnKey fires at 0.5s
-                let switchBackDelay = shouldSendReturn ? 0.8 : 0.3
-                DispatchQueue.main.asyncAfter(deadline: .now() + switchBackDelay) {
-                    if let returnTo = currentFrontmost, !returnTo.isTerminated {
-                        print("🔀 Switching back to: \(returnTo.localizedName ?? "Unknown")")
-                        // Raise the original window if within the same app
-                        if let curWin = currentWindow {
-                            AXUIElementPerformAction(curWin, kAXRaiseAction as CFString)
-                        }
-                        returnTo.activate()
+
+                // Verify the right WINDOW is focused, not just the right app.
+                // In multi-window apps (Ghostty, Terminal), AXRaiseAction
+                // alone doesn't always transfer key-window status — the
+                // previously-active window can remain main. If we detect a
+                // mismatch, re-focus the target once and give it 150ms before
+                // pasting.
+                if let targetWin = targetWindow,
+                   Self.focusedWindow(forAppPid: target.processIdentifier).map({ !CFEqual($0, targetWin) }) ?? false {
+                    let wantTitle = Self.axTitle(targetWin) ?? "?"
+                    let gotTitle = Self.focusedWindow(forAppPid: target.processIdentifier).flatMap(Self.axTitle) ?? "?"
+                    print("⚠️ Wrong window focused after activate — want \"\(wantTitle)\", got \"\(gotTitle)\". Retrying focus.")
+                    Self.focusWindow(targetWin)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        self?.finishPaste(text: text, shouldSendReturn: shouldSendReturn, returnTo: currentFrontmost, returnWindow: currentWindow)
                     }
+                    return
                 }
+
+                self?.finishPaste(text: text, shouldSendReturn: shouldSendReturn, returnTo: currentFrontmost, returnWindow: currentWindow)
             }
         } else {
             // Target is already frontmost or no target captured — paste directly
             pasteTextAtCursor(text)
             if shouldSendReturn { sendReturnKey() }
         }
+    }
+
+    /// Common tail for the switching paste path — handles the actual paste,
+    /// optional Return, and switch-back. Broken out so the no-retry and the
+    /// retry-after-wrong-window paths share it.
+    private func finishPaste(text: String, shouldSendReturn: Bool, returnTo: NSRunningApplication?, returnWindow: AXUIElement?) {
+        pasteTextAtCursor(text)
+        if shouldSendReturn {
+            sendReturnKey()
+        }
+        // Switch back after paste + Return have been processed
+        // pasteTextAtCursor restores clipboard at 0.7s, sendReturnKey fires at 0.5s
+        let switchBackDelay = shouldSendReturn ? 0.8 : 0.3
+        DispatchQueue.main.asyncAfter(deadline: .now() + switchBackDelay) {
+            if let returnTo = returnTo, !returnTo.isTerminated {
+                print("🔀 Switching back to: \(returnTo.localizedName ?? "Unknown")")
+                if let curWin = returnWindow {
+                    Self.focusWindow(curWin)
+                }
+                returnTo.activate()
+            }
+        }
+    }
+
+    /// Apply the full focus trio to a window: mark it main, mark it focused,
+    /// and raise it in z-order. Each signal nudges a different piece of the
+    /// key-window state. Some apps only respond to one, some to all — doing
+    /// all three is safe and much more reliable than RaiseAction alone.
+    private static func focusWindow(_ win: AXUIElement) {
+        AXUIElementSetAttributeValue(win, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(win, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(win, kAXRaiseAction as CFString)
+    }
+
+    /// Currently focused window of the given app, or nil.
+    private static func focusedWindow(forAppPid pid: pid_t) -> AXUIElement? {
+        let appEl = AXUIElementCreateApplication(pid)
+        var raw: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &raw) == .success,
+              let v = raw, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+        return (v as! AXUIElement)
+    }
+
+    private static func axTitle(_ el: AXUIElement) -> String? {
+        var raw: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &raw) == .success else { return nil }
+        return raw as? String
     }
 
     func pasteTextAtCursor(_ text: String) {

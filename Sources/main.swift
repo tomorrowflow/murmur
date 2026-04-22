@@ -113,6 +113,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var sttPushToTalkStartTime: Date?
     private var sttPushToTalkTargetApp: NSRunningApplication?
     private var sttPushToTalkTargetWindow: AXUIElement?
+    // Auto-record silence handling: when recording starts right after a Claude
+    // recap (not when user triggered PTT manually), auto-cancel if the user
+    // never speaks. Prevents the queue from stalling on an unanswered recap.
+    private var sttAutoRecordAfterRecap = false
+    private var sttSilenceTimeoutTimer: Timer?
+    private static let sttSilenceTimeoutSeconds: TimeInterval = 2.5
+    private static let sttVoiceDetectionThresholdDb: Float = -40.0
     private var readAloudManager: ReadAloudManager?
     private var readAloudOverlay: ReadAloudOverlayWindow?
     private var readAloudInterruptActive = false
@@ -651,7 +658,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         recordingManager.toggleRecording()
     }
 
-    private func startSTTPushToTalk(overrideTargetApp: NSRunningApplication? = nil, overrideTargetWindow: AXUIElement? = nil) {
+    private func startSTTPushToTalk(overrideTargetApp: NSRunningApplication? = nil, overrideTargetWindow: AXUIElement? = nil, isAutoRecordAfterRecap: Bool = false) {
         if openClawRecordingManager?.isRecording == true || openClawRecordingManager?.isProcessing == true {
             print("STT PTT: blocked - OpenClaw recording is active")
             DispatchQueue.main.async { self.resetRightOptionState() }
@@ -676,9 +683,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             return
         }
 
-        print("STT PTT: started (double-tap-hold)")
+        print(isAutoRecordAfterRecap ? "STT PTT: started (auto-record after recap)" : "STT PTT: started (double-tap-hold)")
         sttPushToTalkActive = true
         sttPushToTalkStartTime = Date()
+        sttAutoRecordAfterRecap = isAutoRecordAfterRecap
         if let app = overrideTargetApp {
             sttPushToTalkTargetApp = app
             sttPushToTalkTargetWindow = overrideTargetWindow
@@ -719,6 +727,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     self?.bluetoothWarmingUp = false
                     PTTTonePlayer.shared.playStartTone()
                     print("STT PTT: Bluetooth mic ready — tone played")
+                    self?.armSilenceTimeoutIfNeeded()
                 }
             }
             audioManager.toggleRecording()
@@ -726,7 +735,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             PTTTonePlayer.shared.playStartTone()
             DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) { [weak self] in
                 self?.audioManager.toggleRecording()
+                self?.armSilenceTimeoutIfNeeded()
             }
+        }
+    }
+
+    /// Start the dead-start silence timer if this recording is an auto-record
+    /// after a Claude recap. Timer is one-shot and gets invalidated as soon as
+    /// `audioLevelDidUpdate` observes voice above the speaking threshold.
+    private func armSilenceTimeoutIfNeeded() {
+        sttSilenceTimeoutTimer?.invalidate()
+        guard sttAutoRecordAfterRecap else { return }
+        sttSilenceTimeoutTimer = Timer.scheduledTimer(withTimeInterval: Self.sttSilenceTimeoutSeconds, repeats: false) { [weak self] _ in
+            guard let self = self, self.sttAutoRecordAfterRecap, self.audioManager.isRecording else { return }
+            print("STT PTT: silence timeout — no voice in \(Self.sttSilenceTimeoutSeconds)s, cancelling")
+            self.sttSilenceTimeoutTimer = nil
+            self.audioManager.cancelRecording(asSilence: true)
         }
     }
 
@@ -1339,6 +1363,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func audioLevelDidUpdate(db: Float) {
         AudioLevelMonitor.shared.update(db: db)
         updateStatusBarWithLevel(db: db)
+        // Cancel the auto-record silence timeout as soon as the user starts
+        // speaking. Threshold is well above ambient but below normal speech.
+        if sttSilenceTimeoutTimer != nil && db > Self.sttVoiceDetectionThresholdDb {
+            print("STT PTT: voice detected (db=\(String(format: "%.1f", db))) — disarming silence timeout")
+            sttSilenceTimeoutTimer?.invalidate()
+            sttSilenceTimeoutTimer = nil
+        }
         if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
             if useCursorAnchoredOverlay {
                 audioOverlay?.dismiss()
@@ -1429,6 +1460,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        sttAutoRecordAfterRecap = false
+        sttSilenceTimeoutTimer?.invalidate()
+        sttSilenceTimeoutTimer = nil
 
         if promptRefinementEnabled && speechDuration > 5.0 {
             refineAndPaste(text: text, shouldSendReturn: shouldSendReturn, targetApp: targetApp, targetWindow: targetWindow)
@@ -1583,6 +1617,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        sttAutoRecordAfterRecap = false
+        sttSilenceTimeoutTimer?.invalidate()
+        sttSilenceTimeoutTimer = nil
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
@@ -1620,10 +1657,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             podcastInterruptActive = false
             podcastManager?.cancelInterrupt()
         }
+        let wasAutoRecord = sttAutoRecordAfterRecap
         sttPushToTalkActive = false
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        sttAutoRecordAfterRecap = false
+        sttSilenceTimeoutTimer?.invalidate()
+        sttSilenceTimeoutTimer = nil
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
@@ -1633,11 +1674,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             button.title = ""
         }
 
-        // Optionally show a subtle notification
-        let notification = NSUserNotification()
-        notification.title = "Recording Skipped"
-        notification.informativeText = "Audio was too quiet to transcribe"
-        NSUserNotificationCenter.default.deliver(notification)
+        // Optionally show a subtle notification. Suppress during auto-record
+        // after recap — silent reply is the expected, common case and the
+        // "Audio was too quiet" alert is visual noise there. Queue drain
+        // still runs below so the next recap can proceed.
+        if !wasAutoRecord {
+            let notification = NSUserNotification()
+            notification.title = "Recording Skipped"
+            notification.informativeText = "Audio was too quiet to transcribe"
+            NSUserNotificationCenter.default.deliver(notification)
+        }
 
         recapTargetApp = nil
         recapTargetWindow = nil
@@ -2109,7 +2155,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             recapTargetWindow = nil
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                self.startSTTPushToTalk(overrideTargetApp: targetApp, overrideTargetWindow: targetWindow)
+                self.startSTTPushToTalk(overrideTargetApp: targetApp, overrideTargetWindow: targetWindow, isAutoRecordAfterRecap: true)
                 self.rightOptionState = .recordingToggle
             }
             return

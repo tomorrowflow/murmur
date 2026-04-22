@@ -257,23 +257,32 @@ class AudioTranscriptionManager {
         }
     }
 
-    func cancelRecording() {
+    /// Cancel an in-flight recording.
+    /// - Parameter asSilence: when true, routes to `recordingWasSkippedDueToSilence`
+    ///   instead of `recordingWasCancelled`. Used by the auto-record silence
+    ///   timeout so the UI shows "skipped due to silence" rather than the
+    ///   louder "recording cancelled" notification.
+    func cancelRecording(asSilence: Bool = false) {
         isRecording = false
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()
         AudioDucker.shared.restore()
         audioBuffer.removeAll()
-        
+
         // Remove Escape key monitor
         if let monitor = escapeKeyMonitor {
             NSEvent.removeMonitor(monitor)
             escapeKeyMonitor = nil
         }
-        
-        print("Recording cancelled")
-        
-        delegate?.recordingWasCancelled()
+
+        print(asSilence ? "Recording cancelled — silence timeout" : "Recording cancelled")
+
+        if asSilence {
+            delegate?.recordingWasSkippedDueToSilence()
+        } else {
+            delegate?.recordingWasCancelled()
+        }
     }
     
     @MainActor

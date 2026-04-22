@@ -118,7 +118,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     // never speaks. Prevents the queue from stalling on an unanswered recap.
     private var sttAutoRecordAfterRecap = false
     private var sttSilenceTimeoutTimer: Timer?
-    private static let sttSilenceTimeoutSeconds: TimeInterval = 2.5
+    private static let sttSilenceTimeoutSeconds: TimeInterval = 3.5
     private static let sttVoiceDetectionThresholdDb: Float = -40.0
     private var readAloudManager: ReadAloudManager?
     private var readAloudOverlay: ReadAloudOverlayWindow?

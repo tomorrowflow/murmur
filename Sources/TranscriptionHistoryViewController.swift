@@ -43,7 +43,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         self.clearButton = NSButton(title: "Clear History", target: nil, action: #selector(clearHistory))
         self.refreshButton = NSButton(title: "Refresh", target: nil, action: #selector(refreshHistory))
         self.titleLabel = NSTextField(labelWithString: "History")
-        self.filterControl = NSSegmentedControl(labels: ["All", "Transcripts", "Recaps", "Podcasts"], trackingMode: .selectOne, target: nil, action: #selector(filterChanged))
+        self.filterControl = NSSegmentedControl(labels: ["All", "Transcripts", "Recaps", "Podcasts", "Approvals"], trackingMode: .selectOne, target: nil, action: #selector(filterChanged))
         self.searchField = NSSearchField()
 
         super.init(nibName: nil, bundle: nil)
@@ -162,11 +162,15 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         } else {
             let podcastCount = allEntries.filter { $0.kind == .podcast }.count
             let recapCount = allEntries.filter { $0.kind == .recap }.count
-            let transcriptCount = allEntries.count - podcastCount - recapCount
+            let permissionCount = allEntries.filter { $0.kind == .permission }.count
+            let transcriptCount = allEntries.count - podcastCount - recapCount - permissionCount
             var parts: [String] = []
             parts.append("\(transcriptCount) transcript\(transcriptCount == 1 ? "" : "s")")
             parts.append("\(recapCount) recap\(recapCount == 1 ? "" : "s")")
             parts.append("\(podcastCount) podcast\(podcastCount == 1 ? "" : "s")")
+            if permissionCount > 0 {
+                parts.append("\(permissionCount) approval\(permissionCount == 1 ? "" : "s")")
+            }
             titleLabel.stringValue = "History — " + parts.joined(separator: ", ")
             clearButton.isEnabled = true
         }
@@ -195,6 +199,7 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         case 1: activeFilter = .transcript
         case 2: activeFilter = .recap
         case 3: activeFilter = .podcast
+        case 4: activeFilter = .permission
         default: activeFilter = nil
         }
         applyFilter()
@@ -390,6 +395,9 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         } else if isRecap {
             badgeText = "Claude Recap"
             badgeColor = .systemOrange
+        } else if entry.kind == .permission {
+            badgeText = "Tool Approval — \(entry.title ?? "?")"
+            badgeColor = .systemYellow
         } else {
             badgeText = "Transcript"
             badgeColor = .systemTeal

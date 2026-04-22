@@ -2727,11 +2727,81 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             return (200, MurmurHTTPServer.jsonResponse(["paragraph": current]))
         }
 
+        // Claude Code PreToolUse hook endpoint. Wire it in ~/.claude/settings.json
+        // with "type": "http", "url": "http://127.0.0.1:7878/api/v1/claude/permission-check".
+        // When the "auto-approve tool requests" setting is on, we respond with
+        // permissionDecision=allow and log the tool call to history for audit.
+        // Otherwise respond with permissionDecision=ask to fall through to the
+        // normal interactive prompt — and don't log (user will decide manually).
+        server.post("/api/v1/claude/permission-check") { body in
+            let autoApprove = UserDefaults.standard.bool(forKey: "claude.autoApproveTools")
+
+            guard let json = MurmurHTTPServer.parseJSON(body) else {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "Invalid JSON"]))
+            }
+
+            let toolName = (json["tool_name"] as? String) ?? "Unknown"
+            let toolInput = json["tool_input"] as? [String: Any] ?? [:]
+            let preview = Self.previewForToolInput(toolName: toolName, input: toolInput)
+
+            if autoApprove {
+                await MainActor.run {
+                    TranscriptionHistory.shared.addPermissionEntry(toolName: toolName, inputPreview: preview)
+                }
+                NSLog("Permission: auto-approved \(toolName) — \(preview.prefix(120))")
+                return (200, MurmurHTTPServer.jsonResponse([
+                    "hookSpecificOutput": [
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "permissionDecisionReason": "Auto-approved by Murmur"
+                    ] as [String: Any]
+                ]))
+            } else {
+                // Fall through to normal interactive prompt. Return "ask" so
+                // Claude Code's own permission UI surfaces.
+                return (200, MurmurHTTPServer.jsonResponse([
+                    "hookSpecificOutput": [
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "ask"
+                    ] as [String: Any]
+                ]))
+            }
+        }
+
         do {
             try server.start()
             httpServer = server
         } catch {
             NSLog("[HTTP] Failed to start server: \(error)")
+        }
+    }
+
+    /// Short, readable preview of a PreToolUse tool_input payload for history
+    /// logging. We special-case the common tools so the history shows actual
+    /// commands / file paths, not a dump of the JSON blob.
+    private static func previewForToolInput(toolName: String, input: [String: Any]) -> String {
+        let cap = 300
+        func truncate(_ s: String) -> String {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.count > cap ? String(trimmed.prefix(cap)) + "…" : trimmed
+        }
+        switch toolName {
+        case "Bash":
+            return truncate((input["command"] as? String) ?? "")
+        case "Edit", "Write", "Read":
+            let path = (input["file_path"] as? String) ?? ""
+            return truncate(path)
+        case "WebFetch":
+            return truncate((input["url"] as? String) ?? "")
+        case "WebSearch":
+            return truncate((input["query"] as? String) ?? "")
+        default:
+            // Generic fallback: serialize the input compactly
+            if let data = try? JSONSerialization.data(withJSONObject: input, options: []),
+               let s = String(data: data, encoding: .utf8) {
+                return truncate(s)
+            }
+            return ""
         }
     }
 

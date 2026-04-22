@@ -6,6 +6,7 @@ enum HistoryEntryKind: String, Codable {
     case transcript   // STT / OpenClaw / audio transcription
     case podcast      // podcast session with script markdown + audio WAV
     case recap        // Claude Code assistant final message via Stop hook
+    case permission   // Claude Code tool permission auto-approval
 }
 
 struct TranscriptionEntry: Codable {
@@ -53,6 +54,19 @@ struct TranscriptionEntry: Codable {
         self.title = nil
         self.audioFilename = nil
         self.spokenText = spokenText
+    }
+
+    /// Auto-approved Claude Code tool call. `title` holds the tool name
+    /// (e.g., "Bash"), `text` holds a human-readable preview of the tool
+    /// input (e.g., the command).
+    init(permissionTool toolName: String, inputPreview: String) {
+        self.id = UUID()
+        self.text = inputPreview
+        self.timestamp = Date()
+        self.kind = .permission
+        self.title = toolName
+        self.audioFilename = nil
+        self.spokenText = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -132,6 +146,12 @@ class TranscriptionHistory {
         let entry = TranscriptionEntry(recap: text, spokenText: spokenText)
         insertEntry(entry)
         print("Added Claude recap to history (\(text.count) chars, spoken=\(spokenText?.count ?? 0) chars)")
+    }
+
+    func addPermissionEntry(toolName: String, inputPreview: String) {
+        let entry = TranscriptionEntry(permissionTool: toolName, inputPreview: inputPreview)
+        insertEntry(entry)
+        print("Added permission auto-approval to history: \(toolName) — \(inputPreview.prefix(80))")
     }
 
     /// Record a completed podcast. Persists audio WAV alongside the markdown

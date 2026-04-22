@@ -54,6 +54,12 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 - **Per-window binding**: the target window is resolved by matching the shell's cwd against each terminal window's `AXDocument` attribute — so Claude running in window B stays bound to window B, even if you're focused on window A when it responds. Works with any terminal emulator that exposes `AXDocument` (Ghostty, Terminal.app; falls back to the focused window for others).
 - Optional LLM preprocessing rewrites gnarly assistant output (PIDs, file paths, code blocks, commit hashes, URLs) into a short spoken summary. History keeps both the raw text and the spoken summary with separate copy buttons.
 
+### Claude Code Tool Approvals
+
+- Optional: wire a `PreToolUse` hook so Murmur auto-approves permission prompts instead of stopping to ask "Allow this Bash command? [Yes/No/Yes don't ask again]".
+- Every auto-approval is logged to **History → Approvals** with the tool name and input preview (Bash command, file path, URL, etc.) — so you have a full audit trail of what ran unattended.
+- Enable in **Settings → Read Aloud → Claude Code Tool Approvals**. Default off. Toggle it as your trust warrants — unlike `--dangerously-skip-permissions`, you can flip it per-session and still see every tool call afterward.
+
 ### OpenClaw Assistant
 
 - Voice-driven AI over WebSocket with a floating overlay.
@@ -146,6 +152,23 @@ Drop a Stop hook into `~/.claude/settings.json`:
 
 A reference `recap.sh` lives in this repo under `scripts/claude-code/recap.sh`. It walks up the process tree so Murmur can bind the recap to the terminal Claude Code is running in — even when that terminal is on a different space or hidden behind other apps.
 
+To also auto-approve tool permission prompts (optional), add a `PreToolUse` hook that POSTs directly to Murmur — no shell script:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "~/.claude/hooks/recap.sh" }] }
+    ],
+    "PreToolUse": [
+      { "hooks": [{ "type": "http", "url": "http://127.0.0.1:7878/api/v1/claude/permission-check", "timeout": 10 }] }
+    ]
+  }
+}
+```
+
+Murmur's endpoint consults the **Auto-approve tool requests** toggle in Settings. When on, it returns `permissionDecision: allow` and logs each call to History → Approvals. When off, it returns `ask` and Claude Code shows its normal interactive prompt — nothing is logged.
+
 Enable the recap preprocessor in **Settings → Read Aloud → Claude Code Recap**:
 
 | Mode | What it does |
@@ -213,6 +236,7 @@ Murmur runs an HTTP server on `127.0.0.1:7878` for integrations. Endpoints:
 |---|---|---|
 | `GET` | `/api/v1/health` | Health check |
 | `POST` | `/api/v1/read-aloud` | Speak text via the Read Aloud overlay; optional `autoRecordAfter`, `preprocess`, `sourcePids` |
+| `POST` | `/api/v1/claude/permission-check` | Claude Code `PreToolUse` hook target — auto-approve + log, or defer to interactive prompt |
 | `GET` | `/api/v1/draft/status` | Draft editing session state |
 | `POST` | `/api/v1/draft/{start,stop,navigate,pause,resume,cursor-sync}` | Draft editing control |
 

@@ -80,46 +80,62 @@ class MurmurHTTPServer {
 
         let params = NWParameters.tcp
         params.acceptLocalOnly = (binding == .localhostOnly)
+        // Allow rebinding immediately after a previous listener on the same
+        // port was cancelled. Without SO_REUSEADDR, toggling LAN exposure
+        // would intermittently fail with EADDRINUSE because cancel() is
+        // async and the port lingers briefly.
+        params.allowLocalEndpointReuse = true
 
         let nwPort = NWEndpoint.Port(rawValue: port)!
-        listener = try NWListener(using: params, on: nwPort)
+        let newListener = try NWListener(using: params, on: nwPort)
+        listener = newListener
 
-        listener?.stateUpdateHandler = { [weak self] state in
+        newListener.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
             switch state {
             case .ready:
                 let label = binding == .localhostOnly ? "127.0.0.1" : "0.0.0.0"
-                print("[HTTP] Server listening on \(label):\(self.port)")
+                NSLog("[HTTP] Server listening on \(label):\(self.port)")
             case .failed(let error):
-                print("[HTTP] Server failed: \(error)")
-                self.listener?.cancel()
-                self.listener = nil
+                NSLog("[HTTP] Server failed: \(error)")
+                newListener.cancel()
+                if self.listener === newListener { self.listener = nil }
+            case .waiting(let error):
+                NSLog("[HTTP] Server waiting: \(error)")
             default:
                 break
             }
         }
 
-        listener?.newConnectionHandler = { [weak self] connection in
+        newListener.newConnectionHandler = { [weak self] connection in
             self?.handleConnection(connection)
         }
 
-        listener?.start(queue: queue)
+        newListener.start(queue: queue)
         currentBinding = binding
+        NSLog("[HTTP] Listener start invoked (binding=\(binding == .localhostOnly ? "localhostOnly" : "allInterfaces"))")
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
-        print("[HTTP] Server stopped")
+        NSLog("[HTTP] Server stopped")
     }
 
-    /// Restart the listener on the new binding. No-op if unchanged.
+    /// Restart the listener on the new binding. No-op if the binding matches
+    /// and we're already running. Cancels first, waits briefly for the port
+    /// to release, then re-binds — NWListener.cancel() is async and racing
+    /// a new bind produces EADDRINUSE without that gap.
     func restart(binding: BindingMode) {
-        guard binding != currentBinding || !isRunning else { return }
-        do {
-            try start(binding: binding)
-        } catch {
-            print("[HTTP] Failed to restart on \(binding): \(error)")
+        if binding == currentBinding && isRunning { return }
+        stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self else { return }
+            do {
+                try self.start(binding: binding)
+            } catch {
+                NSLog("[HTTP] Failed to restart on \(binding == .localhostOnly ? "localhost" : "LAN"): \(error)")
+            }
         }
     }
 

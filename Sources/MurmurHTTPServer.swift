@@ -79,7 +79,6 @@ class MurmurHTTPServer {
         stop()
 
         let params = NWParameters.tcp
-        params.acceptLocalOnly = (binding == .localhostOnly)
         // Allow rebinding immediately after a previous listener on the same
         // port was cancelled. Without SO_REUSEADDR, toggling LAN exposure
         // would intermittently fail with EADDRINUSE because cancel() is
@@ -87,7 +86,22 @@ class MurmurHTTPServer {
         params.allowLocalEndpointReuse = true
 
         let nwPort = NWEndpoint.Port(rawValue: port)!
-        let newListener = try NWListener(using: params, on: nwPort)
+        let newListener: NWListener
+        switch binding {
+        case .localhostOnly:
+            // Explicitly bind to 127.0.0.1. `acceptLocalOnly` on NWParameters
+            // is cosmetic — observed in practice to still accept LAN traffic
+            // when the listener binds to ::.port. Setting requiredLocalEndpoint
+            // to the loopback IPv4 address forces a bind on 127.0.0.1 only,
+            // which is enforced at the kernel level.
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(
+                host: .ipv4(.loopback),
+                port: nwPort
+            )
+            newListener = try NWListener(using: params)
+        case .allInterfaces:
+            newListener = try NWListener(using: params, on: nwPort)
+        }
         listener = newListener
 
         newListener.stateUpdateHandler = { [weak self] state in
@@ -157,11 +171,20 @@ class MurmurHTTPServer {
 
             let sourceIp = Self.extractSourceIP(connection: connection)
 
+            // Record every non-localhost, non-approved IP in the pending
+            // list — regardless of path. Exempt paths (health) still respond
+            // 200, but the user gets visibility that "someone is calling us"
+            // so they can approve the host. Without this, health requests
+            // would silently succeed and never surface the caller.
+            if let ip = sourceIp,
+               !ClaudeHostRegistry.isLocalhost(ip: ip),
+               !ClaudeHostRegistry.shared.isApproved(ip: ip) {
+                ClaudeHostRegistry.shared.recordPending(ip: ip)
+            }
+
             // Auth gate: localhost and exempt paths pass; approved remote IPs
-            // pass; anything else returns 403 pending_approval and lands in
-            // the registry's pending list.
+            // pass; anything else returns 403 pending_approval.
             if !self.isAuthorized(sourceIp: sourceIp, path: request.path) {
-                ClaudeHostRegistry.shared.recordPending(ip: sourceIp ?? "unknown")
                 let body = self.jsonBytes([
                     "status": "pending_approval",
                     "message": "Open Murmur → Settings → Claude → Approved Hosts to approve this host.",
@@ -193,9 +216,15 @@ class MurmurHTTPServer {
         guard case .hostPort(let host, _) = connection.endpoint else { return nil }
         switch host {
         case .ipv4(let addr):
-            return addr.debugDescription
+            return "\(addr)"
         case .ipv6(let addr):
-            return addr.debugDescription
+            // IPv4-mapped IPv6 "::ffff:192.168.1.2" → flatten to the IPv4
+            // form so approvals don't double-count the same host by family.
+            let s = "\(addr)"
+            if s.hasPrefix("::ffff:"), let v4 = s.components(separatedBy: ":").last {
+                return v4
+            }
+            return s
         case .name(let name, _):
             return name
         @unknown default:

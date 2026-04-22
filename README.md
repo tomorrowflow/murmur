@@ -58,7 +58,15 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 
 - Optional: wire a `PreToolUse` hook so Murmur auto-approves permission prompts instead of stopping to ask "Allow this Bash command? [Yes/No/Yes don't ask again]".
 - Every auto-approval is logged to **History → Approvals** with the tool name and input preview (Bash command, file path, URL, etc.) — so you have a full audit trail of what ran unattended.
-- Enable in **Settings → Read Aloud → Claude Code Tool Approvals**. Default off. Toggle it as your trust warrants — unlike `--dangerously-skip-permissions`, you can flip it per-session and still see every tool call afterward.
+- Enable in **Settings → Claude → Tool Approvals**. Default off. Toggle it as your trust warrants — unlike `--dangerously-skip-permissions`, you can flip it per-session and still see every tool call afterward.
+
+### Remote Claude Code sessions (LAN)
+
+- Run Claude Code on another machine (remote workstation, a laptop, etc.) and have its hooks call back to Murmur on your Mac.
+- Opt in under **Settings → Claude → Network** by toggling **Expose HTTP API to LAN**. Listener binds from `127.0.0.1:7878` → `0.0.0.0:7878` without needing an app restart.
+- Every remote IP has to be explicitly **approved** before Murmur processes its requests — unknown hosts get a 403 pending-approval response and show up under **Settings → Claude → Approved Hosts** where you click Approve / Deny.
+- Approved hosts persist across app restarts, up to 10. Pending hosts are in-memory only so a hostile LAN host can't fill the list permanently.
+- Localhost hooks work regardless of this setting.
 
 ### OpenClaw Assistant
 
@@ -167,9 +175,22 @@ To also auto-approve tool permission prompts (optional), add a `PreToolUse` hook
 }
 ```
 
-Murmur's endpoint consults the **Auto-approve tool requests** toggle in Settings. When on, it returns `permissionDecision: allow` and logs each call to History → Approvals. When off, it returns `ask` and Claude Code shows its normal interactive prompt — nothing is logged.
+Murmur's endpoint consults the **Auto-approve tool requests** toggle in Settings → Claude. When on, it returns `permissionDecision: allow` and logs each call to History → Approvals. When off, it returns `ask` and Claude Code shows its normal interactive prompt — nothing is logged.
 
-Enable the recap preprocessor in **Settings → Read Aloud → Claude Code Recap**:
+For **remote machines** (Claude Code running on a different host), enable LAN exposure in Settings → Claude → Network, then point the hooks at your Mac's LAN IP:
+
+```json
+"Stop": [
+  { "hooks": [{ "type": "command", "command": "~/.claude/hooks/recap.sh" }] }
+],
+"PreToolUse": [
+  { "hooks": [{ "type": "http", "url": "http://YOUR_MAC_IP:7878/api/v1/claude/permission-check", "timeout": 10 }] }
+]
+```
+
+First request from a new IP lands in **Settings → Claude → Approved Hosts** as a pending entry — click Approve once and future requests pass through.
+
+Enable the recap preprocessor in **Settings → Claude → Claude Code Recap**:
 
 | Mode | What it does |
 |---|---|

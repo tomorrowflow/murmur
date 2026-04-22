@@ -2900,10 +2900,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
 
         do {
-            try server.start()
+            let binding: MurmurHTTPServer.BindingMode = UserDefaults.standard.bool(forKey: "claude.exposeToLan")
+                ? .allInterfaces
+                : .localhostOnly
+            try server.start(binding: binding)
             httpServer = server
         } catch {
             NSLog("[HTTP] Failed to start server: \(error)")
+        }
+
+        // Restart the HTTP listener whenever the user toggles LAN exposure
+        // in the Claude settings tab, so the change takes effect without an
+        // app restart.
+        NotificationCenter.default.addObserver(
+            forName: .claudeExposeToLanDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            let binding: MurmurHTTPServer.BindingMode = UserDefaults.standard.bool(forKey: "claude.exposeToLan")
+                ? .allInterfaces
+                : .localhostOnly
+            NSLog("[HTTP] Toggle changed — restarting on \(binding == .allInterfaces ? "0.0.0.0" : "127.0.0.1")")
+            self?.httpServer?.restart(binding: binding)
         }
     }
 

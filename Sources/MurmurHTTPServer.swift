@@ -3,6 +3,12 @@ import Network
 
 // MARK: - HTTP Router
 
+/// Handlers receive the raw body and the source IP of the caller. The IP is
+/// "127.0.0.1" / "::1" for localhost requests, or a dotted/hex IP for LAN
+/// callers (when the server is bound to 0.0.0.0). Routes don't usually need
+/// to look at the IP directly — the auth gate in MurmurHTTPServer rejects
+/// unapproved remote hosts before routing — but exempt routes (like health)
+/// can use it.
 typealias HTTPHandler = (_ body: Data?) async -> (statusCode: Int, responseBody: Data)
 
 class MurmurHTTPRouter {
@@ -33,12 +39,24 @@ class MurmurHTTPRouter {
 // MARK: - HTTP Server
 
 class MurmurHTTPServer {
+    /// Binding selection — drives whether we accept LAN requests at all.
+    enum BindingMode {
+        case localhostOnly
+        case allInterfaces
+    }
+
     private var listener: NWListener?
     private let router: MurmurHTTPRouter
     private let port: UInt16
     private let queue = DispatchQueue(label: "com.murmur.httpserver")
+    private var currentBinding: BindingMode = .localhostOnly
+
+    /// Paths that bypass the auth gate even for LAN requests. /health is
+    /// useful for external uptime checks and leaks nothing.
+    private let authExemptPaths: Set<String> = ["/api/v1/health"]
 
     var isRunning: Bool { listener != nil }
+    var activeBinding: BindingMode { currentBinding }
 
     init(port: UInt16 = 7878) {
         self.port = port
@@ -57,17 +75,21 @@ class MurmurHTTPServer {
 
     // MARK: - Lifecycle
 
-    func start() throws {
+    func start(binding: BindingMode) throws {
+        stop()
+
         let params = NWParameters.tcp
-        params.acceptLocalOnly = true
+        params.acceptLocalOnly = (binding == .localhostOnly)
 
         let nwPort = NWEndpoint.Port(rawValue: port)!
         listener = try NWListener(using: params, on: nwPort)
 
-        listener?.stateUpdateHandler = { state in
+        listener?.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
             switch state {
             case .ready:
-                print("[HTTP] Server listening on 127.0.0.1:\(self.port)")
+                let label = binding == .localhostOnly ? "127.0.0.1" : "0.0.0.0"
+                print("[HTTP] Server listening on \(label):\(self.port)")
             case .failed(let error):
                 print("[HTTP] Server failed: \(error)")
                 self.listener?.cancel()
@@ -82,12 +104,23 @@ class MurmurHTTPServer {
         }
 
         listener?.start(queue: queue)
+        currentBinding = binding
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
         print("[HTTP] Server stopped")
+    }
+
+    /// Restart the listener on the new binding. No-op if unchanged.
+    func restart(binding: BindingMode) {
+        guard binding != currentBinding || !isRunning else { return }
+        do {
+            try start(binding: binding)
+        } catch {
+            print("[HTTP] Failed to restart on \(binding): \(error)")
+        }
     }
 
     // MARK: - Connection Handling
@@ -106,6 +139,22 @@ class MurmurHTTPServer {
                 return
             }
 
+            let sourceIp = Self.extractSourceIP(connection: connection)
+
+            // Auth gate: localhost and exempt paths pass; approved remote IPs
+            // pass; anything else returns 403 pending_approval and lands in
+            // the registry's pending list.
+            if !self.isAuthorized(sourceIp: sourceIp, path: request.path) {
+                ClaudeHostRegistry.shared.recordPending(ip: sourceIp ?? "unknown")
+                let body = self.jsonBytes([
+                    "status": "pending_approval",
+                    "message": "Open Murmur → Settings → Claude → Approved Hosts to approve this host.",
+                    "ip": sourceIp ?? "unknown"
+                ])
+                self.sendResponse(connection: connection, statusCode: 403, body: body)
+                return
+            }
+
             Task {
                 let (statusCode, responseBody) = await self.router.route(
                     method: request.method,
@@ -114,6 +163,27 @@ class MurmurHTTPServer {
                 )
                 self.sendResponse(connection: connection, statusCode: statusCode, body: responseBody)
             }
+        }
+    }
+
+    private func isAuthorized(sourceIp: String?, path: String) -> Bool {
+        if authExemptPaths.contains(path) { return true }
+        guard let ip = sourceIp else { return false }
+        if ClaudeHostRegistry.isLocalhost(ip: ip) { return true }
+        return ClaudeHostRegistry.shared.isApproved(ip: ip)
+    }
+
+    private static func extractSourceIP(connection: NWConnection) -> String? {
+        guard case .hostPort(let host, _) = connection.endpoint else { return nil }
+        switch host {
+        case .ipv4(let addr):
+            return addr.debugDescription
+        case .ipv6(let addr):
+            return addr.debugDescription
+        case .name(let name, _):
+            return name
+        @unknown default:
+            return nil
         }
     }
 
@@ -173,6 +243,7 @@ class MurmurHTTPServer {
         switch statusCode {
         case 200: statusText = "OK"
         case 400: statusText = "Bad Request"
+        case 403: statusText = "Forbidden"
         case 404: statusText = "Not Found"
         case 409: statusText = "Conflict"
         case 500: statusText = "Internal Server Error"

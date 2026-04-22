@@ -9,6 +9,7 @@ enum ManagerTab: Int {
     case openClaw = 4
     case podcast = 5
     case readAloud = 6
+    case claude = 7
 }
 
 class UnifiedManagerWindow: NSWindowController {
@@ -20,6 +21,7 @@ class UnifiedManagerWindow: NSWindowController {
     private var openClawViewController: OpenClawSettingsViewController?
     private var podcastViewController: PodcastSettingsViewController?
     private var readAloudViewController: ReadAloudSettingsViewController?
+    private var claudeViewController: ClaudeSettingsViewController?
 
     override init(window: NSWindow?) {
         let window = NSWindow(
@@ -96,6 +98,13 @@ class UnifiedManagerWindow: NSWindowController {
         readAloudTab.label = "Read Aloud"
         readAloudTab.image = NSImage(systemSymbolName: "book.fill", accessibilityDescription: "Read Aloud")
         tabViewController.addTabViewItem(readAloudTab)
+
+        // Claude Tab
+        claudeViewController = ClaudeSettingsViewController()
+        let claudeTab = NSTabViewItem(viewController: claudeViewController!)
+        claudeTab.label = "Claude"
+        claudeTab.image = NSImage(systemSymbolName: "terminal.fill", accessibilityDescription: "Claude")
+        tabViewController.addTabViewItem(claudeTab)
 
         window?.contentViewController = tabViewController
     }

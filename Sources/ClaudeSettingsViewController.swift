@@ -68,9 +68,18 @@ struct ClaudeSettingsView: View {
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .padding(.vertical, 4)
+                    } else if viewModel.pending.isEmpty && viewModel.approved.isEmpty {
+                        Text("No hosts yet. Unknown remote hosts hitting the endpoint will appear here.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 4)
                     } else {
-                        pendingSection
-                        approvedSection
+                        if !viewModel.pending.isEmpty {
+                            pendingSection
+                        }
+                        if !viewModel.approved.isEmpty {
+                            approvedSection
+                        }
                     }
                 }
             }
@@ -89,40 +98,33 @@ struct ClaudeSettingsView: View {
 
     @ViewBuilder
     private var pendingSection: some View {
-        if viewModel.pending.isEmpty {
-            Text("No pending requests. Unknown hosts hitting the endpoint will appear here.")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .padding(.vertical, 4)
-        } else {
-            Text("Pending (\(viewModel.pending.count))")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-            ForEach(viewModel.pending, id: \.ip) { host in
-                HStack(spacing: 8) {
-                    Image(systemName: "clock")
-                        .foregroundColor(.orange)
-                        .font(.system(size: 11))
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(host.ip)
-                            .font(.system(size: 12).monospacedDigit())
-                        if let label = host.label, !label.isEmpty {
-                            Text(label)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                        }
-                        Text("\(host.attemptCount) attempt\(host.attemptCount == 1 ? "" : "s")")
+        Text("Pending (\(viewModel.pending.count))")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.secondary)
+        ForEach(viewModel.pending, id: \.ip) { host in
+            HStack(spacing: 8) {
+                Image(systemName: "clock")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 11))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(host.ip)
+                        .font(.system(size: 12).monospacedDigit())
+                    if let label = host.label, !label.isEmpty {
+                        Text(label)
                             .font(.system(size: 10))
-                            .foregroundColor(.secondary.opacity(0.7))
+                            .foregroundColor(.secondary)
                     }
-                    Spacer()
-                    Button("Approve") { viewModel.approve(ip: host.ip) }
-                        .controlSize(.small)
-                    Button("Deny") { viewModel.deny(ip: host.ip) }
-                        .controlSize(.small)
+                    Text("\(host.attemptCount) attempt\(host.attemptCount == 1 ? "" : "s")")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
                 }
-                .padding(.vertical, 2)
+                Spacer()
+                Button("Approve") { viewModel.approve(ip: host.ip) }
+                    .controlSize(.small)
+                Button("Deny") { viewModel.deny(ip: host.ip) }
+                    .controlSize(.small)
             }
+            .padding(.vertical, 2)
         }
     }
 
@@ -133,22 +135,15 @@ struct ClaudeSettingsView: View {
         if !viewModel.pending.isEmpty {
             Divider().padding(.vertical, 4)
         }
-        if viewModel.approved.isEmpty {
-            Text("No approved hosts yet.")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .padding(.vertical, 4)
-        } else {
-            Text("Approved")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-            ForEach(viewModel.approved, id: \.ip) { host in
-                ApprovedHostRow(
-                    host: host,
-                    onLabelCommit: { label in viewModel.rename(ip: host.ip, label: label) },
-                    onRemove: { viewModel.remove(ip: host.ip) }
-                )
-            }
+        Text("Approved")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.secondary)
+        ForEach(viewModel.approved, id: \.ip) { host in
+            ApprovedHostRow(
+                host: host,
+                onLabelCommit: { label in viewModel.rename(ip: host.ip, label: label) },
+                onRemove: { viewModel.remove(ip: host.ip) }
+            )
         }
     }
 }

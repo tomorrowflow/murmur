@@ -1460,6 +1460,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        bluetoothWarmingUp = false
         sttAutoRecordAfterRecap = false
         sttSilenceTimeoutTimer?.invalidate()
         sttSilenceTimeoutTimer = nil
@@ -1588,6 +1589,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        bluetoothWarmingUp = false
         stopTranscriptionIndicator()
         if !wasPodcastInterrupt && !wasReadAloudInterrupt && !wasDraftEditInterrupt {
             ensureAudioOverlay().showError(error)
@@ -1617,6 +1619,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        bluetoothWarmingUp = false
         sttAutoRecordAfterRecap = false
         sttSilenceTimeoutTimer?.invalidate()
         sttSilenceTimeoutTimer = nil
@@ -1662,6 +1665,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkStartTime = nil
         sttPushToTalkTargetApp = nil
         sttPushToTalkTargetWindow = nil
+        bluetoothWarmingUp = false
         sttAutoRecordAfterRecap = false
         sttSilenceTimeoutTimer?.invalidate()
         sttSilenceTimeoutTimer = nil

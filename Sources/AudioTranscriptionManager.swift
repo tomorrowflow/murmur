@@ -38,7 +38,15 @@ class AudioTranscriptionManager {
     /// Used to detect when Bluetooth mic profile switch is complete.
     var onMicReady: (() -> Void)?
     private var micReadyFired = false
-    
+
+    // AirPods/HFP recovery: macOS posts AVAudioEngineConfigurationChange when
+    // a Bluetooth mic switches codec (A2DP→HFP), which auto-stops the engine
+    // before any buffer arrives. We restart it up to `maxConfigChangeRetries`
+    // times so the recording actually begins.
+    private var configChangeObserver: NSObjectProtocol?
+    private var configChangeRetries = 0
+    private let maxConfigChangeRetries = 3
+
     // Transcription state
     private var isTranscribing = false
     
@@ -166,9 +174,26 @@ class AudioTranscriptionManager {
         audioEngine = AVAudioEngine()
         inputNode = audioEngine.inputNode
         configureInputDevice()
+        configChangeRetries = 0
 
+        installInputTap()
+        registerConfigChangeObserver()
+
+        do {
+            audioEngine.prepare()
+            try audioEngine.start()
+            print("🎤 Recording started...")
+            isStartingRecording = false
+        } catch {
+            print("Failed to start audio engine: \(error)")
+            isRecording = false
+            isStartingRecording = false
+            removeConfigChangeObserver()
+        }
+    }
+
+    private func installInputTap() {
         let recordingFormat = inputNode.outputFormat(forBus: 0)
-        audioEngine.prepare()
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
@@ -224,19 +249,64 @@ class AudioTranscriptionManager {
                 }
             }
         }
+    }
+
+    private func registerConfigChangeObserver() {
+        removeConfigChangeObserver()
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleConfigurationChange()
+        }
+    }
+
+    private func removeConfigChangeObserver() {
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
+        }
+    }
+
+    private func handleConfigurationChange() {
+        guard isRecording else { return }
+        guard configChangeRetries < maxConfigChangeRetries else {
+            print("⚠️ Audio engine restart budget exhausted after Bluetooth codec switch")
+            removeConfigChangeObserver()
+            inputNode.removeTap(onBus: 0)
+            audioEngine.stop()
+            audioEngine.reset()
+            AudioDucker.shared.restore()
+            isRecording = false
+            audioBuffer.removeAll()
+            delegate?.transcriptionDidFail(error: "Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
+            return
+        }
+        configChangeRetries += 1
+        print("🔁 Audio engine config changed (Bluetooth codec switch?). Restart attempt \(configChangeRetries)/\(maxConfigChangeRetries)")
+
+        inputNode.removeTap(onBus: 0)
+        // Re-acquire input node — its format may have changed after the codec switch.
+        inputNode = audioEngine.inputNode
+        installInputTap()
 
         do {
+            audioEngine.prepare()
             try audioEngine.start()
-            print("🎤 Recording started...")
-            isStartingRecording = false
         } catch {
-            print("Failed to start audio engine: \(error)")
+            print("⚠️ Failed to restart audio engine after config change: \(error)")
+            // Schedule a retry on next config-change notification, or bail out
+            // if the engine refuses to come back up.
+            removeConfigChangeObserver()
             isRecording = false
-            isStartingRecording = false
+            AudioDucker.shared.restore()
+            delegate?.transcriptionDidFail(error: "Failed to restart audio engine: \(error.localizedDescription)")
         }
     }
 
     func stopRecording() {
+        removeConfigChangeObserver()
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()
@@ -264,6 +334,7 @@ class AudioTranscriptionManager {
     ///   louder "recording cancelled" notification.
     func cancelRecording(asSilence: Bool = false) {
         isRecording = false
+        removeConfigChangeObserver()
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()

@@ -37,6 +37,7 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 - Optional Ollama prompt refinement for recordings > 5s — removes filler, fixes punctuation.
 - Optional auto-Return after paste — ideal for chat UIs and Claude Code prompts.
 - Configurable text replacements for common STT misrecognitions.
+- Resilient to AirPods / Bluetooth codec switches: when macOS swaps A2DP→HFP at recording start, Murmur restarts the audio engine automatically instead of hanging in "preparing".
 
 ### Read Aloud
 

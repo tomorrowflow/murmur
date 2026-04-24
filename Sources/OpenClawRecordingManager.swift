@@ -48,6 +48,11 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     var onMicReady: (() -> Void)?
     private var micReadyFired = false
 
+    // AirPods/HFP recovery — see AudioTranscriptionManager for rationale.
+    private var configChangeObserver: NSObjectProtocol?
+    private var configChangeRetries = 0
+    private let maxConfigChangeRetries = 3
+
     // Response tracking
     private var currentRunId: String?
     private var accumulatedResponse = ""
@@ -128,6 +133,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     func cancelRecording() {
         if isRecording {
             isRecording = false
+            removeConfigChangeObserver()
             inputNode.removeTap(onBus: 0)
             audioEngine.stop()
             audioEngine.reset()
@@ -153,6 +159,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         micReadyFired = false
         accumulatedResponse = ""
         currentRunId = nil
+        configChangeRetries = 0
 
         // Fresh audio engine
         audioEngine = AVAudioEngine()
@@ -179,8 +186,24 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             return event
         }
 
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        installInputTap()
+        registerConfigChangeObserver()
 
+        do {
+            audioEngine.prepare()
+            try audioEngine.start()
+            isRecording = true
+            isStartingRecording = false
+            print("OpenClaw: recording started")
+        } catch {
+            print("OpenClaw: failed to start audio engine: \(error)")
+            isStartingRecording = false
+            removeConfigChangeObserver()
+        }
+    }
+
+    private func installInputTap() {
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
@@ -236,21 +259,62 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
                 }
             }
         }
+    }
+
+    private func registerConfigChangeObserver() {
+        removeConfigChangeObserver()
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleConfigurationChange()
+        }
+    }
+
+    private func removeConfigChangeObserver() {
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
+        }
+    }
+
+    private func handleConfigurationChange() {
+        guard isRecording else { return }
+        guard configChangeRetries < maxConfigChangeRetries else {
+            print("OpenClaw: ⚠️ engine restart budget exhausted after Bluetooth codec switch")
+            removeConfigChangeObserver()
+            inputNode.removeTap(onBus: 0)
+            audioEngine.stop()
+            audioEngine.reset()
+            isRecording = false
+            audioBuffer.removeAll()
+            removeEscapeMonitor()
+            delegate?.openClawDidFail(error: "Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
+            return
+        }
+        configChangeRetries += 1
+        print("OpenClaw: 🔁 engine config changed. Restart attempt \(configChangeRetries)/\(maxConfigChangeRetries)")
+
+        inputNode.removeTap(onBus: 0)
+        inputNode = audioEngine.inputNode
+        installInputTap()
 
         do {
             audioEngine.prepare()
             try audioEngine.start()
-            isRecording = true
-            isStartingRecording = false
-            print("OpenClaw: recording started")
         } catch {
-            print("OpenClaw: failed to start audio engine: \(error)")
-            isStartingRecording = false
+            print("OpenClaw: ⚠️ failed to restart engine after config change: \(error)")
+            removeConfigChangeObserver()
+            isRecording = false
+            removeEscapeMonitor()
+            delegate?.openClawDidFail(error: "Failed to restart audio engine: \(error.localizedDescription)")
         }
     }
 
     private func stopRecording() {
         isRecording = false
+        removeConfigChangeObserver()
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()

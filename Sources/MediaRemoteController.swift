@@ -72,7 +72,7 @@ final class MediaRemoteController {
         let url = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
         guard let bundle = CFBundleCreate(kCFAllocatorDefault, url as CFURL),
               CFBundleLoadExecutable(bundle) else {
-            print("MediaRemoteController: failed to load MediaRemote framework")
+            NSLog("MediaRemoteController: failed to load MediaRemote framework")
             self.isPlaying = nil
             self.registerNotifications = nil
             return
@@ -80,7 +80,7 @@ final class MediaRemoteController {
         if let isPlayingPtr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString) {
             self.isPlaying = unsafeBitCast(isPlayingPtr, to: IsPlayingFn.self)
         } else {
-            print("MediaRemoteController: MRMediaRemoteGetNowPlayingApplicationIsPlaying missing — pause cannot be state-aware")
+            NSLog("MediaRemoteController: MRMediaRemoteGetNowPlayingApplicationIsPlaying missing — pause cannot be state-aware")
             self.isPlaying = nil
         }
         if let regPtr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteRegisterForNowPlayingNotifications" as CFString) {
@@ -95,7 +95,7 @@ final class MediaRemoteController {
                 self?.handleIsPlayingChanged()
             }
         } else {
-            print("MediaRemoteController: MRMediaRemoteRegisterForNowPlayingNotifications missing — spurious-resume watchdog disabled")
+            NSLog("MediaRemoteController: MRMediaRemoteRegisterForNowPlayingNotifications missing — spurious-resume watchdog disabled")
             self.registerNotifications = nil
         }
     }
@@ -122,7 +122,7 @@ final class MediaRemoteController {
             // No state-query API → blind toggle.
             sendPlayPauseToggle()
             didPause = true
-            print("MediaRemoteController: sent play/pause toggle (state unknown)")
+            NSLog("MediaRemoteController: sent play/pause toggle (state unknown)")
             completion?()
             return
         }
@@ -132,7 +132,7 @@ final class MediaRemoteController {
                 return
             }
             guard playing else {
-                print("MediaRemoteController: nothing playing — skipping pause")
+                NSLog("MediaRemoteController: nothing playing — skipping pause")
                 completion?()
                 return
             }
@@ -142,7 +142,7 @@ final class MediaRemoteController {
             }
             self.sendPlayPauseToggle()
             self.didPause = true
-            print("MediaRemoteController: paused active media via media-key")
+            NSLog("MediaRemoteController: paused active media via media-key")
             completion?()
         }
     }
@@ -164,15 +164,15 @@ final class MediaRemoteController {
                 isPlaying(.main) { [weak self] playing in
                     guard let self = self else { return }
                     if playing {
-                        print("MediaRemoteController: media already playing — skip resume toggle")
+                        NSLog("MediaRemoteController: media already playing — skip resume toggle")
                         return
                     }
                     self.sendPlayPauseToggle()
-                    print("MediaRemoteController: resumed media we paused via media-key")
+                    NSLog("MediaRemoteController: resumed media we paused via media-key")
                 }
             } else {
                 self.sendPlayPauseToggle()
-                print("MediaRemoteController: resumed media we paused (state unknown)")
+                NSLog("MediaRemoteController: resumed media we paused (state unknown)")
             }
         }
         pendingResume = work
@@ -190,7 +190,7 @@ final class MediaRemoteController {
         isPlaying(.main) { [weak self] playing in
             guard let self = self, self.didPause, playing else { return }
             self.sendPlayPauseToggle()
-            print("MediaRemoteController: spurious resume detected — re-paused via media-key")
+            NSLog("MediaRemoteController: spurious resume detected — re-paused via media-key")
         }
     }
 
@@ -199,16 +199,34 @@ final class MediaRemoteController {
     /// resulting media key to whichever app currently owns Now Playing —
     /// works for native media apps and browser-embedded video alike,
     /// regardless of audio output device. Requires Accessibility (which
-    /// Murmur already has for paste); on some macOS versions it also
-    /// benefits from Input Monitoring being granted.
+    /// Murmur already has for paste); on macOS 15+ also requires Input
+    /// Monitoring to actually deliver the synthesized event to other
+    /// processes.
     private func sendPlayPauseToggle() {
         let now = Date()
         if now.timeIntervalSince(lastMediaKeyAt) < Self.mediaKeyMinInterval {
             return
         }
         lastMediaKeyAt = now
+        NSLog("MediaRemoteController: posting F8 media-key (down + up)")
         postMediaKey(keyState: Self.nxKeyDown)
         postMediaKey(keyState: Self.nxKeyUp)
+        // Verify the toggle actually moved state. If isPlaying is unchanged
+        // after a short delay, the system filtered the event — most likely
+        // Input Monitoring not granted.
+        if let isPlaying = isPlaying {
+            let beforeDidPause = didPause
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                isPlaying(.main) { playing in
+                    let expectedPlaying = !beforeDidPause
+                    if playing != expectedPlaying {
+                        NSLog("MediaRemoteController: WARNING — media-key did not change playback (state still playing=\(playing)). Likely missing Input Monitoring permission for Murmur in System Settings → Privacy & Security → Input Monitoring.")
+                    } else {
+                        NSLog("MediaRemoteController: media-key delivered (playing=\(playing))")
+                    }
+                }
+            }
+        }
     }
 
     private func postMediaKey(keyState: Int) {
@@ -224,13 +242,17 @@ final class MediaRemoteController {
             data1: data1,
             data2: -1
         ) else {
-            print("MediaRemoteController: failed to construct system-defined event")
+            NSLog("MediaRemoteController: failed to construct system-defined event")
             return
         }
         guard let cgEvent = event.cgEvent else {
-            print("MediaRemoteController: NSEvent has no underlying CGEvent")
+            NSLog("MediaRemoteController: NSEvent has no underlying CGEvent")
             return
         }
+        // Post via two taps to maximize chance of delivery — different tap
+        // points are filtered differently across macOS versions, and the
+        // Now Playing dispatch listens at the HID level on most versions.
         cgEvent.post(tap: .cghidEventTap)
+        cgEvent.post(tap: .cgAnnotatedSessionEventTap)
     }
 }

@@ -101,6 +101,10 @@ class ReadAloudManager {
     // Audio collection for export
     private(set) var audioSegments: [Data] = []
 
+    // Bluetooth output is primed once per session by playing a brief silent
+    // buffer; subsequent chunks ride the warm path. Reset on stop.
+    private var hasPrimedBluetoothOutput = false
+
     // Escape key monitors
     private var escapeGlobalMonitor: Any?
     private var escapeLocalMonitor: Any?
@@ -182,6 +186,40 @@ class ReadAloudManager {
         readingTask = nil
         answerTask = nil
         reset()
+    }
+
+    /// Play a brief silent buffer so the Bluetooth output device commits to a
+    /// playback profile before the real TTS starts. Without this, the first
+    /// half-sentence on AirPods is clipped while the A2DP→playback profile
+    /// switch happens.
+    private func primeBluetoothOutput() async {
+        let sampleRate: Double = 44100
+        let durationSeconds: Double = 0.8
+        let frameCount = AVAudioFrameCount(sampleRate * durationSeconds)
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return
+        }
+        buffer.frameLength = frameCount
+        // buffer is zero-filled by default (silence).
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        do {
+            try engine.start()
+        } catch {
+            NSLog("ReadAloud: BT prime engine failed: \(error.localizedDescription)")
+            return
+        }
+        await withCheckedContinuation { continuation in
+            player.scheduleBuffer(buffer, at: nil, options: []) {
+                continuation.resume()
+            }
+            player.play()
+        }
+        engine.stop()
+        NSLog("ReadAloud: BT output primed")
     }
 
     // MARK: - Escape Key
@@ -639,6 +677,13 @@ class ReadAloudManager {
         // Collect audio for export
         audioSegments.append(data)
 
+        // Per user setting: pause Spotify/Music/Podcasts/etc. for the whole
+        // playback session. resumeIfWePaused() in the session-end path
+        // restores them. Idempotent — repeated chunks won't re-pause.
+        if AudioDuckMode.current.pausesMediaDuringPlayback {
+            MediaRemoteController.shared.pause()
+        }
+
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("readAloud_tts_\(UUID().uuidString).wav")
         try data.write(to: tempURL)
@@ -647,6 +692,17 @@ class ReadAloudManager {
         let player = try AVAudioPlayer(contentsOf: tempURL)
         player.prepareToPlay()
         currentPlayer = player
+
+        // Bluetooth output (AirPods etc.) takes 1-2s to switch from A2DP to
+        // a profile that handles low-latency playback. Without a pre-warm,
+        // the first half-sentence gets clipped while the profile switches.
+        // A short silent priming buffer forces the switch before the real
+        // audio plays. Only on the first chunk of a session (subsequent
+        // chunks ride the already-warm path).
+        if !hasPrimedBluetoothOutput && AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth() {
+            await primeBluetoothOutput()
+            hasPrimedBluetoothOutput = true
+        }
 
         // If already paused, don't start playing yet
         if !isPaused {
@@ -732,6 +788,10 @@ class ReadAloudManager {
         readingTask = nil
         answerTask = nil
         answerTTSTask = nil
+        // If we paused the user's media to talk, resume it now. Idempotent —
+        // safe even if reset() runs before any playback (no-op).
+        MediaRemoteController.shared.resumeIfWePaused()
+        hasPrimedBluetoothOutput = false
         fullText = ""
         sentences = []
         currentSentenceIndex = 0

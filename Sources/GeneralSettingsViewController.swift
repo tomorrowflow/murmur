@@ -4,7 +4,7 @@ import ServiceManagement
 
 struct GeneralSettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @AppStorage("audio.voiceProcessing") private var voiceProcessingEnabled = false
+    @AppStorage(AudioDuckMode.userDefaultsKey) private var duckModeRaw = AudioDuckMode.current.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -23,15 +23,18 @@ struct GeneralSettingsView: View {
                     }
                 }
 
-                Section("Audio") {
-                    Toggle(isOn: $voiceProcessingEnabled) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Audio Ducking")
-                            Text("Lower system volume during recording to reduce mic bleed from speakers. Volume is restored when recording stops.")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
+                Section("Audio Ducking") {
+                    Picker("Mode", selection: $duckModeRaw) {
+                        Text("Off").tag(AudioDuckMode.off.rawValue)
+                        Text("During recording only").tag(AudioDuckMode.recording.rawValue)
+                        Text("Recording + pause media during playback").tag(AudioDuckMode.recordingAndPlayback.rawValue)
                     }
+                    .pickerStyle(.radioGroup)
+
+                    Text("Off: Murmur leaves system audio alone.\nRecording: master volume drops while STT is recording, reducing mic bleed from speakers.\nRecording + playback: also pauses Spotify/Music/Podcasts (or any app that owns macOS Now Playing) while Murmur reads aloud, then resumes when finished.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .formStyle(.grouped)

@@ -9,6 +9,8 @@ struct ShortcutsSettingsView: View {
     @AppStorage("ptt.stt.promptRefinement") private var sttPromptRefinement = false
     @AppStorage("ptt.maxRecordingSeconds") private var maxRecordingSeconds = 300
     @AppStorage("ptt.cursorAnchoredOverlay") private var cursorAnchoredOverlay = false
+    @AppStorage("ptt.autoStopAfterSilence") private var autoStopAfterSilence = false
+    @AppStorage("ptt.silenceTimeoutSeconds") private var silenceTimeoutSeconds: Double = 5.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -85,6 +87,30 @@ struct ShortcutsSettingsView: View {
                     } label: {
                         Text("Max Recording Duration")
                             .frame(width: 220, alignment: .leading)
+                    }
+
+                    Toggle(isOn: $autoStopAfterSilence) {
+                        HStack {
+                            Text("Auto-stop after silence")
+                                .frame(width: 220, alignment: .leading)
+                            Text("End recording N seconds after you stop speaking, then transcribe")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(!sttPTTEnabled)
+
+                    if autoStopAfterSilence {
+                        HStack {
+                            Text("Silence timeout")
+                                .frame(width: 220, alignment: .leading)
+                            Slider(value: $silenceTimeoutSeconds, in: 1.0...10.0, step: 0.5)
+                            Text("\(String(format: "%.1f", silenceTimeoutSeconds))s")
+                                .font(.system(size: 11).monospacedDigit())
+                                .foregroundColor(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                        .disabled(!sttPTTEnabled)
                     }
                 }
             }

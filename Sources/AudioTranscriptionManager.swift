@@ -143,7 +143,7 @@ class AudioTranscriptionManager {
     }
 
     private var useEchoCancellation: Bool {
-        UserDefaults.standard.bool(forKey: "audio.voiceProcessing")
+        AudioDuckMode.current.ducksRecording
     }
 
     func startRecording() {

@@ -118,8 +118,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     // never speaks. Prevents the queue from stalling on an unanswered recap.
     private var sttAutoRecordAfterRecap = false
     private var sttSilenceTimeoutTimer: Timer?
-    private static let sttSilenceTimeoutSeconds: TimeInterval = 3.5
+    private static let sttDeadStartTimeoutSeconds: TimeInterval = 3.5
     private static let sttVoiceDetectionThresholdDb: Float = -40.0
+    // Tracks whether the current recording has captured at least one
+    // above-threshold sample. Used to distinguish "user never spoke" (cancel)
+    // from "user spoke and then went silent" (stop + transcribe).
+    private var sttHasCapturedVoice = false
     private var readAloudManager: ReadAloudManager?
     private var readAloudOverlay: ReadAloudOverlayWindow?
     private var readAloudInterruptActive = false
@@ -687,6 +691,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttPushToTalkActive = true
         sttPushToTalkStartTime = Date()
         sttAutoRecordAfterRecap = isAutoRecordAfterRecap
+        sttHasCapturedVoice = false
+        cancelUtteranceSilenceTimer()
         if let app = overrideTargetApp {
             sttPushToTalkTargetApp = app
             sttPushToTalkTargetWindow = overrideTargetWindow
@@ -713,6 +719,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         }
         stopTranscriptionIndicator()
 
+        // Show the overlay immediately so the keystroke feels responsive,
+        // regardless of audio device. State starts at .connecting and is
+        // explicitly transitioned to .listening once the engine is actually
+        // capturing audio — no longer waiting for the first audio buffer to
+        // arrive via audioLevelDidUpdate (which on BT can be 1-2s late).
+        showSTTOverlayImmediately(state: .connecting)
+
         if AudioDeviceManager.shared.isCurrentInputDeviceBluetooth() {
             // Bluetooth devices (AirPods) switch from A2DP to HFP profile when
             // the mic starts. Both input AND output are unavailable during this
@@ -720,52 +733,119 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             // (proving the profile switch is complete) before playing the tone.
             print("STT PTT: Bluetooth mic detected — waiting for profile switch")
             bluetoothWarmingUp = true
-            // Show the overlay immediately in .connecting state so the keystroke
-            // feels responsive. Without this the overlay only appears once the
-            // first audio buffer arrives (1-2s later on BT), making double-tap
-            // PTT feel broken when headphones are on.
-            if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive
-                && !useCursorAnchoredOverlay {
-                let overlay = ensureAudioOverlay()
-                if overlay.viewModel.targetAppIcon == nil {
-                    overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
-                    overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
-                    overlay.viewModel.targetWindowDetail = Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
-                }
-                overlay.show(state: .connecting)
-            }
             audioManager.onMicReady = { [weak self] in
-                // Input is live, but give HFP output path a moment to stabilize
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self?.audioManager.clearAudioBuffer()
-                    self?.bluetoothWarmingUp = false
+                // Input is live, but give HFP output AND input paths a moment
+                // to fully stabilize. Empirically AirPods need ~1s after the
+                // first input buffer before voice capture is reliable; with
+                // less the user perceives the start tone but their first word
+                // still gets clipped. Overlay stays .connecting through this
+                // entire window so the UI mirrors what's actually happening.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    guard let self = self else { return }
+                    self.audioManager.clearAudioBuffer()
+                    self.bluetoothWarmingUp = false
                     PTTTonePlayer.shared.playStartTone()
-                    print("STT PTT: Bluetooth mic ready — tone played")
-                    self?.armSilenceTimeoutIfNeeded()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) {
+                        print("STT PTT: Bluetooth mic ready — listening")
+                        self.transitionSTTOverlayToListening()
+                        self.armSilenceTimeoutIfNeeded()
+                    }
                 }
             }
             audioManager.toggleRecording()
         } else {
             PTTTonePlayer.shared.playStartTone()
             DispatchQueue.main.asyncAfter(deadline: .now() + PTTTonePlayer.shared.startToneDelayBeforeRecording()) { [weak self] in
-                self?.audioManager.toggleRecording()
-                self?.armSilenceTimeoutIfNeeded()
+                guard let self = self else { return }
+                self.audioManager.toggleRecording()
+                self.transitionSTTOverlayToListening()
+                self.armSilenceTimeoutIfNeeded()
             }
         }
     }
 
-    /// Start the dead-start silence timer if this recording is an auto-record
-    /// after a Claude recap. Timer is one-shot and gets invalidated as soon as
-    /// `audioLevelDidUpdate` observes voice above the speaking threshold.
+    /// Show the STT overlay immediately on PTT trigger so the keystroke
+    /// feels responsive — even before the audio engine has produced its
+    /// first sample. Respects cursor-anchored overlay setting and skips
+    /// when an interrupt overlay (podcast/read-aloud/draft-edit) owns
+    /// the screen.
+    private func showSTTOverlayImmediately(state: AudioTranscriptionOverlayState) {
+        guard !podcastInterruptActive,
+              !readAloudInterruptActive,
+              !draftEditInterruptActive,
+              !useCursorAnchoredOverlay else { return }
+        let overlay = ensureAudioOverlay()
+        if overlay.viewModel.targetAppIcon == nil {
+            overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
+            overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
+            overlay.viewModel.targetWindowDetail = Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
+        }
+        overlay.show(state: state)
+    }
+
+    /// Move the STT overlay from .connecting → .listening once the audio
+    /// engine is confirmed running. Driven from explicit start callbacks
+    /// rather than the audio-level path so the transition is tied to
+    /// engine state, not the first non-silent buffer.
+    private func transitionSTTOverlayToListening() {
+        guard !podcastInterruptActive,
+              !readAloudInterruptActive,
+              !draftEditInterruptActive,
+              !useCursorAnchoredOverlay else { return }
+        guard audioManager.isRecording else { return }
+        audioOverlay?.show(state: .listening)
+    }
+
+    /// Arm the dead-start silence timer for the recap auto-record flow. Fires
+    /// once, cancels the recording if the user never speaks. Generalized
+    /// per-utterance auto-stop is handled separately in `audioLevelDidUpdate`
+    /// via `armUtteranceSilenceTimerIfEnabled`.
     private func armSilenceTimeoutIfNeeded() {
         sttSilenceTimeoutTimer?.invalidate()
         guard sttAutoRecordAfterRecap else { return }
-        sttSilenceTimeoutTimer = Timer.scheduledTimer(withTimeInterval: Self.sttSilenceTimeoutSeconds, repeats: false) { [weak self] _ in
+        sttSilenceTimeoutTimer = Timer.scheduledTimer(withTimeInterval: Self.sttDeadStartTimeoutSeconds, repeats: false) { [weak self] _ in
             guard let self = self, self.sttAutoRecordAfterRecap, self.audioManager.isRecording else { return }
-            print("STT PTT: silence timeout — no voice in \(Self.sttSilenceTimeoutSeconds)s, cancelling")
+            print("STT PTT: dead-start timeout — no voice in \(Self.sttDeadStartTimeoutSeconds)s, cancelling")
             self.sttSilenceTimeoutTimer = nil
             self.audioManager.cancelRecording(asSilence: true)
         }
+    }
+
+    /// User-configurable: stop the recording (and transcribe) after N seconds
+    /// of silence following at least one detected voice sample. Disabled by
+    /// default. Distinct from the recap dead-start timeout, which discards.
+    private var sttAutoStopEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "ptt.autoStopAfterSilence")
+    }
+    private var sttAutoStopSilenceSeconds: TimeInterval {
+        let raw = UserDefaults.standard.double(forKey: "ptt.silenceTimeoutSeconds")
+        return raw > 0 ? raw : 5.0
+    }
+    private var sttAutoStopTimer: Timer?
+
+    /// Called from `audioLevelDidUpdate` whenever voice is detected. Resets
+    /// the silence countdown — recording continues while the user is talking
+    /// and stops N seconds after they fall silent.
+    private func armUtteranceSilenceTimerIfEnabled() {
+        guard sttAutoStopEnabled else { return }
+        guard audioManager.isRecording else { return }
+        sttAutoStopTimer?.invalidate()
+        let timeout = sttAutoStopSilenceSeconds
+        sttAutoStopTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+            guard let self = self, self.audioManager.isRecording else { return }
+            print("STT PTT: utterance silence timeout — \(timeout)s without voice, stopping & transcribing")
+            self.sttAutoStopTimer = nil
+            // Reset the PTT state machine so the post-stop overlay/UI behaves
+            // identically to a manual third-tap stop.
+            self.resetRightOptionState()
+            PTTTonePlayer.shared.playStopTone()
+            self.audioManager.toggleRecording()
+        }
+    }
+
+    private func cancelUtteranceSilenceTimer() {
+        sttAutoStopTimer?.invalidate()
+        sttAutoStopTimer = nil
     }
 
     private func stopSTTPushToTalk() {
@@ -1377,12 +1457,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     func audioLevelDidUpdate(db: Float) {
         AudioLevelMonitor.shared.update(db: db)
         updateStatusBarWithLevel(db: db)
-        // Cancel the auto-record silence timeout as soon as the user starts
+        let isVoice = db > Self.sttVoiceDetectionThresholdDb
+        // Cancel the recap dead-start timeout as soon as the user starts
         // speaking. Threshold is well above ambient but below normal speech.
-        if sttSilenceTimeoutTimer != nil && db > Self.sttVoiceDetectionThresholdDb {
-            print("STT PTT: voice detected (db=\(String(format: "%.1f", db))) — disarming silence timeout")
+        if sttSilenceTimeoutTimer != nil && isVoice {
+            print("STT PTT: voice detected (db=\(String(format: "%.1f", db))) — disarming dead-start timeout")
             sttSilenceTimeoutTimer?.invalidate()
             sttSilenceTimeoutTimer = nil
+        }
+        // General per-utterance auto-stop: once any voice has been captured,
+        // arm/reset a silence countdown. Recording stops + transcribes after
+        // N seconds without voice. No-op when the setting is off.
+        if audioManager.isRecording && !bluetoothWarmingUp {
+            if isVoice {
+                sttHasCapturedVoice = true
+                armUtteranceSilenceTimerIfEnabled()
+            }
         }
         if !podcastInterruptActive && !readAloudInterruptActive && !draftEditInterruptActive {
             if useCursorAnchoredOverlay {
@@ -1399,7 +1489,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
                     overlay.viewModel.targetWindowDetail = Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
                 }
-                overlay.show(state: bluetoothWarmingUp ? .connecting : .listening)
+                // Don't downgrade .listening → .connecting if a stray audio
+                // buffer arrives while bluetoothWarmingUp is still true.
+                if overlay.viewModel.state != .listening {
+                    overlay.show(state: bluetoothWarmingUp ? .connecting : .listening)
+                }
             }
         }
     }
@@ -1478,6 +1572,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttAutoRecordAfterRecap = false
         sttSilenceTimeoutTimer?.invalidate()
         sttSilenceTimeoutTimer = nil
+        cancelUtteranceSilenceTimer()
+        sttHasCapturedVoice = false
 
         if promptRefinementEnabled && speechDuration > 5.0 {
             refineAndPaste(text: text, shouldSendReturn: shouldSendReturn, targetApp: targetApp, targetWindow: targetWindow)
@@ -1637,6 +1733,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttAutoRecordAfterRecap = false
         sttSilenceTimeoutTimer?.invalidate()
         sttSilenceTimeoutTimer = nil
+        cancelUtteranceSilenceTimer()
+        sttHasCapturedVoice = false
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()
@@ -1683,6 +1781,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         sttAutoRecordAfterRecap = false
         sttSilenceTimeoutTimer?.invalidate()
         sttSilenceTimeoutTimer = nil
+        cancelUtteranceSilenceTimer()
+        sttHasCapturedVoice = false
         // Ensure any processing indicator is stopped
         stopTranscriptionIndicator()
         audioOverlay?.dismiss()

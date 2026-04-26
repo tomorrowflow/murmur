@@ -86,6 +86,7 @@ class DraftEditingManager {
     private var editTask: Task<Void, Never>?
     private(set) var isPaused: Bool = false
     private var currentPlayer: AVAudioPlayer?
+    private var hasPrimedBluetoothOutput = false
 
     // Edit history
     private(set) var editHistory: [DraftEditEntry] = []
@@ -600,6 +601,12 @@ class DraftEditingManager {
     private func playWavData(_ data: Data) async throws {
         try Task.checkCancellation()
 
+        // Pause Spotify/Music/Podcasts/etc. for the playback session per
+        // user setting; resumed in reset(). Idempotent.
+        if AudioDuckMode.current.pausesMediaDuringPlayback {
+            MediaRemoteController.shared.pause()
+        }
+
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("draftEdit_tts_\(UUID().uuidString).wav")
         try data.write(to: tempURL)
@@ -610,6 +617,14 @@ class DraftEditingManager {
         let player = try AVAudioPlayer(contentsOf: tempURL)
         player.prepareToPlay()
         currentPlayer = player
+
+        // Bluetooth output (AirPods etc.) needs the playback profile to
+        // commit before audio actually starts; otherwise the first
+        // half-sentence is clipped. Prime once per session.
+        if !hasPrimedBluetoothOutput && AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth() {
+            await primeBluetoothOutput()
+            hasPrimedBluetoothOutput = true
+        }
 
         // Ensure cleanup happens on all exit paths
         defer {
@@ -691,5 +706,31 @@ class DraftEditingManager {
         streamingEditText = ""
         cueAudioCache = [:]
         audioSegments = []
+        MediaRemoteController.shared.resumeIfWePaused()
+        hasPrimedBluetoothOutput = false
+    }
+
+    /// Brief silent buffer to commit the BT output profile before real TTS.
+    private func primeBluetoothOutput() async {
+        let sampleRate: Double = 44100
+        let durationSeconds: Double = 0.8
+        let frameCount = AVAudioFrameCount(sampleRate * durationSeconds)
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return
+        }
+        buffer.frameLength = frameCount
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        do { try engine.start() } catch { return }
+        await withCheckedContinuation { continuation in
+            player.scheduleBuffer(buffer, at: nil, options: []) {
+                continuation.resume()
+            }
+            player.play()
+        }
+        engine.stop()
     }
 }

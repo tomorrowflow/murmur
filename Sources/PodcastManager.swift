@@ -364,6 +364,9 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                     self.player?.stop()
                     // Prepend silence so audio device wakes up before speech
                     let playData = self.prependSilence(to: data) ?? data
+                    if AudioDuckMode.current.pausesMediaDuringPlayback {
+                        MediaRemoteController.shared.pause()
+                    }
                     self.player = try AVAudioPlayer(data: playData)
                     self.player?.delegate = self
                     self.player?.prepareToPlay()
@@ -874,6 +877,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
                 playData = data
             }
 
+            // Pause Spotify/Music/etc. while the podcast plays per user setting.
+            if AudioDuckMode.current.pausesMediaDuringPlayback {
+                MediaRemoteController.shared.pause()
+            }
             player = try AVAudioPlayer(data: playData)
             player?.delegate = self
             player?.prepareToPlay()
@@ -1267,6 +1274,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         cancelReconnect()
         disconnect()
         player?.stop()
+        MediaRemoteController.shared.resumeIfWePaused()
         cancelLineAdvanceTimers()
         currentChunkLines = []
         isPlayingInterruptResponse = false

@@ -1,24 +1,28 @@
 import Foundation
 import AppKit
+import CoreGraphics
 
 /// Pauses / resumes whichever app currently owns macOS "Now Playing" — Spotify,
 /// Music, Podcasts, browser-hosted media (YouTube, Netflix), anything that
 /// registers with the system. Independent of audio output device — works the
-/// same with built-in speakers, AirPods, USB headsets, etc.
+/// same with built-in speakers, AirPods, USB headsets, etc., because the
+/// scope is the Now Playing app, not the audio path.
 ///
-/// Implementation note: we read playback state via the private MediaRemote
-/// framework (`MRMediaRemoteGetNowPlayingApplicationIsPlaying` and the
-/// matching change notification — both still functional on macOS 15+).
-/// For *issuing* play/pause we drive the F8 media key through System Events
-/// via NSAppleScript:
-///   - `MRMediaRemoteSendCommand` is silently dropped on macOS 15.4+
-///     (Apple gated it behind an entitlement third-party apps can't get).
-///   - Synthesized `CGEvent` media-key posts are filtered unless the app
-///     holds Input Monitoring entitlement, which macOS doesn't grant
-///     interactively.
-///   - System Events is system-blessed and routes the F8 to whichever app
-///     owns Now Playing. macOS prompts once for Automation permission for
-///     "System Events" the first time we run.
+/// Two native macOS APIs in use:
+///   - **MediaRemote.framework (read side)**: `MRMediaRemoteGetNowPlayingApplicationIsPlaying`
+///     and the `…IsPlayingDidChange` notification — both still functional on
+///     macOS 15+. Used to snapshot state before pausing and to drive a
+///     watchdog that re-pauses if a player wakes itself back up mid-session
+///     (BT routing changes, etc.).
+///   - **CGEvent (write side)**: post a system-defined media key event for
+///     F8 (NX_KEYTYPE_PLAY). macOS dispatches this to the active Now
+///     Playing client, so it works system-wide. Uses the Accessibility
+///     permission Murmur already requires for paste; if the user also
+///     grants Input Monitoring the path is even more reliable, but
+///     Accessibility alone is usually enough.
+///
+/// `MRMediaRemoteSendCommand` is intentionally **not** used — Apple gated it
+/// on macOS 15.4+ and the function call silently no-ops for third parties.
 final class MediaRemoteController {
     static let shared = MediaRemoteController()
 
@@ -33,7 +37,7 @@ final class MediaRemoteController {
 
     /// Notification name posted by MediaRemote when the active app's
     /// playback state flips. Used by the watchdog to catch spurious
-    /// resumes during recording (BT routing changes can wake players).
+    /// resumes during recording.
     private static let isPlayingChangedNotification = Notification.Name("kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification")
 
     /// Tracks whether *we* paused playback so we don't resume something the
@@ -55,10 +59,14 @@ final class MediaRemoteController {
     private static let mediaKeyMinInterval: TimeInterval = 0.4
     private var lastMediaKeyAt: Date = .distantPast
 
-    /// Source for the System Events F8 (play/pause) keypress. Compiled
-    /// fresh per invocation on the background queue we execute on —
-    /// NSAppleScript is not thread-safe.
-    private static let playPauseScriptSource = "tell application \"System Events\" to key code 100"
+    /// Constants from <IOKit/hidsystem/ev_keymap.h>. Pulled in by value so
+    /// we don't have to drag in the full IOKit umbrella header.
+    private static let nxSubtypeAuxControlButtons: Int16 = 8
+    private static let nxKeyTypePlay: Int = 16
+    private static let nxKeyDown: Int = 0xA
+    private static let nxKeyUp: Int = 0xB
+    /// Modifier-flags value the system uses on synthetic media-key events.
+    private static let mediaKeyModifierFlags: NSEvent.ModifierFlags = NSEvent.ModifierFlags(rawValue: 0xA00)
 
     private init() {
         let url = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
@@ -78,8 +86,6 @@ final class MediaRemoteController {
         if let regPtr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteRegisterForNowPlayingNotifications" as CFString) {
             let fn = unsafeBitCast(regPtr, to: RegisterNotificationsFn.self)
             self.registerNotifications = fn
-            // Activate the notification stream so we receive playback-state
-            // change notifications, then subscribe via NSNotificationCenter.
             fn(.main)
             NotificationCenter.default.addObserver(
                 forName: Self.isPlayingChangedNotification,
@@ -96,17 +102,15 @@ final class MediaRemoteController {
 
     // MARK: - Public API
 
-    /// Pause whatever is playing — but only if Now Playing reports something
+    /// Pause whatever is playing — only if Now Playing reports something
     /// is *actually* playing right now. If the user already had their media
     /// paused (or nothing is registered as playing), this is a no-op and
-    /// `didPause` stays false, so a later resume won't unpause something the
-    /// user wanted paused. Idempotent while already paused-by-us. Cancels any
-    /// pending debounced resume so the recap chain stays muted throughout.
+    /// `didPause` stays false. Idempotent while already paused-by-us.
+    /// Cancels any pending debounced resume.
     ///
     /// `completion` runs on main once the snapshot + pause decision is
-    /// resolved. Callers that need to wait (e.g. defer an audio-engine
-    /// startup that would disrupt Now Playing routing) should pass one;
-    /// fire-and-forget callers can omit it.
+    /// resolved. Callers that need to wait (e.g. defer audio-engine
+    /// startup) should pass one; fire-and-forget callers can omit it.
     func pause(completion: (() -> Void)? = nil) {
         pendingResume?.cancel()
         pendingResume = nil
@@ -114,8 +118,8 @@ final class MediaRemoteController {
             completion?()
             return
         }
-        // No state-query API → blind toggle. Best effort.
         guard let isPlaying = isPlaying else {
+            // No state-query API → blind toggle.
             sendPlayPauseToggle()
             didPause = true
             print("MediaRemoteController: sent play/pause toggle (state unknown)")
@@ -153,8 +157,8 @@ final class MediaRemoteController {
             guard let self = self, self.didPause else { return }
             self.didPause = false
             self.pendingResume = nil
-            // Verify state before toggling. If the user already manually
-            // resumed during our paused window, isPlaying will be true and
+            // Verify state before toggling. If the user manually resumed
+            // during our paused window, isPlaying will report true and
             // sending the toggle would *pause* them again. Skip in that case.
             if let isPlaying = self.isPlaying {
                 isPlaying(.main) { [weak self] playing in
@@ -180,7 +184,7 @@ final class MediaRemoteController {
     private func handleIsPlayingChanged() {
         // Only act when we're holding a pause we issued. If state flipped to
         // playing while we believe media should be silenced, re-pause without
-        // touching didPause. Throttled so we don't fight a rapid oscillation.
+        // touching didPause.
         guard didPause else { return }
         guard let isPlaying = isPlaying else { return }
         isPlaying(.main) { [weak self] playing in
@@ -190,39 +194,43 @@ final class MediaRemoteController {
         }
     }
 
-    /// Send an F8 (play/pause) keypress through System Events. macOS
-    /// dispatches the resulting media key to whichever app currently owns
-    /// Now Playing — works for native media apps and browser-embedded video
-    /// alike, regardless of audio output device. Audio source (AirPods,
-    /// built-in, USB) is irrelevant: this targets the Now Playing app, not
-    /// the audio device.
+    /// Synthesize an F8 (NX_KEYTYPE_PLAY) media-key press via the system-
+    /// defined NSEvent path, then post via CGEvent. macOS dispatches the
+    /// resulting media key to whichever app currently owns Now Playing —
+    /// works for native media apps and browser-embedded video alike,
+    /// regardless of audio output device. Requires Accessibility (which
+    /// Murmur already has for paste); on some macOS versions it also
+    /// benefits from Input Monitoring being granted.
     private func sendPlayPauseToggle() {
         let now = Date()
         if now.timeIntervalSince(lastMediaKeyAt) < Self.mediaKeyMinInterval {
-            // Throttle: prevents the watchdog from spamming if Now Playing
-            // state oscillates during a BT codec switch.
             return
         }
         lastMediaKeyAt = now
-        // Compile + execute on a background queue so the System Events RPC
-        // doesn't stall the main thread (especially the very first call,
-        // which can pop a permission prompt). NSAppleScript is not
-        // thread-safe, so we build a fresh instance on this queue.
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard let script = NSAppleScript(source: Self.playPauseScriptSource) else {
-                print("MediaRemoteController: AppleScript compile failed")
-                return
-            }
-            var errorInfo: NSDictionary?
-            script.executeAndReturnError(&errorInfo)
-            if let errorInfo = errorInfo {
-                let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "unknown"
-                let num = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                print("MediaRemoteController: F8 via System Events failed (\(num)): \(msg)")
-                if num == -1743 {
-                    print("MediaRemoteController: grant Murmur Automation access for System Events in System Settings → Privacy & Security → Automation")
-                }
-            }
+        postMediaKey(keyState: Self.nxKeyDown)
+        postMediaKey(keyState: Self.nxKeyUp)
+    }
+
+    private func postMediaKey(keyState: Int) {
+        let data1 = (Self.nxKeyTypePlay << 16) | (keyState << 8)
+        guard let event = NSEvent.otherEvent(
+            with: .systemDefined,
+            location: NSPoint.zero,
+            modifierFlags: Self.mediaKeyModifierFlags,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: Self.nxSubtypeAuxControlButtons,
+            data1: data1,
+            data2: -1
+        ) else {
+            print("MediaRemoteController: failed to construct system-defined event")
+            return
         }
+        guard let cgEvent = event.cgEvent else {
+            print("MediaRemoteController: NSEvent has no underlying CGEvent")
+            return
+        }
+        cgEvent.post(tap: .cghidEventTap)
     }
 }

@@ -164,9 +164,17 @@ class AudioTranscriptionManager {
             AudioDucker.shared.duck()
         }
         if mode.pausesMediaDuringRecording {
-            MediaRemoteController.shared.pause()
+            // Defer engine start until the pause snapshot resolves. The
+            // AVAudioEngine + Bluetooth profile switch can disrupt Now
+            // Playing state mid-snapshot — if the snapshot races ahead,
+            // it can read a transient "not playing" and skip the pause,
+            // letting the video resume itself when routing settles.
+            MediaRemoteController.shared.pause { [weak self] in
+                self?.startRecordingWithAVAudioEngine()
+            }
+        } else {
+            startRecordingWithAVAudioEngine()
         }
-        startRecordingWithAVAudioEngine()
     }
 
     private func startRecordingWithAVAudioEngine() {

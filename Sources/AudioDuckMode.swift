@@ -33,10 +33,22 @@ enum AudioDuckMode: String {
         return .recording
     }
 
+    /// True when the master output volume should drop during STT capture
+    /// (mic-bleed defence). Only the `.recording` mode does this — the
+    /// pause-mode replaces ducking with a clean pause of other media,
+    /// so master volume stays where the user set it.
     var ducksRecording: Bool {
-        self == .recording || self == .recordingAndPlayback
+        self == .recording
     }
 
+    /// True when other media apps should be paused during STT capture.
+    /// Only `.recordingAndPlayback` does this.
+    var pausesMediaDuringRecording: Bool {
+        self == .recordingAndPlayback
+    }
+
+    /// True when other media apps should be paused during TTS playback.
+    /// Only `.recordingAndPlayback` does this.
     var pausesMediaDuringPlayback: Bool {
         self == .recordingAndPlayback
     }

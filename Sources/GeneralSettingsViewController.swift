@@ -26,12 +26,12 @@ struct GeneralSettingsView: View {
                 Section("Audio Ducking") {
                     Picker("Mode", selection: $duckModeRaw) {
                         Text("Off").tag(AudioDuckMode.off.rawValue)
-                        Text("During recording only").tag(AudioDuckMode.recording.rawValue)
-                        Text("Recording + pause media during playback").tag(AudioDuckMode.recordingAndPlayback.rawValue)
+                        Text("Duck during recording").tag(AudioDuckMode.recording.rawValue)
+                        Text("Pause other media during recording and playback").tag(AudioDuckMode.recordingAndPlayback.rawValue)
                     }
                     .pickerStyle(.radioGroup)
 
-                    Text("Off: Murmur leaves system audio alone.\nRecording: master volume drops while STT is recording, reducing mic bleed from speakers.\nRecording + playback: also pauses Spotify/Music/Podcasts (or any app that owns macOS Now Playing) while Murmur reads aloud, then resumes when finished.")
+                    Text("Off: Murmur leaves system audio alone.\nDuck during recording: master volume drops while STT is recording, reducing mic bleed from speakers — does not affect playback.\nPause during recording and playback: pauses Spotify/Music/Podcasts (or any app that owns macOS Now Playing) while Murmur is recording or reading aloud, and resumes when finished. Master volume is left alone — your TTS plays at normal level.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

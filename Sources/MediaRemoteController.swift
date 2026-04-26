@@ -21,6 +21,14 @@ final class MediaRemoteController {
     /// Tracks whether *we* paused playback so we don't resume something the
     /// user paused themselves.
     private var didPause = false
+    /// Pending resume work item — held briefly so a fresh `pause()` call
+    /// during the recap chain (TTS end → auto-record start) cancels the
+    /// resume and keeps music paused through the whole sequence.
+    private var pendingResume: DispatchWorkItem?
+    /// Window during which a follow-up pause cancels the resume. Long
+    /// enough to bridge TTS-stop → STT-engine-start including the BT
+    /// warmup, short enough that a true session end resumes promptly.
+    private static let resumeDebounce: TimeInterval = 1.2
 
     private init() {
         let url = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
@@ -38,10 +46,12 @@ final class MediaRemoteController {
         self.sendCommand = unsafeBitCast(ptr, to: SendCommandFn.self)
     }
 
-    /// Pause whatever is playing. Idempotent — repeated calls are no-ops while
-    /// already paused-by-us. Records the pause so `resumeIfWePaused()` knows to
-    /// resume only what we stopped.
+    /// Pause whatever is playing. Idempotent while already paused-by-us.
+    /// Cancels any pending debounced resume so the recap chain
+    /// (TTS-end → auto-record-start) keeps music paused throughout.
     func pause() {
+        pendingResume?.cancel()
+        pendingResume = nil
         guard let send = sendCommand else { return }
         guard !didPause else { return }
         let ok = send(Command.pause.rawValue, nil)
@@ -51,13 +61,21 @@ final class MediaRemoteController {
         }
     }
 
-    /// Resume only if we were the one who paused. No-op if the user paused
-    /// themselves before TTS started.
+    /// Schedule a resume, debounced. If a fresh `pause()` arrives within
+    /// `resumeDebounce` it cancels the scheduled resume and the music stays
+    /// paused. No-op if we never paused.
     func resumeIfWePaused() {
-        guard let send = sendCommand else { return }
+        guard sendCommand != nil else { return }
         guard didPause else { return }
-        didPause = false
-        _ = send(Command.play.rawValue, nil)
-        print("MediaRemoteController: resumed media we paused")
+        pendingResume?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.didPause, let send = self.sendCommand else { return }
+            self.didPause = false
+            self.pendingResume = nil
+            _ = send(Command.play.rawValue, nil)
+            print("MediaRemoteController: resumed media we paused")
+        }
+        pendingResume = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumeDebounce, execute: work)
     }
 }

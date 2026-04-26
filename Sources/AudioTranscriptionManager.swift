@@ -142,10 +142,6 @@ class AudioTranscriptionManager {
         }
     }
 
-    private var useEchoCancellation: Bool {
-        AudioDuckMode.current.ducksRecording
-    }
-
     func startRecording() {
         isStartingRecording = true
         audioBuffer.removeAll()
@@ -163,8 +159,12 @@ class AudioTranscriptionManager {
             }
         }
 
-        if useEchoCancellation {
+        let mode = AudioDuckMode.current
+        if mode.ducksRecording {
             AudioDucker.shared.duck()
+        }
+        if mode.pausesMediaDuringRecording {
+            MediaRemoteController.shared.pause()
         }
         startRecordingWithAVAudioEngine()
     }
@@ -278,6 +278,7 @@ class AudioTranscriptionManager {
             audioEngine.stop()
             audioEngine.reset()
             AudioDucker.shared.restore()
+            MediaRemoteController.shared.resumeIfWePaused()
             isRecording = false
             audioBuffer.removeAll()
             delegate?.transcriptionDidFail(error: "Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
@@ -301,6 +302,7 @@ class AudioTranscriptionManager {
             removeConfigChangeObserver()
             isRecording = false
             AudioDucker.shared.restore()
+            MediaRemoteController.shared.resumeIfWePaused()
             delegate?.transcriptionDidFail(error: "Failed to restart audio engine: \(error.localizedDescription)")
         }
     }
@@ -311,6 +313,7 @@ class AudioTranscriptionManager {
         audioEngine.stop()
         audioEngine.reset()
         AudioDucker.shared.restore()
+        MediaRemoteController.shared.resumeIfWePaused()
 
         // Remove Escape key monitor
         if let monitor = escapeKeyMonitor {
@@ -339,6 +342,7 @@ class AudioTranscriptionManager {
         audioEngine.stop()
         audioEngine.reset()
         AudioDucker.shared.restore()
+        MediaRemoteController.shared.resumeIfWePaused()
         audioBuffer.removeAll()
 
         // Remove Escape key monitor

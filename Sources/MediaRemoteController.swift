@@ -3,18 +3,22 @@ import AppKit
 
 /// Pauses / resumes whichever app currently owns macOS "Now Playing" — Spotify,
 /// Music, Podcasts, browser-hosted media (YouTube, Netflix), anything that
-/// registers with the system.
+/// registers with the system. Independent of audio output device — works the
+/// same with built-in speakers, AirPods, USB headsets, etc.
 ///
 /// Implementation note: we read playback state via the private MediaRemote
 /// framework (`MRMediaRemoteGetNowPlayingApplicationIsPlaying` and the
-/// matching change notification — both still functional on macOS 15+) but we
-/// *issue* play/pause as synthesized F8 media-key events through CGEvent.
-/// On macOS 15.4+ Apple gated `MRMediaRemoteSendCommand` behind entitlements
-/// third-party apps can't acquire, so the function call appears to succeed
-/// but the system silently drops it. The media-key path goes through the
-/// public HID dispatch and macOS routes it to whichever app owns Now Playing,
-/// so it works for browser-embedded video too. CGEvent posting needs the
-/// Accessibility permission Murmur already requires for paste.
+/// matching change notification — both still functional on macOS 15+).
+/// For *issuing* play/pause we drive the F8 media key through System Events
+/// via NSAppleScript:
+///   - `MRMediaRemoteSendCommand` is silently dropped on macOS 15.4+
+///     (Apple gated it behind an entitlement third-party apps can't get).
+///   - Synthesized `CGEvent` media-key posts are filtered unless the app
+///     holds Input Monitoring entitlement, which macOS doesn't grant
+///     interactively.
+///   - System Events is system-blessed and routes the F8 to whichever app
+///     owns Now Playing. macOS prompts once for Automation permission for
+///     "System Events" the first time we run.
 final class MediaRemoteController {
     static let shared = MediaRemoteController()
 
@@ -51,14 +55,10 @@ final class MediaRemoteController {
     private static let mediaKeyMinInterval: TimeInterval = 0.4
     private var lastMediaKeyAt: Date = .distantPast
 
-    // HID media-key constants — usually defined in <IOKit/hidsystem/ev_keymap.h>
-    // but we pull them in by value to avoid the Carbon/IOKit umbrella import.
-    private static let nxSubtypeAuxControlButtons: Int16 = 8
-    private static let nxKeyTypePlay: Int = 16
-    private static let nxKeyDown: Int = 0xA
-    private static let nxKeyUp: Int = 0xB
-    /// Modifier flags used by the system for media-key system-defined events.
-    private static let mediaKeyModifierFlags: NSEvent.ModifierFlags = NSEvent.ModifierFlags(rawValue: 0xa00)
+    /// Source for the System Events F8 (play/pause) keypress. Compiled
+    /// fresh per invocation on the background queue we execute on —
+    /// NSAppleScript is not thread-safe.
+    private static let playPauseScriptSource = "tell application \"System Events\" to key code 100"
 
     private init() {
         let url = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
@@ -190,10 +190,12 @@ final class MediaRemoteController {
         }
     }
 
-    /// Synthesize an F8 (play/pause) media-key press. macOS dispatches this
-    /// to whichever app currently owns Now Playing, so it works system-wide
-    /// — including browser-embedded video where AppleScript / app-specific
-    /// integrations don't reach.
+    /// Send an F8 (play/pause) keypress through System Events. macOS
+    /// dispatches the resulting media key to whichever app currently owns
+    /// Now Playing — works for native media apps and browser-embedded video
+    /// alike, regardless of audio output device. Audio source (AirPods,
+    /// built-in, USB) is irrelevant: this targets the Now Playing app, not
+    /// the audio device.
     private func sendPlayPauseToggle() {
         let now = Date()
         if now.timeIntervalSince(lastMediaKeyAt) < Self.mediaKeyMinInterval {
@@ -202,25 +204,25 @@ final class MediaRemoteController {
             return
         }
         lastMediaKeyAt = now
-        postMediaKeyEvent(keyState: Self.nxKeyDown)
-        postMediaKeyEvent(keyState: Self.nxKeyUp)
-    }
-
-    private func postMediaKeyEvent(keyState: Int) {
-        let data1 = (Self.nxKeyTypePlay << 16) | (keyState << 8)
-        guard let event = NSEvent.otherEvent(
-            with: .systemDefined,
-            location: NSPoint.zero,
-            modifierFlags: Self.mediaKeyModifierFlags,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: Self.nxSubtypeAuxControlButtons,
-            data1: data1,
-            data2: -1
-        ) else {
-            return
+        // Compile + execute on a background queue so the System Events RPC
+        // doesn't stall the main thread (especially the very first call,
+        // which can pop a permission prompt). NSAppleScript is not
+        // thread-safe, so we build a fresh instance on this queue.
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let script = NSAppleScript(source: Self.playPauseScriptSource) else {
+                print("MediaRemoteController: AppleScript compile failed")
+                return
+            }
+            var errorInfo: NSDictionary?
+            script.executeAndReturnError(&errorInfo)
+            if let errorInfo = errorInfo {
+                let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "unknown"
+                let num = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                print("MediaRemoteController: F8 via System Events failed (\(num)): \(msg)")
+                if num == -1743 {
+                    print("MediaRemoteController: grant Murmur Automation access for System Events in System Settings → Privacy & Security → Automation")
+                }
+            }
         }
-        event.cgEvent?.post(tap: .cghidEventTap)
     }
 }

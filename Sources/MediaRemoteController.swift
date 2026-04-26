@@ -10,6 +10,10 @@ final class MediaRemoteController {
     static let shared = MediaRemoteController()
 
     private typealias SendCommandFn = @convention(c) (Int, AnyObject?) -> Bool
+    /// MRMediaRemoteGetNowPlayingApplicationIsPlaying signature:
+    /// (DispatchQueue, completion(Bool)) — completion fires asynchronously
+    /// with the current "is playing" state from the Now Playing system.
+    private typealias IsPlayingFn = @convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void
 
     /// Command IDs used by MRMediaRemoteSendCommand.
     private enum Command: Int {
@@ -18,6 +22,7 @@ final class MediaRemoteController {
     }
 
     private let sendCommand: SendCommandFn?
+    private let isPlaying: IsPlayingFn?
     /// Tracks whether *we* paused playback so we don't resume something the
     /// user paused themselves.
     private var didPause = false
@@ -36,28 +41,62 @@ final class MediaRemoteController {
               CFBundleLoadExecutable(bundle) else {
             print("MediaRemoteController: failed to load MediaRemote framework")
             self.sendCommand = nil
+            self.isPlaying = nil
             return
         }
-        guard let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteSendCommand" as CFString) else {
+        guard let sendPtr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteSendCommand" as CFString) else {
             print("MediaRemoteController: MRMediaRemoteSendCommand symbol missing")
             self.sendCommand = nil
+            self.isPlaying = nil
             return
         }
-        self.sendCommand = unsafeBitCast(ptr, to: SendCommandFn.self)
+        self.sendCommand = unsafeBitCast(sendPtr, to: SendCommandFn.self)
+        if let isPlayingPtr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString) {
+            self.isPlaying = unsafeBitCast(isPlayingPtr, to: IsPlayingFn.self)
+        } else {
+            // Symbol missing on this macOS — degrade gracefully. Pause will
+            // still work, but we can't tell if media is already paused.
+            print("MediaRemoteController: MRMediaRemoteGetNowPlayingApplicationIsPlaying missing — pre-pause state check disabled")
+            self.isPlaying = nil
+        }
     }
 
-    /// Pause whatever is playing. Idempotent while already paused-by-us.
-    /// Cancels any pending debounced resume so the recap chain
-    /// (TTS-end → auto-record-start) keeps music paused throughout.
+    /// Pause whatever is playing — but only if Now Playing reports something
+    /// is *actually* playing right now. If the user already had their media
+    /// paused (or nothing is registered as playing), this is a no-op and
+    /// `didPause` stays false, so a later resume won't unpause something the
+    /// user wanted paused. Idempotent while already paused-by-us. Cancels any
+    /// pending debounced resume so the recap chain stays muted throughout.
     func pause() {
         pendingResume?.cancel()
         pendingResume = nil
         guard let send = sendCommand else { return }
         guard !didPause else { return }
-        let ok = send(Command.pause.rawValue, nil)
-        if ok {
-            didPause = true
-            print("MediaRemoteController: paused active media")
+        // No state-query API available on this macOS — fall back to blind
+        // pause. (Older behavior; better than nothing.)
+        guard let isPlaying = isPlaying else {
+            let ok = send(Command.pause.rawValue, nil)
+            if ok {
+                didPause = true
+                print("MediaRemoteController: paused active media (state unknown)")
+            }
+            return
+        }
+        // State query is async; only commit the pause if Now Playing confirms
+        // something is currently playing.
+        isPlaying(.main) { [weak self] playing in
+            guard let self = self else { return }
+            guard playing else {
+                print("MediaRemoteController: nothing playing — skipping pause")
+                return
+            }
+            // Re-check in case we got paused-by-us in the interim.
+            guard !self.didPause else { return }
+            let ok = send(Command.pause.rawValue, nil)
+            if ok {
+                self.didPause = true
+                print("MediaRemoteController: paused active media")
+            }
         }
     }
 

@@ -28,12 +28,17 @@ class ReadAloudOverlayViewModel: ObservableObject {
     @Published var pendingQuestion: String = ""
     @Published var translationStatus: String = "Detecting language..."
     @Published var isPaused: Bool = false
+    /// Mirrors `ReadAloudManager.isMuted`. When true, the speaker icon in
+    /// the header shows the muted glyph and the underlying TTS player runs
+    /// at volume 0 — synthesis and transcript advancement still happen.
+    @Published var isMuted: Bool = UserDefaults.standard.bool(forKey: "readAloud.muted")
     @Published var webSearchEnabled: Bool = UserDefaults.standard.bool(forKey: "readAloud.webSearchEnabled")
     @Published var targetAppIcon: NSImage?
     @Published var targetAppName: String?
 
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
+    var onMuteToggled: ((Bool) -> Void)?
     var onWebSearchToggled: ((Bool) -> Void)?
     var onExportAudio: (() -> Void)?
     var onExportMarkdown: (() -> Void)?
@@ -128,6 +133,21 @@ struct ReadAloudOverlayView: View {
                     }
                     .buttonStyle(.plain)
                     .help(playPauseHelp)
+
+                    // Mute button — silences TTS while leaving sentence
+                    // pacing and transcript display unchanged.
+                    Button(action: {
+                        viewModel.isMuted.toggle()
+                        viewModel.onMuteToggled?(viewModel.isMuted)
+                    }) {
+                        Image(systemName: viewModel.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .foregroundColor(viewModel.isMuted ? .orange : .secondary)
+                            .font(.system(size: 13))
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(viewModel.isMuted ? "Unmute spoken audio" : "Mute spoken audio (transcript continues)")
                 }
 
                 // Export buttons — visible once reading has started
@@ -555,6 +575,7 @@ class ReadAloudOverlayWindow {
     let viewModel = ReadAloudOverlayViewModel()
     var onStop: (() -> Void)?
     var onPlayPause: (() -> Void)?
+    var onMuteToggled: ((Bool) -> Void)?
     var onWebSearchToggled: ((Bool) -> Void)?
     var onExportAudio: (() -> Void)?
     var onExportMarkdown: (() -> Void)?
@@ -571,6 +592,9 @@ class ReadAloudOverlayWindow {
         }
         viewModel.onPlayPause = { [weak self] in
             self?.onPlayPause?()
+        }
+        viewModel.onMuteToggled = { [weak self] muted in
+            self?.onMuteToggled?(muted)
         }
         viewModel.onWebSearchToggled = { [weak self] enabled in
             self?.onWebSearchToggled?(enabled)

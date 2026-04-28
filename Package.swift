@@ -43,6 +43,12 @@ let package = Package(
             name: "TestSentenceSplitter",
             targets: ["TestSentenceSplitter"]),
         .executable(
+            name: "TestMediaRemote",
+            targets: ["TestMediaRemote"]),
+        .executable(
+            name: "TestAudioActivity",
+            targets: ["TestAudioActivity"]),
+        .executable(
             name: "RecordScreen",
             targets: ["RecordScreen"]),
         .executable(
@@ -107,6 +113,14 @@ let package = Package(
             name: "TestSentenceSplitter",
             dependencies: ["SharedModels"],
             path: "tests/test-sentence-splitter"),
+        .executableTarget(
+            name: "TestMediaRemote",
+            dependencies: [],
+            path: "tests/test-media-remote"),
+        .executableTarget(
+            name: "TestAudioActivity",
+            dependencies: [],
+            path: "tests/test-audio-activity"),
         .executableTarget(
             name: "RecordScreen",
             dependencies: [],

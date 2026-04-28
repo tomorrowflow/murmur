@@ -2156,6 +2156,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         overlay.onWebSearchToggled = { enabled in
             UserDefaults.standard.set(enabled, forKey: "readAloud.webSearchEnabled")
         }
+        overlay.onMuteToggled = { [weak self] muted in
+            self?.readAloudManager?.isMuted = muted
+        }
+        overlay.viewModel.isMuted = manager.isMuted
         overlay.onExportAudio = { [weak self] in
             guard let data = self?.readAloudManager?.combinedAudioData() else { return }
             DispatchQueue.main.async {

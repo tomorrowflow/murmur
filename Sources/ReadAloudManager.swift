@@ -13,6 +13,11 @@ protocol ReadAloudManagerDelegate: AnyObject {
     func readAloudDidUpdateStreamingAnswer(_ text: String)
     func readAloudDidUpdateTranslationStatus(_ status: String)
     func readAloudDidError(_ message: String)
+    func readAloudDidChangeMute(_ muted: Bool)
+}
+
+extension ReadAloudManagerDelegate {
+    func readAloudDidChangeMute(_ muted: Bool) {}
 }
 
 // MARK: - State
@@ -93,6 +98,19 @@ class ReadAloudManager {
     private var answerTTSTask: Task<Void, Never>?
     private(set) var isPaused: Bool = false
     private var currentPlayer: AVAudioPlayer?
+
+    /// When true, TTS still synthesises and the transcript still advances at
+    /// the natural sentence pace, but the AVAudioPlayer is muted. Lets the
+    /// user silence the read-along instantly without losing position.
+    /// Toggled from the overlay's mute button. Persists across sessions.
+    var isMuted: Bool {
+        get { UserDefaults.standard.bool(forKey: "readAloud.muted") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "readAloud.muted")
+            currentPlayer?.volume = newValue ? 0 : 1
+            delegate?.readAloudDidChangeMute(newValue)
+        }
+    }
 
     // Track current interrupt for partial Q&A saving
     private var currentInterruptQuestion: String = ""
@@ -691,6 +709,10 @@ class ReadAloudManager {
 
         let player = try AVAudioPlayer(contentsOf: tempURL)
         player.prepareToPlay()
+        // Apply current mute state. Pacing still uses the real player
+        // duration so the transcript advances at the natural rate even
+        // while silenced.
+        player.volume = isMuted ? 0 : 1
         currentPlayer = player
 
         // Bluetooth output (AirPods etc.) takes 1-2s to switch from A2DP to

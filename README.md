@@ -44,6 +44,7 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 - Kokoro (offline) or Gemini Live (streaming) TTS for any selected text.
 - Live sentence highlighting, pause/resume, 15% speed boost on Gemini.
 - Ask follow-up questions mid-reading with push-to-talk — Ollama answers, then reading resumes.
+- **Mute toggle in the overlay header** silences the spoken audio while the transcript continues to scroll and highlight at the natural sentence pace — tap the speaker icon to drop the audio instantly without losing your place. State persists across sessions.
 - Export full audio as WAV or transcript as Markdown.
 
 ### Claude Code Voice Recap
@@ -207,13 +208,25 @@ Settings live in the menu bar icon → **Settings**:
 
 | Tab | What you'll find |
 |---|---|
-| General | Launch at login |
+| General | Launch at login, audio ducking mode |
 | Settings | Transcription engine (Parakeet / WhisperKit), model download and selection |
-| Shortcuts | Keyboard shortcuts, PTT toggles, auto-Return, prompt refinement |
+| Shortcuts | Keyboard shortcuts, PTT toggles, auto-Return, prompt refinement, auto-stop after silence |
 | Audio Devices | Input/output, Kokoro voice selection with preview |
 | OpenClaw | Connection URL, token, password, session key, device ID |
 | Podcast | Server URL, host names + voice samples, podcast length, LLM model |
 | Read Aloud | Ollama model, resume behavior, Claude recap preprocessor, default editor for draft editing |
+
+### Audio Ducking
+
+Set under **Settings → General → Audio Ducking**. Three modes:
+
+| Mode | Behavior |
+|---|---|
+| **Off** | Murmur leaves system audio alone. |
+| **Duck during recording** | Master output volume drops while STT is recording — reduces mic bleed from speakers. Doesn't touch playback. |
+| **Pause other media during recording and playback** | Sends `Pause` to whichever app owns macOS Now Playing (Spotify, Apple Music, Apple Podcasts, Safari/YouTube on supported builds), then `Play` when the Murmur session ends. Master volume is left alone — TTS plays at normal level. Real media players that close their output stream when paused (Spotify, Music) are correctly detected via the CoreAudio per-process API; browsers that hold the stream open while paused (Safari, Brave, Chrome) can't be reliably detected and won't be auto-paused. Resume is debounced 1.2s so the recap chain (TTS end → STT start) stays muted throughout. |
+
+Diagnostic test executables for this path live in `tests/test-media-remote/` and `tests/test-audio-activity/` — run via `swift run TestMediaRemote` and `swift run TestAudioActivity` to inspect MediaRemote command behavior and per-process audio activity on a given macOS build (Apple has tightened these private APIs over recent versions; the labs let you verify what still works without rebuilding the whole app).
 
 ### Transcription Engines
 
@@ -272,6 +285,7 @@ Murmur runs an HTTP server on `127.0.0.1:7878` for integrations. Endpoints:
 - `Murmur.tmbundle/` — TextMate bundle for draft editing
 - `murmur-obsidian-plugin/` — Obsidian companion plugin (HTTP server on `127.0.0.1:27125`)
 - `scripts/claude-code/` — reference Stop hook for Claude Code recap
+- `tests/` — standalone executables; notable diagnostic labs include `test-media-remote/` (MediaRemote command + read-API probes) and `test-audio-activity/` (CoreAudio per-process playback detection)
 - `docs/` — specs and screenshots
 
 See `CLAUDE.md` for a deeper architectural tour.

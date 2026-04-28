@@ -99,21 +99,46 @@ final class MediaRemoteController {
         }
     }
 
-    /// Bundle IDs that hold the audio output stream open even while the
-    /// user has paused playback. Their presence in the
-    /// `IsRunningOutput=true` list is uninformative — they're "always on"
-    /// from CoreAudio's point of view. We exclude them from active-playback
-    /// detection so we don't pause+set didPause when only a browser is
-    /// nominally rendering.
+    /// Bundle IDs that hold the audio output stream open without
+    /// signaling user-pausable media playback. Their presence in the
+    /// `IsRunningOutput=true` list is uninformative:
+    ///
+    ///   - Browsers keep WebAudio/Media Session streams open while
+    ///     paused (Safari/Chrome/Brave/Edge/Firefox).
+    ///   - Conferencing / call-overlay apps keep their stream open for
+    ///     the entire duration of a call (Teams, Zoom, Slack huddles,
+    ///     Webex, Discord); their output isn't "media" we should pause
+    ///     with a media-key command.
+    ///   - Real-time audio processors (Krisp, audio routers) sit in the
+    ///     output graph permanently while active.
+    ///
+    /// Sending `Pause` because one of these is "running output" then
+    /// flagging `didPause=true` produces the wrong behavior on resume:
+    /// `Play` wakes up whichever paused media app (e.g. Spotify) owns
+    /// Now Playing, even though no media was playing during the call.
     private static let streamHoardingBundleIDs: Set<String> = [
-        "com.apple.WebKit.GPU",            // Safari (and embedded WebKit)
-        "com.google.Chrome.helper",        // Chrome
+        // Browsers
+        "com.apple.WebKit.GPU",
+        "com.google.Chrome.helper",
         "com.google.Chrome.helper.plugin",
-        "com.brave.Browser.helper",        // Brave
-        "com.microsoft.edgemac.helper",    // Edge
-        "org.mozilla.firefox",             // Firefox
-        "com.apple.audio.coreaudiod",      // CoreAudio daemon (defensive)
-        "com.murmur.app",                  // ourselves
+        "com.brave.Browser.helper",
+        "com.microsoft.edgemac.helper",
+        "org.mozilla.firefox",
+        // Conferencing / calls
+        "com.microsoft.teams2",
+        "com.microsoft.teams",
+        "us.zoom.xos",
+        "com.tinyspeck.slackmacgap",
+        "com.cisco.webexmeetingsapp",
+        "com.hnc.Discord",
+        "com.electron.WhatsApp",
+        // Audio processors / routers
+        "ai.krisp.krispMac",
+        "com.rogueamoeba.Loopback",
+        "com.rogueamoeba.audiohijack",
+        // System / self
+        "com.apple.audio.coreaudiod",
+        "com.murmur.app",
     ]
 
     /// True iff at least one audio process *other than* a known stream-

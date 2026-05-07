@@ -377,9 +377,12 @@ class AudioTranscriptionManager {
             return
         }
 
-        // Skip extremely short recordings to avoid spurious transcriptions
+        // Skip extremely short recordings to avoid spurious transcriptions.
+        // Anything under ~0.6s is almost always a stray double-tap or clipped
+        // start; Whisper/Parakeet hallucinate single tokens on zero-padded
+        // sub-second audio.
         let durationSeconds = Double(audioBuffer.count) / sampleRate
-        let minDurationSeconds: Double = 0.30
+        let minDurationSeconds: Double = 0.60
         if durationSeconds < minDurationSeconds {
             print("Recording too short (\(String(format: "%.2f", durationSeconds))s). Skipping transcription.")
             delegate?.recordingWasSkippedDueToSilence()
@@ -468,7 +471,7 @@ class AudioTranscriptionManager {
             isTranscribing = false
 
             if let firstResult = transcriptionResult.first {
-                var transcription = firstResult.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                let transcription = firstResult.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 handleTranscriptionResult(transcription)
             }
         } catch {
@@ -522,6 +525,12 @@ class AudioTranscriptionManager {
     @MainActor
     private func handleTranscriptionResult(_ rawTranscription: String) {
         let transcription = rawTranscription.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        if STTHallucinationFilter.isLikelyHallucination(transcription, audioDurationSeconds: durationSeconds) {
+            print("Skipping likely hallucination on short audio (\(String(format: "%.2f", durationSeconds))s): \"\(transcription)\"")
+            delegate?.recordingWasSkippedDueToSilence()
+            return
+        }
         if !transcription.isEmpty {
             finishTranscription(transcription)
         } else {
@@ -562,7 +571,11 @@ class AudioTranscriptionManager {
                     switch result {
                     case .success(let text):
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
+                        let duration = Double(buffer.count) / (self?.sampleRate ?? 16000)
+                        if STTHallucinationFilter.isLikelyHallucination(trimmed, audioDurationSeconds: duration) {
+                            print("Gemini fallback returned likely hallucination on short audio: \"\(trimmed)\"")
+                            self?.delegate?.recordingWasSkippedDueToSilence()
+                        } else if !trimmed.isEmpty {
                             print("Gemini fallback transcription succeeded")
                             self?.finishTranscription(trimmed)
                         } else {

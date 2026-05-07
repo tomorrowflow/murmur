@@ -329,7 +329,9 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         }
 
         let durationSeconds = Double(audioBuffer.count) / sampleRate
-        if durationSeconds < 0.30 {
+        // Sub-0.6s clips reliably hallucinate to nonsense after zero-padding,
+        // and shipping that to Claude triggers spurious chat sessions.
+        if durationSeconds < 0.60 {
             print("OpenClaw: recording too short (\(String(format: "%.2f", durationSeconds))s)")
             delegate?.openClawRecordingWasCancelled()
             return
@@ -374,6 +376,14 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         guard let text = transcription, !text.isEmpty else {
             isProcessing = false
             delegate?.openClawDidFail(error: "Transcription produced no text")
+            return
+        }
+
+        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        if STTHallucinationFilter.isLikelyHallucination(text, audioDurationSeconds: durationSeconds) {
+            print("OpenClaw: dropping likely hallucination on short audio (\(String(format: "%.2f", durationSeconds))s): \"\(text)\"")
+            isProcessing = false
+            delegate?.openClawRecordingWasCancelled()
             return
         }
 

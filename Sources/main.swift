@@ -829,6 +829,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private func armUtteranceSilenceTimerIfEnabled() {
         guard sttAutoStopEnabled else { return }
         guard audioManager.isRecording else { return }
+        // Skip auto-stop while the user is physically holding the Option key
+        // (hold-to-record). They can release any time, so silence detection
+        // would just cut them off mid-thought. Toggle mode (.recordingToggle)
+        // is hands-off and still benefits from the timer.
+        if rightOptionState == .recording { return }
         sttAutoStopTimer?.invalidate()
         let timeout = sttAutoStopSilenceSeconds
         sttAutoStopTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in

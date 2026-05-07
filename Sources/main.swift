@@ -860,13 +860,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private func ensureAudioOverlay() -> AudioTranscriptionOverlayWindow {
         if audioOverlay == nil {
             let overlay = AudioTranscriptionOverlayWindow()
-            // X button on the STT overlay: cancel the underlying recording
-            // rather than just hiding the panel. Without this the recording
-            // keeps running invisibly until Right Option stops it.
+            // X button on the STT overlay: finalize the recording so the user's
+            // audio is still transcribed + pasted, even if the Option key
+            // release event got dropped and the PTT state machine is wedged.
+            // Transcription continues headless after the overlay dismisses.
+            // Also unwedge the right-Option state so the next double-tap works.
             overlay.viewModel.onUserClose = { [weak self] in
                 guard let self = self else { return }
+                self.resetRightOptionState()
                 if self.audioManager.isRecording {
-                    self.audioManager.cancelRecording()
+                    print("STT: overlay X pressed — finalizing recording in background")
+                    PTTTonePlayer.shared.playStopTone()
+                    self.audioManager.toggleRecording()
                 }
                 self.audioOverlay?.dismiss()
             }

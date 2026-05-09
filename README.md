@@ -31,12 +31,14 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 
 ### Speech-to-Text
 
-- Global hotkey + double-tap push-to-talk (hold or toggle mode).
+- Global hotkey + double-tap push-to-talk (hold or toggle mode). Hold mode never auto-stops on silence — you stay in control until you release the key.
 - Offline engines: **Parakeet** (~110× realtime) or **WhisperKit**, with automatic Gemini fallback when local returns empty.
 - Window pinning: the window you were in when recording started is the window that receives the paste, even if you switch apps during transcription.
 - Optional Ollama prompt refinement for recordings > 5s — removes filler, fixes punctuation.
 - Optional auto-Return after paste — ideal for chat UIs and Claude Code prompts.
 - Configurable text replacements for common STT misrecognitions.
+- Hallucination filter: short Whisper/Parakeet artefacts on sub-1.5s clips ("you", "Thanks for watching", "True") are dropped instead of pasted. Minimum recording length is 0.6s.
+- Stuck-key recovery: the recording overlay's X button **finalizes** the recording (transcribes and pastes into the captured window) instead of discarding it, so a dropped Option-key release event never costs you what you just said.
 - Resilient to AirPods / Bluetooth codec switches: when macOS swaps A2DP→HFP at recording start, Murmur restarts the audio engine automatically instead of hanging in "preparing".
 
 ### Read Aloud

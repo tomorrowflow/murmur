@@ -323,10 +323,10 @@ public class OpenClawManager: NSObject {
         let scopes = ["operator.read", "operator.write"]
         let signedAt = Int(Date().timeIntervalSince1970 * 1000)
 
-        // Build v2 signature payload:
-        // v2|<deviceId>|<clientId>|<clientMode>|<role>|<scopes>|<signedAtMs>|<token>|<nonce>
+        // Build v3 signature payload:
+        // v3|<deviceId>|<clientId>|<clientMode>|<role>|<scopes>|<signedAtMs>|<token>|<nonce>|<platform>|<deviceFamily>
         let scopesStr = scopes.joined(separator: ",")
-        let sigPayload = "v2|\(deviceIdentity.deviceId)|\(clientId)|\(clientMode)|\(role)|\(scopesStr)|\(signedAt)|\(token)|\(nonce)"
+        let sigPayload = "v3|\(deviceIdentity.deviceId)|\(clientId)|\(clientMode)|\(role)|\(scopesStr)|\(signedAt)|\(token)|\(nonce)|macos|"
 
         guard let sigPayloadData = sigPayload.data(using: .utf8),
               let signature = deviceIdentity.sign(sigPayloadData) else {
@@ -344,8 +344,8 @@ public class OpenClawManager: NSObject {
             "id": id,
             "method": "connect",
             "params": [
-                "minProtocol": 3,
-                "maxProtocol": 3,
+                "minProtocol": 4,
+                "maxProtocol": 4,
                 "role": role,
                 "scopes": scopes,
                 "client": [

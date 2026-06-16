@@ -23,6 +23,17 @@
 # currently-queued recap playing in another terminal.
 
 INPUT=$(cat)
+
+# Claude Code fires the Stop hook every time the main loop comes to rest — which
+# includes the moment right after launching an async subagent (while it's still
+# running) and again when it reports back. Without this guard the recap plays
+# once per subagent round-trip. The Stop payload's `background_tasks` lists any
+# in-flight work; if anything is still "running", the session isn't truly done,
+# so skip and let the next Stop (with an empty list) play the final message.
+if printf '%s' "$INPUT" | jq -e '[.background_tasks[]? | select(.status == "running")] | length > 0' >/dev/null 2>&1; then
+    exit 0
+fi
+
 MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty')
 
 [ -z "$MSG" ] && exit 0

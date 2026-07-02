@@ -81,7 +81,18 @@ let package = Package(
             name: "Murmur",
             dependencies: ["KeyboardShortcuts", "WhisperKit", "SharedModels", "FluidAudio"],
             path: "Sources",
-            exclude: ["Assets.xcassets", "AppIcon.icns"]),
+            exclude: ["Assets.xcassets", "AppIcon.icns"],
+            linkerSettings: [
+                // Embed Info.plist into the bare `swift run` binary. Without it,
+                // TCC has no usage descriptions to show, so the system-audio
+                // permission prompt never appears and process taps record silence.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Info.plist"
+                ])
+            ]),
         .executableTarget(
             name: "TestDownload",
             dependencies: ["WhisperKit", "SharedModels"],

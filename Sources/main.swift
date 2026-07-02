@@ -60,6 +60,7 @@ extension KeyboardShortcuts.Name {
     static let openclawRecording = Self("openclawRecording")
     static let podcastToggle = Self("podcastToggle")
     static let draftEditing = Self("draftEditing")
+    static let captureCall = Self("captureCall")
 }
 
 enum OptionDoubleTapState {
@@ -70,7 +71,7 @@ enum OptionDoubleTapState {
     case recordingToggle // double-tap released — next tap stops recording
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate, DraftEditingManagerDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate, DraftEditingManagerDelegate, CallCaptureManagerDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var settingsWindow: SettingsWindowController?
     private var unifiedWindow: UnifiedManagerWindow?
@@ -147,6 +148,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var draftEditInterruptActive = false
     private var cursorAnchoredOverlay: CursorAnchoredOverlayWindow?
     private var httpServer: MurmurHTTPServer?
+    private var callCaptureManager: CallCaptureManager?
+    private var callCaptureOverlay: CallCaptureOverlayWindow?
+    private var captureSubmenu: NSMenu?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
@@ -186,6 +190,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         // Create menu
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "View History...", action: #selector(showTranscriptionHistory), keyEquivalent: "h"))
+
+        // Capture Call submenu — repopulated on open via NSMenuDelegate.
+        let captureItem = NSMenuItem(title: "Capture Call", action: nil, keyEquivalent: "")
+        let captureMenu = NSMenu(title: "Capture Call")
+        captureMenu.delegate = self
+        captureItem.submenu = captureMenu
+        captureSubmenu = captureMenu
+        menu.addItem(captureItem)
+
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -199,7 +212,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             (.v, .pasteLastTranscription),
             (.o, .openclawRecording),
             (.p, .podcastToggle),
-            (.d, .draftEditing)
+            (.d, .draftEditing),
+            (.h, .captureCall)
         ]
         for (key, name) in defaults {
             if KeyboardShortcuts.getShortcut(for: name) == nil {
@@ -278,6 +292,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             self?.toggleDraftEditing()
         }
 
+        KeyboardShortcuts.onKeyUp(for: .captureCall) { [weak self] in
+            NSLog("CallCapture: Cmd+Opt+H pressed")
+            self?.toggleCallCapture()
+        }
+
         // Log current podcast shortcut binding
         if let shortcut = KeyboardShortcuts.getShortcut(for: .podcastToggle) {
             print("Podcast shortcut registered: \(shortcut)")
@@ -292,6 +311,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         // Set up audio manager
         audioManager = AudioTranscriptionManager()
         audioManager.delegate = self
+
+        // Set up call capture (process tap + mic)
+        let capture = CallCaptureManager()
+        capture.delegate = self
+        callCaptureManager = capture
+        callCaptureOverlay = CallCaptureOverlayWindow(manager: capture)
+        callCaptureOverlay?.onStop = { [weak self] in
+            self?.stopCallCapture()
+        }
 
         // Initialize OpenClaw if configured (from UserDefaults)
         if let openClawURL = UserDefaults.standard.string(forKey: "openClaw.url"), !openClawURL.isEmpty,
@@ -2795,11 +2823,233 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     // MARK: - HTTP Server
 
+    // MARK: - Call Capture
+
+    /// Hotkey toggle: stop if capturing, otherwise capture the first detected
+    /// running known app. If none is running, tell the user.
+    private func toggleCallCapture() {
+        guard let manager = callCaptureManager else { return }
+        if manager.isCapturing {
+            stopCallCapture()
+            return
+        }
+        guard let target = CallCaptureManager.detectedRunningApps().first else {
+            let notification = NSUserNotification()
+            notification.title = "No Call App Running"
+            notification.informativeText = "Start Slack, Teams, or Zoom (or add a bundle id in settings), then try again."
+            NSUserNotificationCenter.default.deliver(notification)
+            return
+        }
+        startCallCapture(app: target.alias ?? target.bundleID)
+    }
+
+    /// Start a capture session for the given app (alias, bundle id, or "system").
+    /// Surfaces precondition failures as alerts/notifications. Returns the
+    /// started session info, or nil on failure.
+    @discardableResult
+    private func startCallCapture(app: String, includeMic: Bool = true) -> CallCaptureSessionInfo? {
+        guard let manager = callCaptureManager else { return nil }
+        do {
+            let info = try manager.start(app: app, includeMic: includeMic)
+            callCaptureOverlay?.show()
+            return info
+        } catch let error as CallCaptureError {
+            if case .permissionDenied = error {
+                showAudioCapturePermissionAlert()
+            } else {
+                let notification = NSUserNotification()
+                notification.title = "Call Capture Failed"
+                notification.informativeText = error.localizedDescription
+                NSUserNotificationCenter.default.deliver(notification)
+            }
+            return nil
+        } catch {
+            NSLog("CallCapture: unexpected error: \(error)")
+            return nil
+        }
+    }
+
+    private func stopCallCapture() {
+        guard let manager = callCaptureManager, manager.isCapturing else { return }
+        _ = manager.stop()
+        callCaptureOverlay?.dismiss()
+    }
+
+    private func showAudioCapturePermissionAlert() {
+        let alert = NSAlert()
+        alert.messageText = "System Audio Recording Permission Required"
+        alert.informativeText = "Murmur needs permission to record system audio. Enable Murmur under System Settings > Privacy & Security > Screen & System Audio Recording, then try again."
+        alert.alertStyle = .warning
+        if let iconImage = appIconImage() { alert.icon = iconImage }
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    @objc private func captureMenuItemSelected(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? String else { return }
+        startCallCapture(app: target)
+    }
+
+    @objc private func stopCaptureMenuItemSelected() {
+        stopCallCapture()
+    }
+
+    // MARK: CallCaptureManagerDelegate
+
+    func callCaptureStateDidChange(_ state: CallCaptureState) {
+        // Keep the status-bar animation in sync so the menu bar reflects capture.
+        if state == .recording {
+            startWaveformAnimation()
+        } else if state == .idle {
+            stopTranscriptionIndicator()
+        }
+    }
+
+    func callCaptureDidFail(_ message: String) {
+        let notification = NSUserNotification()
+        notification.title = "Call Capture Error"
+        notification.informativeText = message
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+
+    // MARK: NSMenuDelegate (Capture Call submenu)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === captureSubmenu else { return }
+        menu.removeAllItems()
+
+        if callCaptureManager?.isCapturing == true {
+            let label = callCaptureManager?.capturingAppLabel ?? "call"
+            let stopItem = NSMenuItem(
+                title: "Stop Capture (\(label))",
+                action: #selector(stopCaptureMenuItemSelected),
+                keyEquivalent: ""
+            )
+            stopItem.target = self
+            menu.addItem(stopItem)
+            return
+        }
+
+        let detected = CallCaptureManager.detectedRunningApps()
+        if detected.isEmpty {
+            let none = NSMenuItem(title: "No call app running", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        } else {
+            for app in detected {
+                let item = NSMenuItem(
+                    title: "Capture \(app.displayName)",
+                    action: #selector(captureMenuItemSelected(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = app.alias ?? app.bundleID
+                if let icon = app.icon {
+                    let resized = icon.copy() as! NSImage
+                    resized.size = NSSize(width: 16, height: 16)
+                    item.image = resized
+                }
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(NSMenuItem.separator())
+        let systemItem = NSMenuItem(
+            title: "Capture All System Audio",
+            action: #selector(captureMenuItemSelected(_:)),
+            keyEquivalent: ""
+        )
+        systemItem.target = self
+        systemItem.representedObject = "system"
+        menu.addItem(systemItem)
+    }
+
     private func setupHTTPServer() {
         let server = MurmurHTTPServer()
 
         server.get("/api/v1/health") { _ in
             return (200, MurmurHTTPServer.jsonResponse(["ok": true, "version": "1.0"]))
+        }
+
+        // MARK: Call capture (Phase B1)
+
+        server.post("/api/v1/capture/start") { [weak self] body in
+            let json = MurmurHTTPServer.parseJSON(body) ?? [:]
+            let appArg = (json["app"] as? String) ?? "system"
+            let includeMic = json["mic"] as? Bool ?? true
+            // Forward-compat fields accepted-and-ignored in B1.
+            let wantsTranscribe = json["transcribe"] as? Bool ?? false
+
+            let result: (Int, Data) = await MainActor.run {
+                guard let self = self, let manager = self.callCaptureManager else {
+                    return (500, MurmurHTTPServer.jsonResponse(["error": "Capture manager unavailable"]))
+                }
+                do {
+                    let info = try manager.start(app: appArg, includeMic: includeMic)
+                    self.callCaptureOverlay?.show()
+                    var payload: [String: Any] = [
+                        "sessionId": info.id,
+                        "app": info.app,
+                        "directory": info.directory.path,
+                        "mic": info.micFile != nil
+                    ]
+                    if wantsTranscribe { payload["transcribe"] = "not-implemented" }
+                    if json["workflows"] != nil { payload["workflows"] = "not-implemented" }
+                    return (200, MurmurHTTPServer.jsonResponse(payload))
+                } catch let error as CallCaptureError {
+                    // 409 for "already capturing" / "app not running"; permission
+                    // denial guides the user to System Settings.
+                    if case .permissionDenied = error {
+                        self.showAudioCapturePermissionAlert()
+                    }
+                    return (409, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
+                } catch {
+                    return (500, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
+                }
+            }
+            return result
+        }
+
+        server.post("/api/v1/capture/stop") { [weak self] _ in
+            let result: (Int, Data) = await MainActor.run {
+                guard let self = self, let manager = self.callCaptureManager else {
+                    return (500, MurmurHTTPServer.jsonResponse(["error": "Capture manager unavailable"]))
+                }
+                guard let info = manager.stop() else {
+                    return (409, MurmurHTTPServer.jsonResponse(["error": "No capture in progress"]))
+                }
+                self.callCaptureOverlay?.dismiss()
+                var files: [String: Any] = ["app": info.appFile.path]
+                if let mic = info.micFile { files["mic"] = mic.path }
+                return (200, MurmurHTTPServer.jsonResponse([
+                    "sessionId": info.id,
+                    "directory": info.directory.path,
+                    "files": files
+                ]))
+            }
+            return result
+        }
+
+        server.get("/api/v1/capture/status") { [weak self] _ in
+            let result: (Int, Data) = await MainActor.run {
+                guard let self = self, let manager = self.callCaptureManager else {
+                    return (200, MurmurHTTPServer.jsonResponse(["state": "idle"]))
+                }
+                let snap = manager.statusSnapshot()
+                var payload: [String: Any] = [
+                    "state": snap.state,
+                    "elapsedSeconds": snap.elapsedSeconds
+                ]
+                payload["sessionId"] = snap.sessionId ?? NSNull()
+                payload["app"] = snap.app ?? NSNull()
+                return (200, MurmurHTTPServer.jsonResponse(payload))
+            }
+            return result
         }
 
         server.get("/api/v1/draft/status") { [weak self] _ in

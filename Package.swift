@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "Murmur",
     platforms: [
-        .macOS(.v14)
+        .macOS("14.4")
     ],
     products: [
         .executable(
@@ -54,6 +54,9 @@ let package = Package(
         .executable(
             name: "TranscribeVideo",
             targets: ["TranscribeVideo"]),
+        .executable(
+            name: "TestProcessTap",
+            targets: ["TestProcessTap"]),
         .library(
             name: "SharedModels",
             targets: ["SharedModels"])
@@ -128,6 +131,10 @@ let package = Package(
         .executableTarget(
             name: "TranscribeVideo",
             dependencies: [],
-            path: "tools/transcribe-video")
+            path: "tools/transcribe-video"),
+        .executableTarget(
+            name: "TestProcessTap",
+            dependencies: [],
+            path: "tests/test-process-tap")
     ]
 )

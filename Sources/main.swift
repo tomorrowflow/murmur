@@ -239,6 +239,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 return
             }
 
+            // Don't start a recording while a call is being transcribed — both
+            // share the one STT model instance, which isn't concurrency-safe.
+            if !self.audioManager.isRecording && self.blockedByCallTranscription("recording") { return }
+
             // If about to start a fresh recording, make sure any previous
             // processing indicator is stopped and UI is reset.
             if !self.audioManager.isRecording {
@@ -246,7 +250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             }
             self.audioManager.toggleRecording()
         }
-        
+
         KeyboardShortcuts.onKeyUp(for: .showHistory) { [weak self] in
             self?.showTranscriptionHistory()
         }
@@ -271,6 +275,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 print("OpenClaw: blocked - WhisperKit recording is active")
                 return
             }
+
+            // Also mutually exclusive with an in-progress call transcription
+            // (shared STT model instance).
+            if self.openClawRecordingManager?.isRecording != true && self.blockedByCallTranscription("OpenClaw recording") { return }
 
             guard let recordingManager = self.openClawRecordingManager else {
                 let notification = NSUserNotification()
@@ -644,6 +652,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             return
         }
 
+        if blockedByCallTranscription("OpenClaw recording") {
+            DispatchQueue.main.async { self.resetLeftOptionState() }
+            return
+        }
+
         guard let recordingManager = openClawRecordingManager else {
             print("OpenClaw PTT: not configured")
             DispatchQueue.main.async { self.resetLeftOptionState() }
@@ -697,6 +710,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private func startSTTPushToTalk(overrideTargetApp: NSRunningApplication? = nil, overrideTargetWindow: AXUIElement? = nil, isAutoRecordAfterRecap: Bool = false) {
         if openClawRecordingManager?.isRecording == true || openClawRecordingManager?.isProcessing == true {
             print("STT PTT: blocked - OpenClaw recording is active")
+            DispatchQueue.main.async { self.resetRightOptionState() }
+            return
+        }
+
+        // Don't contend with a background call transcription for the shared STT
+        // model (not concurrency-safe).
+        if blockedByCallTranscription("recording") {
             DispatchQueue.main.async { self.resetRightOptionState() }
             return
         }
@@ -2829,6 +2849,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     // MARK: - Call Capture
 
+    /// True (and notifies the user) when a background call transcription is
+    /// running. PTT/OpenClaw share the single STT model instance with call
+    /// transcription, and FluidAudio/WhisperKit give no concurrency guarantee,
+    /// so recording starts are blocked for the (usually brief) transcription
+    /// window — consistent with the app's single-audio-user model. Callers must
+    /// only invoke this on a START path, never a stop.
+    private func blockedByCallTranscription(_ what: String) -> Bool {
+        // These call sites are all main-thread (KeyboardShortcuts handlers and
+        // the option-key PTT funnels dispatch to main), so reading the
+        // @MainActor runner via assumeIsolated is safe and synchronous.
+        let busy = MainActor.assumeIsolated { CallTranscriptionRunner.shared.isBusy }
+        guard busy else { return false }
+        NSLog("\(what): blocked — call transcription in progress")
+        let notification = NSUserNotification()
+        notification.title = "Transcribing a Call"
+        notification.informativeText = "Please wait for call transcription to finish before starting \(what)."
+        NSUserNotificationCenter.default.deliver(notification)
+        return true
+    }
+
     /// Hotkey toggle: stop if capturing, otherwise capture the first detected
     /// running known app. If none is running, tell the user.
     private func toggleCallCapture() {
@@ -2946,9 +2986,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 self?.callCaptureOverlay?.dismiss()
             }
             if !started {
-                // Runner busy or no metadata — don't leave the overlay stuck.
+                // Runner busy or metadata unreadable — don't leave the overlay
+                // stuck, and surface it so the captured call isn't silently
+                // stranded (audio is preserved; it can be transcribed later via
+                // POST /api/v1/transcribe against the session's track files).
                 self.callCaptureManager?.markTranscriptionDone()
                 self.callCaptureOverlay?.dismiss()
+                NSLog("[CallCapture] Transcription not started for \(info.id) (runner busy or metadata unreadable); audio preserved in \(info.directory.path)")
+                let notification = NSUserNotification()
+                notification.title = "Call Captured (Not Transcribed)"
+                notification.informativeText = "Transcription is busy. The audio is saved in \(info.directory.lastPathComponent) and can be transcribed later."
+                NSUserNotificationCenter.default.deliver(notification)
             }
         }
     }

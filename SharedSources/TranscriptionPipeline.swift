@@ -252,7 +252,10 @@ public final class TranscriptionPipeline {
             metadata.durationSeconds = Int(maxTrackEnd.rounded())
         }
 
-        let isMultiTrack = metadata.tracks.filter { $0.role == "mic" || $0.role == "app-output" || $0.role == "app" }.count > 1
+        // Two-speaker format only when more than one speaker role actually
+        // produced speech (a failed/silent app track shouldn't force Me/Them).
+        let speakerRoles = Set(allSegments.map(\.role)).intersection(["mic", "app-output", "app"])
+        let isMultiTrack = speakerRoles.count > 1
         let markdown = Self.renderMarkdown(
             segments: allSegments,
             metadata: metadata,
@@ -278,8 +281,10 @@ public final class TranscriptionPipeline {
     // MARK: Audio loading
 
     /// Decode any AVFoundation-readable file (wav/m4a/mp3/…) to mono Float
-    /// samples at `targetSampleRate`, streaming in chunks so long calls don't
-    /// balloon memory.
+    /// samples at `targetSampleRate`. Conversion is chunked, but the full
+    /// decoded track is accumulated into the returned array — peak memory is
+    /// roughly one track's samples (~230 MB for a 1-hour 16 kHz mono track),
+    /// and only one track is held at a time by the caller.
     public static func loadMono16k(url: URL, targetSampleRate: Double = 16000) throws -> [Float] {
         let file: AVAudioFile
         do {

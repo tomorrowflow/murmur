@@ -41,8 +41,10 @@ final class CallTranscriptionRunner {
         return true
     }
 
-    /// File-input mode: copy the given audio file(s) into a new session
-    /// directory (2 files → mic/app roles, 1 file → single track), write the
+    /// File-input mode: create a new session directory that references the
+    /// provided audio file(s) by absolute path (2 files → mic/app roles, 1 file
+    /// → single track — the pipeline reads absolute track paths, so nothing is
+    /// copied and the main thread never blocks on large files), write the
     /// initial metadata.json, and kick off transcription. Returns the new
     /// session id + directory immediately (transcription runs async).
     func transcribeFiles(_ paths: [URL]) throws -> (id: String, dir: URL) {
@@ -61,20 +63,16 @@ final class CallTranscriptionRunner {
         let dir = Self.callsDirectory.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
+        // Reference the source files by absolute path (no copy — avoids blocking
+        // on multi-hundred-MB files). 2 files = mic + app roles; 1 = single track.
         var tracks: [CallSessionMetadata.Track] = []
         if paths.count >= 2 {
-            let micDst = dir.appendingPathComponent("mic.\(paths[0].pathExtension.isEmpty ? "wav" : paths[0].pathExtension)")
-            let appDst = dir.appendingPathComponent("app.\(paths[1].pathExtension.isEmpty ? "wav" : paths[1].pathExtension)")
-            try FileManager.default.copyItem(at: paths[0], to: micDst)
-            try FileManager.default.copyItem(at: paths[1], to: appDst)
             tracks = [
-                .init(role: "mic", file: micDst.lastPathComponent),
-                .init(role: "app-output", file: appDst.lastPathComponent)
+                .init(role: "mic", file: paths[0].path),
+                .init(role: "app-output", file: paths[1].path)
             ]
         } else {
-            let dst = dir.appendingPathComponent("audio.\(first.pathExtension.isEmpty ? "wav" : first.pathExtension)")
-            try FileManager.default.copyItem(at: first, to: dst)
-            tracks = [.init(role: "audio", file: dst.lastPathComponent)]
+            tracks = [.init(role: "audio", file: first.path)]
         }
 
         let meta = CallSessionMetadata(
@@ -139,7 +137,7 @@ final class CallTranscriptionRunner {
             guard let made = await self.makeTranscriber() else {
                 var failed = metadata
                 failed.error = "No transcription engine available. Select and download a model in Settings."
-                try? failed.write(to: sessionDir.appendingPathComponent("metadata.json"))
+                Self.writeMetadata(failed, to: sessionDir)
                 NSLog("[Transcribe] No engine available for \(metadata.id)")
                 await self.finish()
                 return
@@ -157,7 +155,7 @@ final class CallTranscriptionRunner {
                 var failed = metadata
                 failed.engine = made.engine
                 failed.error = error.localizedDescription
-                try? failed.write(to: sessionDir.appendingPathComponent("metadata.json"))
+                Self.writeMetadata(failed, to: sessionDir)
                 NSLog("[Transcribe] Failed \(metadata.id): \(error.localizedDescription)")
             }
             await self.finish()
@@ -245,6 +243,16 @@ final class CallTranscriptionRunner {
     }
 
     // MARK: - Helpers
+
+    /// Persist metadata.json, logging (not swallowing) any write failure so a
+    /// failed session doesn't silently appear as plain "captured".
+    nonisolated private static func writeMetadata(_ meta: CallSessionMetadata, to sessionDir: URL) {
+        do {
+            try meta.write(to: sessionDir.appendingPathComponent("metadata.json"))
+        } catch {
+            NSLog("[Transcribe] Failed to write metadata.json for \(meta.id): \(error.localizedDescription)")
+        }
+    }
 
     nonisolated private static func sanitize(_ name: String) -> String {
         let allowed = CharacterSet.alphanumerics

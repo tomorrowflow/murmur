@@ -26,6 +26,20 @@ public class LLMClient {
         return ProcessInfo.processInfo.environment["OLLAMA_API_KEY"]
     }
 
+    /// API key for the OpenAI-compatible LLM server (distinct from the ollama.com
+    /// web-search key above). Sent as a Bearer token when non-empty.
+    private var serverAPIKey: String? { Self.resolveServerAPIKey() }
+
+    static func resolveServerAPIKey() -> String? {
+        if let key = UserDefaults.standard.string(forKey: "readAloud.llmServerAPIKey"), !key.isEmpty {
+            return key
+        }
+        if let env = ProcessInfo.processInfo.environment["LLM_SERVER_API_KEY"], !env.isEmpty {
+            return env
+        }
+        return nil
+    }
+
     public init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 120
@@ -48,6 +62,9 @@ public class LLMClient {
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    if let apiKey = serverAPIKey {
+                        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    }
 
                     let payload: [String: Any] = [
                         "model": model,
@@ -65,6 +82,10 @@ public class LLMClient {
 
                     guard let httpResponse = response as? HTTPURLResponse else {
                         continuation.finish(throwing: LLMClientError.connectionFailed)
+                        return
+                    }
+                    guard httpResponse.statusCode != 401 && httpResponse.statusCode != 403 else {
+                        continuation.finish(throwing: LLMClientError.authenticationFailed(httpResponse.statusCode))
                         return
                     }
                     guard httpResponse.statusCode == 200 else {
@@ -119,22 +140,42 @@ public class LLMClient {
 
     // MARK: - Model Listing
 
-    /// Fetch available models from the LLM server.
-    public static func listModels(baseURL: String = "") async -> [String] {
-        let url = (baseURL.isEmpty ? "http://localhost:11434" : baseURL) + "/v1/models"
-        guard let requestURL = URL(string: url) else { return [] }
-
+    /// Fetch available models from the LLM server. Returns an empty array on any
+    /// failure — used by the settings picker, where errors are non-fatal.
+    /// `apiKey` defaults to the value in UserDefaults / the `LLM_SERVER_API_KEY` env var.
+    public static func listModels(baseURL: String = "", apiKey: String? = nil) async -> [String] {
         do {
-            var request = URLRequest(url: requestURL)
-            request.timeoutInterval = 5
-            let (data, _) = try await URLSession.shared.data(for: request)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let models = json["data"] as? [[String: Any]] else { return [] }
-            return models.compactMap { $0["id"] as? String }.sorted()
+            return try await fetchModels(baseURL: baseURL, apiKey: apiKey)
         } catch {
             NSLog("LLMClient: failed to list models: \(error.localizedDescription)")
             return []
         }
+    }
+
+    /// Like `listModels`, but surfaces errors (authentication, connection, HTTP) so
+    /// callers can distinguish "no models" from "auth required".
+    public static func fetchModels(baseURL: String = "", apiKey: String? = nil) async throws -> [String] {
+        let base = baseURL.isEmpty ? "http://localhost:11434" : baseURL
+        guard let requestURL = URL(string: base + "/v1/models") else { return [] }
+
+        var request = URLRequest(url: requestURL)
+        request.timeoutInterval = 5
+        if let key = apiKey ?? resolveServerAPIKey(), !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw LLMClientError.authenticationFailed(http.statusCode)
+            }
+            guard http.statusCode == 200 else {
+                throw LLMClientError.httpError(http.statusCode)
+            }
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["data"] as? [[String: Any]] else { return [] }
+        return models.compactMap { $0["id"] as? String }.sorted()
     }
 
     // MARK: - Web Search
@@ -210,6 +251,7 @@ public struct WebSearchResult {
 public enum LLMClientError: LocalizedError {
     case connectionFailed
     case httpError(Int)
+    case authenticationFailed(Int)
     case noModel
 
     public var errorDescription: String? {
@@ -218,6 +260,8 @@ public enum LLMClientError: LocalizedError {
             return "Cannot connect to LLM server. Make sure it's running."
         case .httpError(let code):
             return "LLM server returned HTTP \(code)"
+        case .authenticationFailed(let code):
+            return "LLM server rejected the API key (HTTP \(code)). Set or check the API key in Settings > Read Aloud."
         case .noModel:
             return "No model configured. Set one in Settings > Read Aloud."
         }

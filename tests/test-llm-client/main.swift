@@ -2,21 +2,44 @@ import Foundation
 import SharedModels
 
 // Exercises LLMClient against any OpenAI-compatible server.
-//   swift run TestLLMClient [baseURL] [model]
+//   swift run TestLLMClient [baseURL] [model] [apiKey]
 // Defaults: baseURL http://localhost:11434, model = first entry from /v1/models.
+// The API key may also be supplied via the LLM_SERVER_API_KEY environment variable.
 @main
 struct TestLLMClient {
     static func main() async {
         let args = Array(CommandLine.arguments.dropFirst())
         let baseURL = args.first ?? "http://localhost:11434"
-        let requestedModel = args.count > 1 ? args[1] : nil
+        let requestedModel = (args.count > 1 && !args[1].isEmpty) ? args[1] : nil
+        let apiKey = (args.count > 2 ? args[2] : nil)
+            ?? ProcessInfo.processInfo.environment["LLM_SERVER_API_KEY"]
 
         print("🧪 Testing LLMClient (OpenAI-compatible)")
-        print("Server: \(baseURL)\n")
+        print("Server: \(baseURL)")
+        print("Auth: \(apiKey?.isEmpty == false ? "Bearer token provided" : "none")\n")
 
-        // 1. List models
+        // Make streamChat (which reads config from UserDefaults) use the same key.
+        if let apiKey, !apiKey.isEmpty {
+            UserDefaults.standard.set(apiKey, forKey: "readAloud.llmServerAPIKey")
+        }
+
+        // 1. List models (surfaces auth / connection errors)
         print("→ GET \(baseURL)/v1/models")
-        let models = await LLMClient.listModels(baseURL: baseURL)
+        let models: [String]
+        do {
+            models = try await LLMClient.fetchModels(baseURL: baseURL, apiKey: apiKey)
+        } catch let error as LLMClientError {
+            if case .authenticationFailed(let code) = error {
+                print("🔒 Authentication required/failed (HTTP \(code)). Provide a key via the third arg or LLM_SERVER_API_KEY.")
+                exit(2)
+            }
+            print("❌ \(error.localizedDescription)")
+            exit(1)
+        } catch {
+            print("❌ \(error.localizedDescription)")
+            exit(1)
+        }
+
         if models.isEmpty {
             print("❌ No models returned. Is a server running at \(baseURL)?")
             exit(1)
@@ -30,8 +53,6 @@ struct TestLLMClient {
             exit(1)
         }
         print("\nUsing model: \(model)")
-
-        // LLMClient reads its config from UserDefaults (same keys the app uses).
         UserDefaults.standard.set(baseURL, forKey: "readAloud.ollamaURL")
         UserDefaults.standard.set(model, forKey: "readAloud.ollamaModel")
 
@@ -52,6 +73,13 @@ struct TestLLMClient {
                 tokenCount += 1
             }
             print("\n\n✅ Streamed \(tokenCount) tokens.")
+        } catch let error as LLMClientError {
+            if case .authenticationFailed(let code) = error {
+                print("\n\n🔒 Authentication required/failed (HTTP \(code)).")
+                exit(2)
+            }
+            print("\n\n❌ Stream failed: \(error.localizedDescription)")
+            exit(1)
         } catch {
             print("\n\n❌ Stream failed: \(error.localizedDescription)")
             exit(1)

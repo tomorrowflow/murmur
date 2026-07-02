@@ -18,6 +18,18 @@ struct ReadAloudSettingsView: View {
                     .labelsHidden()
 
                     HStack(spacing: 8) {
+                        Text("API Key")
+                            .frame(width: 120, alignment: .leading)
+                        SecureField("", text: $viewModel.llmServerAPIKey, prompt: Text("Optional — for authenticated servers"))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    .labelsHidden()
+
+                    Text("Sent as a Bearer token to the LLM server. Leave empty for local servers like Ollama. Separate from the Ollama web-search key below.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+
+                    HStack(spacing: 8) {
                         Text("Model")
                             .frame(width: 120, alignment: .leading)
                         if viewModel.availableModels.isEmpty {
@@ -160,6 +172,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
 
     @Published var ollamaURL: String = "" { didSet { persist(ollamaURL, forKey: "readAloud.ollamaURL") } }
     @Published var ollamaModel: String = "" { didSet { persist(ollamaModel, forKey: "readAloud.ollamaModel") } }
+    @Published var llmServerAPIKey: String = "" { didSet { persist(llmServerAPIKey, forKey: "readAloud.llmServerAPIKey") } }
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, forKey: "readAloud.webSearchEnabled") } }
     @Published var ollamaAPIKey: String = "" { didSet { persist(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
     @Published var resumeBehavior: String = "ask" { didSet { persist(resumeBehavior, forKey: "readAloud.resumeBehavior") } }
@@ -179,6 +192,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         ollamaURL = defaults.string(forKey: "readAloud.ollamaURL") ?? "http://localhost:11434"
         ollamaModel = defaults.string(forKey: "readAloud.ollamaModel") ?? ""
+        llmServerAPIKey = defaults.string(forKey: "readAloud.llmServerAPIKey") ?? ""
         webSearchEnabled = defaults.bool(forKey: "readAloud.webSearchEnabled")
         ollamaAPIKey = defaults.string(forKey: "readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"

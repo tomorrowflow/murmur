@@ -3,6 +3,7 @@ import AVFoundation
 import CoreAudio
 import AppKit
 import Combine
+import SharedModels
 
 // MARK: - State
 
@@ -10,6 +11,7 @@ enum CallCaptureState: String {
     case idle
     case recording
     case finalizing
+    case transcribing   // capture done; transcription pipeline running
 }
 
 // MARK: - Known-app registry
@@ -86,6 +88,10 @@ enum CallCaptureError: LocalizedError {
 protocol CallCaptureManagerDelegate: AnyObject {
     func callCaptureStateDidChange(_ state: CallCaptureState)
     func callCaptureDidFail(_ message: String)
+    /// Fired after a session is fully finalized (files flushed, metadata.json
+    /// written) — for any stop trigger including auto-finalize. The app decides
+    /// whether to kick off transcription.
+    func callCaptureDidFinish(_ info: CallCaptureSessionInfo)
 }
 
 // MARK: - Manager
@@ -310,7 +316,7 @@ final class CallCaptureManager: NSObject, ObservableObject {
         return currentSessionInfo()
     }
 
-    /// Stop the active session, flush both files, write the final session.json.
+    /// Stop the active session, flush both files, write the final metadata.json.
     /// Returns the session info, or nil if nothing was capturing.
     @discardableResult
     func stop() -> CallCaptureSessionInfo? {
@@ -332,19 +338,32 @@ final class CallCaptureManager: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.micLevel = 0
             self.appLevel = 0
+            self.delegate?.callCaptureDidFinish(info)
         }
         return info
     }
 
     /// Snapshot for the status endpoint.
     func statusSnapshot() -> (state: String, sessionId: String?, elapsedSeconds: Int, app: String?) {
+        // Elapsed only counts while actively recording.
         let elapsed: Int
-        if let startedAt {
-            elapsed = state == .idle ? 0 : Int(Date().timeIntervalSince(startedAt))
+        if state == .recording, let startedAt {
+            elapsed = Int(Date().timeIntervalSince(startedAt))
         } else {
             elapsed = 0
         }
         return (state.rawValue, state == .idle ? nil : sessionId, elapsed, state == .idle ? nil : sessionAppLabel)
+    }
+
+    /// Move to the .transcribing state after capture stops (drives the overlay
+    /// and status endpoint while the pipeline runs). Keeps the session's id/app.
+    func markTranscribing() {
+        setState(.transcribing)
+    }
+
+    /// Transcription finished (or failed) — return to idle and dismiss UI.
+    func markTranscriptionDone() {
+        setState(.idle)
     }
 
     func currentSessionInfo() -> CallCaptureSessionInfo {
@@ -641,35 +660,41 @@ final class CallCaptureManager: NSObject, ObservableObject {
         watchedApp = nil
     }
 
-    // MARK: - session.json sidecar
+    // MARK: - metadata.json sidecar
 
+    /// The metadata.json contract for the current session, pre-transcription.
+    /// The transcription pipeline reads this to find the tracks and later fills
+    /// in engine/transcript/durations. Grows the B1 skeleton into the full
+    /// spec sidecar (source, tracks, engine, transcript, workflowOutputs).
     private func writeSessionJSON() {
         guard let dir = sessionDirectory, let id = sessionId, let started = startedAt else { return }
-        var payload: [String: Any] = [
-            "id": id,
-            "app": sessionAppLabel,
-            "startedAt": Self.iso8601.string(from: started),
-            "files": [
-                "app": appURL?.lastPathComponent ?? "app.wav",
-                "mic": micURL?.lastPathComponent ?? NSNull()
-            ]
-        ]
-        if let ended = endedAt {
-            payload["endedAt"] = Self.iso8601.string(from: ended)
-            payload["durationSeconds"] = Int(ended.timeIntervalSince(started))
-        }
-        // Per-track offsets from the shared host-time anchor (seconds).
-        payload["anchor"] = [
-            "appOffsetSeconds": hostTimeOffsetSeconds(from: startHostTime, to: appFirstHostTime),
-            "micOffsetSeconds": hostTimeOffsetSeconds(from: startHostTime, to: micFirstHostTime)
-        ]
 
-        let url = dir.appendingPathComponent("session.json")
+        var tracks: [CallSessionMetadata.Track] = []
+        tracks.append(.init(role: "app-output", file: appURL?.lastPathComponent ?? "app.wav"))
+        if let micURL {
+            tracks.append(.init(role: "mic", file: micURL.lastPathComponent))
+        }
+
+        var meta = CallSessionMetadata(
+            id: id,
+            source: "live-capture",
+            app: sessionAppLabel,
+            startedAt: Self.iso8601.string(from: started),
+            tracks: tracks,
+            anchor: .init(
+                appOffsetSeconds: hostTimeOffsetSeconds(from: startHostTime, to: appFirstHostTime),
+                micOffsetSeconds: hostTimeOffsetSeconds(from: startHostTime, to: micFirstHostTime)
+            )
+        )
+        if let ended = endedAt {
+            meta.endedAt = Self.iso8601.string(from: ended)
+            meta.durationSeconds = Int(ended.timeIntervalSince(started))
+        }
+
         do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url, options: .atomic)
+            try meta.write(to: dir.appendingPathComponent("metadata.json"))
         } catch {
-            NSLog("[CallCapture] Failed to write session.json: \(error.localizedDescription)")
+            NSLog("[CallCapture] Failed to write metadata.json: \(error.localizedDescription)")
         }
     }
 

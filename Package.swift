@@ -57,6 +57,9 @@ let package = Package(
         .executable(
             name: "TestProcessTap",
             targets: ["TestProcessTap"]),
+        .executable(
+            name: "TestFileTranscribe",
+            targets: ["TestFileTranscribe"]),
         .library(
             name: "SharedModels",
             targets: ["SharedModels"])
@@ -135,6 +138,10 @@ let package = Package(
         .executableTarget(
             name: "TestProcessTap",
             dependencies: [],
-            path: "tests/test-process-tap")
+            path: "tests/test-process-tap"),
+        .executableTarget(
+            name: "TestFileTranscribe",
+            dependencies: ["SharedModels"],
+            path: "tests/test-file-transcribe")
     ]
 )

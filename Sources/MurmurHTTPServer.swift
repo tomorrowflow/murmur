@@ -10,10 +10,15 @@ import Network
 /// unapproved remote hosts before routing — but exempt routes (like health)
 /// can use it.
 typealias HTTPHandler = (_ body: Data?) async -> (statusCode: Int, responseBody: Data)
+/// Like HTTPHandler but also receives the full request path — for prefix
+/// routes with a dynamic trailing segment (e.g. /api/v1/sessions/<id>).
+typealias HTTPPathHandler = (_ path: String, _ body: Data?) async -> (statusCode: Int, responseBody: Data)
 
 class MurmurHTTPRouter {
     private var getHandlers: [String: HTTPHandler] = [:]
     private var postHandlers: [String: HTTPHandler] = [:]
+    // Longest-prefix-wins GET handlers for paths with a dynamic tail.
+    private var getPrefixHandlers: [(prefix: String, handler: HTTPPathHandler)] = []
 
     func get(_ path: String, handler: @escaping HTTPHandler) {
         getHandlers[path] = handler
@@ -23,10 +28,22 @@ class MurmurHTTPRouter {
         postHandlers[path] = handler
     }
 
+    /// Register a GET handler that matches any path beginning with `prefix`.
+    /// Exact-match handlers take priority; among prefixes the longest wins.
+    func getPrefix(_ prefix: String, handler: @escaping HTTPPathHandler) {
+        getPrefixHandlers.append((prefix, handler))
+        getPrefixHandlers.sort { $0.prefix.count > $1.prefix.count }
+    }
+
     func route(method: String, path: String, body: Data?) async -> (statusCode: Int, responseBody: Data) {
         let handlers = method == "GET" ? getHandlers : postHandlers
         if let handler = handlers[path] {
             return await handler(body)
+        }
+        if method == "GET" {
+            for entry in getPrefixHandlers where path.hasPrefix(entry.prefix) {
+                return await entry.handler(path, body)
+            }
         }
         return (404, jsonError("Not found"))
     }
@@ -71,6 +88,10 @@ class MurmurHTTPServer {
 
     func post(_ path: String, handler: @escaping HTTPHandler) {
         router.post(path, handler: handler)
+    }
+
+    func getPrefix(_ prefix: String, handler: @escaping HTTPPathHandler) {
+        router.getPrefix(prefix, handler: handler)
     }
 
     // MARK: - Lifecycle
@@ -287,6 +308,7 @@ class MurmurHTTPServer {
         let statusText: String
         switch statusCode {
         case 200: statusText = "OK"
+        case 202: statusText = "Accepted"
         case 400: statusText = "Bad Request"
         case 403: statusText = "Forbidden"
         case 404: statusText = "Not Found"

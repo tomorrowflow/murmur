@@ -151,6 +151,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var callCaptureManager: CallCaptureManager?
     private var callCaptureOverlay: CallCaptureOverlayWindow?
     private var captureSubmenu: NSMenu?
+    // Whether the current/last capture session should transcribe on stop.
+    // Set at start time: HTTP uses the request's `transcribe`; hotkey/menu use
+    // the `callCapture.autoTranscribe` default.
+    private var captureTranscribeOnStop: Bool = true
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
@@ -2843,14 +2847,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         startCallCapture(app: target.alias ?? target.bundleID)
     }
 
+    /// Whether new captures should transcribe on stop (hotkey/menu default).
+    private var callCaptureAutoTranscribe: Bool {
+        UserDefaults.standard.object(forKey: "callCapture.autoTranscribe") as? Bool ?? true
+    }
+
     /// Start a capture session for the given app (alias, bundle id, or "system").
     /// Surfaces precondition failures as alerts/notifications. Returns the
     /// started session info, or nil on failure.
     @discardableResult
-    private func startCallCapture(app: String, includeMic: Bool = true) -> CallCaptureSessionInfo? {
+    private func startCallCapture(app: String, includeMic: Bool = true, transcribeOnStop: Bool? = nil) -> CallCaptureSessionInfo? {
         guard let manager = callCaptureManager else { return nil }
         do {
             let info = try manager.start(app: app, includeMic: includeMic)
+            captureTranscribeOnStop = transcribeOnStop ?? callCaptureAutoTranscribe
             callCaptureOverlay?.show()
             return info
         } catch let error as CallCaptureError {
@@ -2871,8 +2881,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     private func stopCallCapture() {
         guard let manager = callCaptureManager, manager.isCapturing else { return }
+        // manager.stop() fires callCaptureDidFinish, which handles the overlay
+        // and kicks off transcription if enabled.
         _ = manager.stop()
-        callCaptureOverlay?.dismiss()
     }
 
     private func showAudioCapturePermissionAlert() {
@@ -2915,6 +2926,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         notification.title = "Call Capture Error"
         notification.informativeText = message
         NSUserNotificationCenter.default.deliver(notification)
+    }
+
+    func callCaptureDidFinish(_ info: CallCaptureSessionInfo) {
+        // Kick off transcription if enabled for this session; otherwise just
+        // dismiss the overlay. Works for manual stop, HTTP stop, and the
+        // auto-finalize path (tapped app quit). Fires on the main thread; the
+        // @MainActor Task satisfies the runner's isolation.
+        guard captureTranscribeOnStop else {
+            callCaptureOverlay?.dismiss()
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.callCaptureManager?.markTranscribing()
+            self.callCaptureOverlay?.show()
+            let started = CallTranscriptionRunner.shared.transcribeSession(directory: info.directory) { [weak self] in
+                self?.callCaptureManager?.markTranscriptionDone()
+                self?.callCaptureOverlay?.dismiss()
+            }
+            if !started {
+                // Runner busy or no metadata — don't leave the overlay stuck.
+                self.callCaptureManager?.markTranscriptionDone()
+                self.callCaptureOverlay?.dismiss()
+            }
+        }
     }
 
     // MARK: NSMenuDelegate (Capture Call submenu)
@@ -2982,8 +3018,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             let json = MurmurHTTPServer.parseJSON(body) ?? [:]
             let appArg = (json["app"] as? String) ?? "system"
             let includeMic = json["mic"] as? Bool ?? true
-            // Forward-compat fields accepted-and-ignored in B1.
-            let wantsTranscribe = json["transcribe"] as? Bool ?? false
+            // Transcribe on stop when requested (defaults to the autoTranscribe
+            // setting). Workflows remain not-implemented until Phase B3.
+            let wantsTranscribe = json["transcribe"] as? Bool
+            let wantsWorkflows = json["workflows"] != nil
 
             let result: (Int, Data) = await MainActor.run {
                 guard let self = self, let manager = self.callCaptureManager else {
@@ -2991,15 +3029,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 }
                 do {
                     let info = try manager.start(app: appArg, includeMic: includeMic)
+                    self.captureTranscribeOnStop = wantsTranscribe ?? self.callCaptureAutoTranscribe
                     self.callCaptureOverlay?.show()
                     var payload: [String: Any] = [
                         "sessionId": info.id,
                         "app": info.app,
                         "directory": info.directory.path,
-                        "mic": info.micFile != nil
+                        "mic": info.micFile != nil,
+                        "transcribe": self.captureTranscribeOnStop
                     ]
-                    if wantsTranscribe { payload["transcribe"] = "not-implemented" }
-                    if json["workflows"] != nil { payload["workflows"] = "not-implemented" }
+                    if wantsWorkflows { payload["workflows"] = "not-implemented" }
                     return (200, MurmurHTTPServer.jsonResponse(payload))
                 } catch let error as CallCaptureError {
                     // No alert from the HTTP path — a modal would block the main
@@ -3023,19 +3062,78 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 guard let self = self, let manager = self.callCaptureManager else {
                     return (500, MurmurHTTPServer.jsonResponse(["error": "Capture manager unavailable"]))
                 }
+                // stop() fires callCaptureDidFinish → overlay + transcription.
                 guard let info = manager.stop() else {
                     return (409, MurmurHTTPServer.jsonResponse(["error": "No capture in progress"]))
                 }
-                self.callCaptureOverlay?.dismiss()
                 var files: [String: Any] = ["app": info.appFile.path]
                 if let mic = info.micFile { files["mic"] = mic.path }
                 return (200, MurmurHTTPServer.jsonResponse([
                     "sessionId": info.id,
                     "directory": info.directory.path,
-                    "files": files
+                    "files": files,
+                    "transcribe": self.captureTranscribeOnStop
                 ]))
             }
             return result
+        }
+
+        // MARK: Transcription pipeline (Phase B2)
+
+        server.post("/api/v1/transcribe") { body in
+            let json = MurmurHTTPServer.parseJSON(body) ?? [:]
+            var paths: [URL] = []
+            if let files = json["files"] as? [String] {
+                paths = files.map { URL(fileURLWithPath: $0) }
+            } else if let filePath = json["filePath"] as? String {
+                paths = [URL(fileURLWithPath: filePath)]
+            }
+            let wantsWorkflows = json["workflows"] != nil
+
+            guard !paths.isEmpty else {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "Provide `filePath` or `files`"]))
+            }
+            for p in paths where !FileManager.default.isReadableFile(atPath: p.path) {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "File not readable: \(p.path)"]))
+            }
+
+            let result: (Int, Data) = await MainActor.run {
+                do {
+                    let session = try CallTranscriptionRunner.shared.transcribeFiles(paths)
+                    var payload: [String: Any] = [
+                        "sessionId": session.id,
+                        "directory": session.dir.path
+                    ]
+                    if wantsWorkflows { payload["workflows"] = "not-implemented" }
+                    return (202, MurmurHTTPServer.jsonResponse(payload))
+                } catch {
+                    return (400, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
+                }
+            }
+            return result
+        }
+
+        server.get("/api/v1/sessions") { _ in
+            let list: [[String: Any]] = await MainActor.run {
+                CallTranscriptionRunner.shared.listSessions()
+            }
+            return (200, MurmurHTTPServer.jsonResponse(["sessions": list]))
+        }
+
+        server.getPrefix("/api/v1/sessions/") { path, _ in
+            let id = String(path.dropFirst("/api/v1/sessions/".count))
+                .removingPercentEncoding ?? ""
+            // Reject empty ids and path traversal (the id is used as a directory name).
+            guard !id.isEmpty, !id.contains("/"), !id.contains("..") else {
+                return (404, MurmurHTTPServer.jsonResponse(["error": "Invalid session id"]))
+            }
+            let data: Data? = await MainActor.run {
+                CallTranscriptionRunner.shared.metadataJSON(forSessionId: id)
+            }
+            if let data {
+                return (200, data)
+            }
+            return (404, MurmurHTTPServer.jsonResponse(["error": "Unknown session \(id)"]))
         }
 
         server.get("/api/v1/capture/status") { [weak self] _ in

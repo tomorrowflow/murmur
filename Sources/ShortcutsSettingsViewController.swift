@@ -11,6 +11,7 @@ struct ShortcutsSettingsView: View {
     @AppStorage("ptt.cursorAnchoredOverlay") private var cursorAnchoredOverlay = false
     @AppStorage("ptt.autoStopAfterSilence") private var autoStopAfterSilence = false
     @AppStorage("ptt.silenceTimeoutSeconds") private var silenceTimeoutSeconds: Double = 5.0
+    @AppStorage("callCapture.autoTranscribe") private var callCaptureAutoTranscribe = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -112,6 +113,18 @@ struct ShortcutsSettingsView: View {
                                 .frame(width: 40, alignment: .trailing)
                         }
                         .disabled(!sttPTTEnabled)
+                    }
+                }
+
+                Section("Call Capture") {
+                    Toggle(isOn: $callCaptureAutoTranscribe) {
+                        HStack {
+                            Text("Transcribe on stop")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Automatically transcribe captured calls when recording stops (hotkey / menu)")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }

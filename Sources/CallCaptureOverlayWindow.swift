@@ -46,13 +46,19 @@ struct CallCaptureOverlayView: View {
         VStack(alignment: .leading, spacing: 10) {
             // Header
             HStack(spacing: 8) {
-                RecordingDot()
-                Text("Capturing Call")
+                if manager.state == .transcribing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    RecordingDot()
+                }
+                Text(manager.state == .transcribing ? "Transcribing Call" : "Capturing Call")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text(formattedElapsed)
-                    .font(.system(size: 14, weight: .medium).monospacedDigit())
-                    .foregroundColor(.primary.opacity(0.85))
+                if manager.state == .recording {
+                    Text(formattedElapsed)
+                        .font(.system(size: 14, weight: .medium).monospacedDigit())
+                        .foregroundColor(.primary.opacity(0.85))
+                }
             }
 
             // Target app + state
@@ -64,29 +70,36 @@ struct CallCaptureOverlayView: View {
                 stateBadge
             }
 
-            // Level meters
-            VStack(spacing: 6) {
-                CaptureLevelMeter(label: "App", systemImage: "speaker.wave.2.fill",
-                                  level: manager.appLevel, tint: .blue, enabled: true)
-                CaptureLevelMeter(label: "Mic", systemImage: "mic.fill",
-                                  level: manager.micLevel, tint: .red, enabled: manager.micEnabled)
-            }
-
-            // Stop button
-            Button(action: onStop) {
-                HStack(spacing: 6) {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 10))
-                    Text("Stop Capture")
-                        .font(.system(size: 12, weight: .medium))
+            if manager.state == .transcribing {
+                Text("Transcribing captured audio — this runs in the background.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                // Level meters
+                VStack(spacing: 6) {
+                    CaptureLevelMeter(label: "App", systemImage: "speaker.wave.2.fill",
+                                      level: manager.appLevel, tint: .blue, enabled: true)
+                    CaptureLevelMeter(label: "Mic", systemImage: "mic.fill",
+                                      level: manager.micLevel, tint: .red, enabled: manager.micEnabled)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-                .background(Color.red.opacity(0.15))
-                .foregroundColor(.red)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                // Stop button
+                Button(action: onStop) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 10))
+                        Text("Stop Capture")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.red.opacity(0.15))
+                    .foregroundColor(.red)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(14)
         .frame(width: 300)
@@ -104,6 +117,7 @@ struct CallCaptureOverlayView: View {
         case .idle: StateBadge(text: "Idle", color: .secondary)
         case .recording: StateBadge(text: "Recording", color: .red)
         case .finalizing: StateBadge(text: "Finalizing", color: .orange)
+        case .transcribing: StateBadge(text: "Transcribing", color: .blue)
         }
     }
 }

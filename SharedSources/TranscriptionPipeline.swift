@@ -1,6 +1,23 @@
 import Foundation
 import AVFoundation
 
+// MARK: - Engine serialization
+
+/// Serializes access to the shared STT model instances (Parakeet/WhisperKit),
+/// which make no reentrancy guarantees. Every engine `transcribe(...)` call —
+/// interactive PTT/OpenClaw and background call transcription alike — runs
+/// through `run`, so a background call transcription and a live dictation never
+/// touch the same model concurrently. Interactive callers wait at most one
+/// in-flight segment (~30s cap) behind a call transcription.
+public actor TranscriptionEngineGate {
+    public static let shared = TranscriptionEngineGate()
+    public init() {}
+
+    public func run<T>(_ op: @Sendable () async throws -> T) async rethrows -> T {
+        try await op()
+    }
+}
+
 // MARK: - Metadata contract (metadata.json sidecar)
 
 /// The generic ingestion contract written per session as `metadata.json`.
@@ -309,6 +326,7 @@ public final class TranscriptionPipeline {
         let inChunkFrames: AVAudioFrameCount = 16384
         let outChunkFrames: AVAudioFrameCount = 16384
         var out: [Float] = []
+        var readError: Error?
 
         loop: while true {
             guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outChunkFrames) else { break }
@@ -318,12 +336,17 @@ public final class TranscriptionPipeline {
                     inStatus.pointee = .endOfStream
                     return nil
                 }
-                // AVAudioFile.read throws (rather than returning 0 frames) once
-                // the last frame has been consumed — that's normal EOF, not a
-                // failure, since everything read so far is already converted.
                 do {
                     try file.read(into: inBuf)
                 } catch {
+                    // AVAudioFile.read throws (rather than returning 0 frames)
+                    // once the last frame has been consumed — that's normal EOF.
+                    // But a throw with frames still unread is a genuine I/O error
+                    // (e.g. corrupt-after-header); record it so we surface an
+                    // error instead of silently truncating to "(no speech)".
+                    if file.framePosition < file.length {
+                        readError = error
+                    }
                     inStatus.pointee = .endOfStream
                     return nil
                 }
@@ -337,6 +360,10 @@ public final class TranscriptionPipeline {
 
             if outBuf.frameLength > 0, let ch = outBuf.floatChannelData {
                 out.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: Int(outBuf.frameLength)))
+            }
+
+            if let readError {
+                throw TranscriptionPipelineError.audioLoadFailed(readError.localizedDescription)
             }
 
             switch status {

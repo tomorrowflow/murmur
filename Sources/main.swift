@@ -239,10 +239,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 return
             }
 
-            // Don't start a recording while a call is being transcribed — both
-            // share the one STT model instance, which isn't concurrency-safe.
-            if !self.audioManager.isRecording && self.blockedByCallTranscription("recording") { return }
-
             // If about to start a fresh recording, make sure any previous
             // processing indicator is stopped and UI is reset.
             if !self.audioManager.isRecording {
@@ -275,10 +271,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 print("OpenClaw: blocked - WhisperKit recording is active")
                 return
             }
-
-            // Also mutually exclusive with an in-progress call transcription
-            // (shared STT model instance).
-            if self.openClawRecordingManager?.isRecording != true && self.blockedByCallTranscription("OpenClaw recording") { return }
 
             guard let recordingManager = self.openClawRecordingManager else {
                 let notification = NSUserNotification()
@@ -652,11 +644,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             return
         }
 
-        if blockedByCallTranscription("OpenClaw recording") {
-            DispatchQueue.main.async { self.resetLeftOptionState() }
-            return
-        }
-
         guard let recordingManager = openClawRecordingManager else {
             print("OpenClaw PTT: not configured")
             DispatchQueue.main.async { self.resetLeftOptionState() }
@@ -710,13 +697,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private func startSTTPushToTalk(overrideTargetApp: NSRunningApplication? = nil, overrideTargetWindow: AXUIElement? = nil, isAutoRecordAfterRecap: Bool = false) {
         if openClawRecordingManager?.isRecording == true || openClawRecordingManager?.isProcessing == true {
             print("STT PTT: blocked - OpenClaw recording is active")
-            DispatchQueue.main.async { self.resetRightOptionState() }
-            return
-        }
-
-        // Don't contend with a background call transcription for the shared STT
-        // model (not concurrency-safe).
-        if blockedByCallTranscription("recording") {
             DispatchQueue.main.async { self.resetRightOptionState() }
             return
         }
@@ -2849,26 +2829,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     // MARK: - Call Capture
 
-    /// True (and notifies the user) when a background call transcription is
-    /// running. PTT/OpenClaw share the single STT model instance with call
-    /// transcription, and FluidAudio/WhisperKit give no concurrency guarantee,
-    /// so recording starts are blocked for the (usually brief) transcription
-    /// window — consistent with the app's single-audio-user model. Callers must
-    /// only invoke this on a START path, never a stop.
-    private func blockedByCallTranscription(_ what: String) -> Bool {
-        // These call sites are all main-thread (KeyboardShortcuts handlers and
-        // the option-key PTT funnels dispatch to main), so reading the
-        // @MainActor runner via assumeIsolated is safe and synchronous.
-        let busy = MainActor.assumeIsolated { CallTranscriptionRunner.shared.isBusy }
-        guard busy else { return false }
-        NSLog("\(what): blocked — call transcription in progress")
-        let notification = NSUserNotification()
-        notification.title = "Transcribing a Call"
-        notification.informativeText = "Please wait for call transcription to finish before starting \(what)."
-        NSUserNotificationCenter.default.deliver(notification)
-        return true
-    }
-
     /// Hotkey toggle: stop if capturing, otherwise capture the first detected
     /// running known app. If none is running, tell the user.
     private func toggleCallCapture() {
@@ -2969,36 +2929,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     }
 
     func callCaptureDidFinish(_ info: CallCaptureSessionInfo) {
-        // Kick off transcription if enabled for this session; otherwise just
-        // dismiss the overlay. Works for manual stop, HTTP stop, and the
-        // auto-finalize path (tapped app quit). Fires on the main thread; the
-        // @MainActor Task satisfies the runner's isolation.
+        // Fired synchronously by stop() on the main thread, with the manager in
+        // .finalizing. We drive the terminal transition here — either → idle
+        // (no transcription) or → transcribing → idle (via the completion) — so
+        // the manager never sits in .idle between capture and transcription.
+        // These call sites are main-thread, so assumeIsolated reads the
+        // @MainActor runner synchronously.
         guard captureTranscribeOnStop else {
+            callCaptureManager?.markTranscriptionDone()   // .finalizing → .idle
             callCaptureOverlay?.dismiss()
             return
         }
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            self.callCaptureManager?.markTranscribing()
-            self.callCaptureOverlay?.show()
-            let started = CallTranscriptionRunner.shared.transcribeSession(directory: info.directory) { [weak self] in
-                self?.callCaptureManager?.markTranscriptionDone()
+
+        // Start first; only enter .transcribing if it actually began.
+        let started = MainActor.assumeIsolated {
+            CallTranscriptionRunner.shared.transcribeSession(directory: info.directory) { [weak self] in
+                self?.callCaptureManager?.markTranscriptionDone()   // → .idle
                 self?.callCaptureOverlay?.dismiss()
             }
-            if !started {
-                // Runner busy or metadata unreadable — don't leave the overlay
-                // stuck, and surface it so the captured call isn't silently
-                // stranded (audio is preserved; it can be transcribed later via
-                // POST /api/v1/transcribe against the session's track files).
-                self.callCaptureManager?.markTranscriptionDone()
-                self.callCaptureOverlay?.dismiss()
-                NSLog("[CallCapture] Transcription not started for \(info.id) (runner busy or metadata unreadable); audio preserved in \(info.directory.path)")
-                let notification = NSUserNotification()
-                notification.title = "Call Captured (Not Transcribed)"
-                notification.informativeText = "Transcription is busy. The audio is saved in \(info.directory.lastPathComponent) and can be transcribed later."
-                NSUserNotificationCenter.default.deliver(notification)
-            }
         }
+        if started {
+            callCaptureManager?.markTranscribing()   // .finalizing → .transcribing
+            callCaptureOverlay?.show()
+            return
+        }
+
+        // Couldn't start. If OUR session is somehow already transcribing (a
+        // spurious re-entry), leave it alone. Otherwise the runner is either
+        // idle or busy with a DIFFERENT (e.g. file-input) session that doesn't
+        // share this overlay — reset the capture UI so it isn't stranded in
+        // .finalizing, and surface it (audio is preserved; transcribe later via
+        // POST /api/v1/transcribe).
+        let runningOurs = MainActor.assumeIsolated {
+            CallTranscriptionRunner.shared.isBusy
+                && CallTranscriptionRunner.shared.currentSessionId == info.id
+        }
+        if runningOurs {
+            callCaptureManager?.markTranscribing()
+            callCaptureOverlay?.show()
+            return
+        }
+        callCaptureManager?.markTranscriptionDone()   // .finalizing → .idle
+        callCaptureOverlay?.dismiss()
+        NSLog("[CallCapture] Transcription not started for \(info.id); audio preserved in \(info.directory.path)")
+        let notification = NSUserNotification()
+        notification.title = "Call Captured (Not Transcribed)"
+        notification.informativeText = "Transcription is unavailable right now. The audio is saved in \(info.directory.lastPathComponent) and can be transcribed later."
+        NSUserNotificationCenter.default.deliver(notification)
     }
 
     // MARK: NSMenuDelegate (Capture Call submenu)

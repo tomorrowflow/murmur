@@ -183,7 +183,10 @@ final class CallTranscriptionRunner {
             guard let transcriber = ModelStateManager.shared.loadedParakeetTranscriber,
                   transcriber.isReady else { return nil }
             let closure: SegmentTranscribe = { samples in
-                let raw = try await transcriber.transcribe(audioSamples: Self.pad(samples))
+                // Serialize with interactive PTT/OpenClaw on the shared model.
+                let raw = try await TranscriptionEngineGate.shared.run {
+                    try await transcriber.transcribe(audioSamples: Self.pad(samples))
+                }
                 return Self.postProcess(raw, sampleCount: samples.count)
             }
             return ("parakeet", closure)
@@ -195,25 +198,28 @@ final class CallTranscriptionRunner {
             }
             guard let whisperKit = ModelStateManager.shared.loadedWhisperKit else { return nil }
             let closure: SegmentTranscribe = { samples in
-                let results = try await whisperKit.transcribe(
-                    audioArray: Self.pad(samples),
-                    decodeOptions: DecodingOptions(
-                        verbose: false,
-                        task: .transcribe,
-                        language: "en",
-                        temperature: 0.0,
-                        temperatureFallbackCount: 3,
-                        sampleLength: 224,
-                        topK: 5,
-                        usePrefillPrompt: true,
-                        usePrefillCache: true,
-                        skipSpecialTokens: true,
-                        withoutTimestamps: true,
-                        clipTimestamps: [],
-                        suppressBlank: true,
-                        supressTokens: nil
+                // Serialize with interactive PTT/OpenClaw on the shared model.
+                let results = try await TranscriptionEngineGate.shared.run {
+                    try await whisperKit.transcribe(
+                        audioArray: Self.pad(samples),
+                        decodeOptions: DecodingOptions(
+                            verbose: false,
+                            task: .transcribe,
+                            language: "en",
+                            temperature: 0.0,
+                            temperatureFallbackCount: 3,
+                            sampleLength: 224,
+                            topK: 5,
+                            usePrefillPrompt: true,
+                            usePrefillCache: true,
+                            skipSpecialTokens: true,
+                            withoutTimestamps: true,
+                            clipTimestamps: [],
+                            suppressBlank: true,
+                            supressTokens: nil
+                        )
                     )
-                )
+                }
                 let raw = results.first?.text ?? ""
                 return Self.postProcess(raw, sampleCount: samples.count)
             }
@@ -261,14 +267,16 @@ final class CallTranscriptionRunner {
         return trimmed.isEmpty ? "audio" : String(trimmed.prefix(40))
     }
 
-    nonisolated static let folderStamp: DateFormatter = {
+    // Main-actor-isolated (the class is @MainActor); only used from
+    // transcribeFiles. Not `nonisolated`, since DateFormatter isn't Sendable.
+    static let folderStamp: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd-HHmm"
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
 
-    nonisolated static let iso8601: ISO8601DateFormatter = {
+    static let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         return f

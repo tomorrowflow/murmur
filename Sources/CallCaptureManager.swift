@@ -320,6 +320,10 @@ final class CallCaptureManager: NSObject, ObservableObject {
     /// Returns the session info, or nil if nothing was capturing.
     @discardableResult
     func stop() -> CallCaptureSessionInfo? {
+        // Single-shot: setState is synchronous on the main thread (all triggers
+        // run on main), so a second stop() (e.g. manual stop racing the
+        // auto-finalize on app exit) sees .finalizing here and returns nil —
+        // callCaptureDidFinish fires exactly once per session.
         guard state == .recording else { return nil }
         setState(.finalizing)
 
@@ -331,15 +335,16 @@ final class CallCaptureManager: NSObject, ObservableObject {
         endedAt = Date()
         writeSessionJSON()
         let info = currentSessionInfo()
+        micLevel = 0
+        appLevel = 0
 
         NSLog("[CallCapture] Stopped session \(sessionId ?? "?"); files in \(sessionDirectory?.path ?? "?")")
 
-        setState(.idle)
-        DispatchQueue.main.async {
-            self.micLevel = 0
-            self.appLevel = 0
-            self.delegate?.callCaptureDidFinish(info)
-        }
+        // Stay in .finalizing and hand off — the delegate transitions us to
+        // .transcribing (if transcribing) or .idle. We never pass through .idle
+        // here, so there's no window in which a racing start() could slip a new
+        // session in before markTranscribing lands.
+        delegate?.callCaptureDidFinish(info)
         return info
     }
 
@@ -706,10 +711,21 @@ final class CallCaptureManager: NSObject, ObservableObject {
 
     // MARK: - Helpers
 
+    /// Apply the state change synchronously when already on the main thread, so
+    /// main-thread callers' guards (e.g. start()'s `state == .idle`, stop()'s
+    /// `state == .recording`) observe the new state immediately rather than one
+    /// runloop tick later. All trigger paths run on main; off-main callers (if
+    /// any) fall back to an async hop. `state` is @Published, so it must only be
+    /// mutated on the main thread either way.
     private func setState(_ newState: CallCaptureState) {
-        DispatchQueue.main.async {
-            self.state = newState
-            self.delegate?.callCaptureStateDidChange(newState)
+        if Thread.isMainThread {
+            state = newState
+            delegate?.callCaptureStateDidChange(newState)
+        } else {
+            DispatchQueue.main.async {
+                self.state = newState
+                self.delegate?.callCaptureStateDidChange(newState)
+            }
         }
     }
 

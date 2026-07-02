@@ -9,12 +9,30 @@ import AVFoundation
 /// through `run`, so a background call transcription and a live dictation never
 /// touch the same model concurrently. Interactive callers wait at most one
 /// in-flight segment (~30s cap) behind a call transcription.
+///
+/// The critical section is the CHAIN, not the actor: a plain
+/// `actor { await op() }` does NOT serialize, because Swift actors are
+/// reentrant — awaiting inside the actor releases its executor and lets the
+/// next `run` execute its op concurrently. Instead each call links its op to
+/// the tail of a Task chain and awaits its predecessor, so ops run strictly
+/// one at a time in enqueue order. Reading `tail` and installing the new tail
+/// happen synchronously inside the actor (no await between), so ordering is
+/// race-free. Errors propagate to the caller but never break the chain — the
+/// tail Task swallows them so the next op's `await predecessor` can't throw.
 public actor TranscriptionEngineGate {
     public static let shared = TranscriptionEngineGate()
     public init() {}
 
-    public func run<T>(_ op: @Sendable () async throws -> T) async rethrows -> T {
-        try await op()
+    private var tail: Task<Void, Never>?
+
+    public func run<T: Sendable>(_ op: @escaping @Sendable () async throws -> T) async throws -> T {
+        let previous = tail
+        let task = Task<T, Error> {
+            await previous?.value
+            return try await op()
+        }
+        tail = Task { _ = try? await task.value }
+        return try await task.value
     }
 }
 

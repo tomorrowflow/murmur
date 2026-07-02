@@ -60,6 +60,9 @@ let package = Package(
         .executable(
             name: "TestFileTranscribe",
             targets: ["TestFileTranscribe"]),
+        .executable(
+            name: "TestEngineGate",
+            targets: ["TestEngineGate"]),
         .library(
             name: "SharedModels",
             targets: ["SharedModels"])
@@ -142,6 +145,10 @@ let package = Package(
         .executableTarget(
             name: "TestFileTranscribe",
             dependencies: ["SharedModels"],
-            path: "tests/test-file-transcribe")
+            path: "tests/test-file-transcribe"),
+        .executableTarget(
+            name: "TestEngineGate",
+            dependencies: ["SharedModels"],
+            path: "tests/test-engine-gate")
     ]
 )

@@ -1596,7 +1596,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
     // MARK: - Prompt Refinement
 
-    private lazy var promptRefinementClient = OllamaClient()
+    private lazy var promptRefinementClient = LLMClient()
 
     private func refineAndPaste(text: String, shouldSendReturn: Bool, targetApp: NSRunningApplication? = nil, targetWindow: AXUIElement? = nil) {
         audioOverlay?.show(state: .refining)
@@ -2701,7 +2701,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         case "regex":
             return regexCleanupForSpeech(text)
         case "ollama":
-            let client = OllamaClient()
+            let client = LLMClient()
             let system = """
             You are a text rewriter for text-to-speech playback. Your ONLY task is \
             to rewrite the MESSAGE wrapped in <message> tags below so it sounds \
@@ -2737,12 +2737,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 let result = try await client.chat(system: system, user: wrapped)
                 let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty || looksLikeRefusal(trimmed) {
-                    NSLog("Recap: Ollama returned empty or refusal — falling back to regex")
+                    NSLog("Recap: LLM returned empty or refusal — falling back to regex")
                     return regexCleanupForSpeech(text)
                 }
                 return trimmed
             } catch {
-                NSLog("Recap: Ollama preprocess failed (\(error.localizedDescription)) — falling back to regex")
+                NSLog("Recap: LLM preprocess failed (\(error.localizedDescription)) — falling back to regex")
                 return regexCleanupForSpeech(text)
             }
         default:

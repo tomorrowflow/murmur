@@ -1,8 +1,10 @@
 import Foundation
 
-// MARK: - Ollama Chat Client
+// MARK: - OpenAI-Compatible LLM Chat Client
 
-class OllamaClient {
+/// Chat client speaking the OpenAI protocol (`/v1/chat/completions`, `/v1/models`).
+/// Works with any OpenAI-compatible server — Ollama, oMLX, LM Studio, llama.cpp, …
+public class LLMClient {
     private let urlSession: URLSession
 
     private var baseURL: String {
@@ -24,7 +26,7 @@ class OllamaClient {
         return ProcessInfo.processInfo.environment["OLLAMA_API_KEY"]
     }
 
-    init() {
+    public init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 120
         urlSession = URLSession(configuration: config)
@@ -32,17 +34,17 @@ class OllamaClient {
 
     // MARK: - Streaming Chat
 
-    /// Stream a chat completion from Ollama. Yields content tokens.
-    func streamChat(system: String, user: String) -> AsyncThrowingStream<String, Error> {
+    /// Stream a chat completion from the LLM server. Yields content tokens.
+    public func streamChat(system: String, user: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
                     guard !model.isEmpty else {
-                        continuation.finish(throwing: OllamaError.noModel)
+                        continuation.finish(throwing: LLMClientError.noModel)
                         return
                     }
 
-                    let url = URL(string: "\(baseURL)/api/chat")!
+                    let url = URL(string: "\(baseURL)/v1/chat/completions")!
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -54,30 +56,35 @@ class OllamaClient {
                             ["role": "user", "content": user]
                         ],
                         "stream": true,
-                        "options": [
-                            "temperature": 0.7,
-                            "num_predict": 2048
-                        ]
+                        "temperature": 0.7,
+                        "max_tokens": 2048
                     ]
                     request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
                     let (bytes, response) = try await urlSession.bytes(for: request)
 
                     guard let httpResponse = response as? HTTPURLResponse else {
-                        continuation.finish(throwing: OllamaError.connectionFailed)
+                        continuation.finish(throwing: LLMClientError.connectionFailed)
                         return
                     }
                     guard httpResponse.statusCode == 200 else {
-                        continuation.finish(throwing: OllamaError.httpError(httpResponse.statusCode))
+                        continuation.finish(throwing: LLMClientError.httpError(httpResponse.statusCode))
                         return
                     }
 
                     var fullContent = ""
+                    // OpenAI streaming is Server-Sent Events: each chunk arrives as a
+                    // `data: {json}` line, terminated by a `data: [DONE]` sentinel.
                     for try await line in bytes.lines {
-                        guard let data = line.data(using: .utf8),
+                        guard line.hasPrefix("data:") else { continue }
+                        let payloadString = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+                        if payloadString == "[DONE]" { break }
+
+                        guard let data = payloadString.data(using: .utf8),
                               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let message = json["message"] as? [String: Any],
-                              let content = message["content"] as? String else {
+                              let choices = json["choices"] as? [[String: Any]],
+                              let delta = choices.first?["delta"] as? [String: Any],
+                              let content = delta["content"] as? String else {
                             continue
                         }
                         fullContent += content
@@ -88,16 +95,12 @@ class OllamaClient {
                         if !filtered.isEmpty {
                             continuation.yield(content)
                         }
-
-                        if json["done"] as? Bool == true {
-                            break
-                        }
                     }
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
                 } catch let error as URLError where error.code == .cannotConnectToHost || error.code == .cannotFindHost {
-                    continuation.finish(throwing: OllamaError.connectionFailed)
+                    continuation.finish(throwing: LLMClientError.connectionFailed)
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -106,7 +109,7 @@ class OllamaClient {
     }
 
     /// Non-streaming chat for simple queries (e.g. affirmative check).
-    func chat(system: String, user: String) async throws -> String {
+    public func chat(system: String, user: String) async throws -> String {
         var result = ""
         for try await token in streamChat(system: system, user: user) {
             result += token
@@ -116,9 +119,9 @@ class OllamaClient {
 
     // MARK: - Model Listing
 
-    /// Fetch installed models from Ollama.
-    static func listModels(baseURL: String = "") async -> [String] {
-        let url = (baseURL.isEmpty ? "http://localhost:11434" : baseURL) + "/api/tags"
+    /// Fetch available models from the LLM server.
+    public static func listModels(baseURL: String = "") async -> [String] {
+        let url = (baseURL.isEmpty ? "http://localhost:11434" : baseURL) + "/v1/models"
         guard let requestURL = URL(string: url) else { return [] }
 
         do {
@@ -126,18 +129,19 @@ class OllamaClient {
             request.timeoutInterval = 5
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let models = json["models"] as? [[String: Any]] else { return [] }
-            return models.compactMap { $0["name"] as? String }.sorted()
+                  let models = json["data"] as? [[String: Any]] else { return [] }
+            return models.compactMap { $0["id"] as? String }.sorted()
         } catch {
-            NSLog("OllamaClient: failed to list models: \(error.localizedDescription)")
+            NSLog("LLMClient: failed to list models: \(error.localizedDescription)")
             return []
         }
     }
 
     // MARK: - Web Search
 
-    /// Search the web via Ollama's external search endpoint.
-    func webSearch(query: String) async -> [WebSearchResult] {
+    /// Search the web via Ollama's external search endpoint (ollama.com cloud API,
+    /// independent of the configured LLM server).
+    public func webSearch(query: String) async -> [WebSearchResult] {
         guard webSearchEnabled, let apiKey = ollamaAPIKey, !apiKey.isEmpty else {
             return []
         }
@@ -174,7 +178,7 @@ class OllamaClient {
     }
 
     /// Format search results as context for the LLM.
-    static func formatSearchResults(_ results: [WebSearchResult]) -> String {
+    public static func formatSearchResults(_ results: [WebSearchResult]) -> String {
         guard !results.isEmpty else { return "" }
         var lines = ["## Web Search Results\n"]
         for r in results {
@@ -185,7 +189,7 @@ class OllamaClient {
 
     // MARK: - Think Block Stripping
 
-    static func stripThinkBlocks(_ text: String) -> String {
+    public static func stripThinkBlocks(_ text: String) -> String {
         // Remove <think>...</think> blocks (reasoning models)
         guard let regex = try? NSRegularExpression(pattern: "<think>.*?</think>", options: .dotMatchesLineSeparators) else {
             return text
@@ -197,25 +201,25 @@ class OllamaClient {
 
 // MARK: - Models
 
-struct WebSearchResult {
+public struct WebSearchResult {
     let title: String
     let url: String
     let content: String
 }
 
-enum OllamaError: LocalizedError {
+public enum LLMClientError: LocalizedError {
     case connectionFailed
     case httpError(Int)
     case noModel
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .connectionFailed:
-            return "Cannot connect to Ollama. Make sure it's running."
+            return "Cannot connect to LLM server. Make sure it's running."
         case .httpError(let code):
-            return "Ollama returned HTTP \(code)"
+            return "LLM server returned HTTP \(code)"
         case .noModel:
-            return "No Ollama model configured. Set one in Settings > Read Aloud."
+            return "No model configured. Set one in Settings > Read Aloud."
         }
     }
 }

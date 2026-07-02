@@ -21,7 +21,7 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 |---|---|
 | ![Menu bar and Read Aloud overlay](docs/screenshots/01-read-aloud.png) *Read Aloud overlay with live sentence highlighting and TTS controls* | ![Recording overlay bound to Ghostty](docs/screenshots/02-recording.png) *Recording overlay showing the bound target window's icon* |
 | ![History with filter and search](docs/screenshots/03-history.png) *History window with type filter, search, and separate Copy Text / Copy Spoken buttons* | ![Podcast mode](docs/screenshots/04-podcast.png) *Interactive two-host podcast — interrupt with a double-tap to ask a question* |
-| ![Draft editing with TextMate](docs/screenshots/05-draft-editing.png) *Voice-driven markdown editing with paragraph-level TTS and spoken edit commands* | ![Settings — Read Aloud](docs/screenshots/06-settings.png) *Read Aloud settings including the Claude Code recap preprocessor (None / Regex / Ollama)* |
+| ![Draft editing with TextMate](docs/screenshots/05-draft-editing.png) *Voice-driven markdown editing with paragraph-level TTS and spoken edit commands* | ![Settings — Read Aloud](docs/screenshots/06-settings.png) *Read Aloud settings including the Claude Code recap preprocessor (None / Regex / LLM summary)* |
 
 > *Screenshots go into `docs/screenshots/`. Suggested captures listed above — swap the placeholder paths once you have them.*
 
@@ -34,7 +34,7 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 - Global hotkey + double-tap push-to-talk (hold or toggle mode). Hold mode never auto-stops on silence — you stay in control until you release the key.
 - Offline engines: **Parakeet** (~110× realtime) or **WhisperKit**, with automatic Gemini fallback when local returns empty.
 - Window pinning: the window you were in when recording started is the window that receives the paste, even if you switch apps during transcription.
-- Optional Ollama prompt refinement for recordings > 5s — removes filler, fixes punctuation.
+- Optional LLM prompt refinement for recordings > 5s — removes filler, fixes punctuation.
 - Optional auto-Return after paste — ideal for chat UIs and Claude Code prompts.
 - Configurable text replacements for common STT misrecognitions.
 - Hallucination filter: short Whisper/Parakeet artefacts on sub-1.5s clips ("you", "Thanks for watching", "True") are dropped instead of pasted. Minimum recording length is 0.6s.
@@ -45,7 +45,7 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 
 - Kokoro (offline) or Gemini Live (streaming) TTS for any selected text.
 - Live sentence highlighting, pause/resume, 15% speed boost on Gemini.
-- Ask follow-up questions mid-reading with push-to-talk — Ollama answers, then reading resumes.
+- Ask follow-up questions mid-reading with push-to-talk — the LLM answers, then reading resumes.
 - **Mute toggle in the overlay header** silences the spoken audio while the transcript continues to scroll and highlight at the natural sentence pace — tap the speaker icon to drop the audio instantly without losing your place. State persists across sessions.
 - Export full audio as WAV or transcript as Markdown.
 
@@ -89,7 +89,7 @@ A macOS menu bar app for voice-driven work. Dictate into any window, read select
 
 - Voice-driven markdown editing in **TextMate** or **Obsidian**.
 - Paragraph-by-paragraph TTS with structural cues ("Section:", "List:", "Quote:", "Table:").
-- Speak an edit instruction — Ollama rewrites the paragraph and the file updates atomically.
+- Speak an edit instruction — the LLM rewrites the paragraph and the file updates atomically.
 - Persistent in-editor highlighting follows the current paragraph.
 - Auto-detects active editor; configurable default.
 
@@ -125,7 +125,7 @@ All shortcuts are customizable in **Settings → Shortcuts**.
 
 - macOS 14.0 or later
 - Xcode 15+ or Xcode Command Line Tools (Swift 5.9+)
-- (Optional) Ollama running locally for prompt refinement, Q&A, and recap preprocessing
+- (Optional) An OpenAI-compatible LLM server (Ollama, oMLX, LM Studio, llama.cpp, …) for prompt refinement, Q&A, and recap preprocessing
 - (Optional) Gemini API key for cloud TTS / transcription fallback
 
 ## Installation
@@ -200,7 +200,7 @@ Enable the recap preprocessor in **Settings → Claude → Claude Code Recap**:
 |---|---|
 | **None** | Speak the raw assistant message verbatim |
 | **Regex cleanup** | Strip code blocks, paths, markdown, line refs, hashes, URLs |
-| **Ollama (LLM summary)** | Rewrite as a short spoken summary using the configured Ollama model |
+| **LLM summary** | Rewrite as a short spoken summary using the configured LLM model |
 
 ---
 
@@ -216,7 +216,7 @@ Settings live in the menu bar icon → **Settings**:
 | Audio Devices | Input/output, Kokoro voice selection with preview |
 | OpenClaw | Connection URL, token, password, session key, device ID |
 | Podcast | Server URL, host names + voice samples, podcast length, LLM model |
-| Read Aloud | Ollama model, resume behavior, Claude recap preprocessor, default editor for draft editing |
+| Read Aloud | LLM server URL and model, resume behavior, Claude recap preprocessor, default editor for draft editing |
 
 ### Audio Ducking
 

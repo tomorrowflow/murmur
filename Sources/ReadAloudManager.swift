@@ -127,8 +127,8 @@ class ReadAloudManager {
     private var escapeGlobalMonitor: Any?
     private var escapeLocalMonitor: Any?
 
-    // Ollama
-    private let ollamaClient = OllamaClient()
+    // LLM
+    private let llmClient = LLMClient()
 
     // Settings
     private var resumeBehavior: ReadAloudResumeBehavior {
@@ -457,9 +457,9 @@ class ReadAloudManager {
             // Optional web search
             var searchContext = ""
             if UserDefaults.standard.bool(forKey: "readAloud.webSearchEnabled") {
-                let results = await ollamaClient.webSearch(query: question)
+                let results = await llmClient.webSearch(query: question)
                 if !results.isEmpty {
-                    searchContext = "\n\n" + OllamaClient.formatSearchResults(results)
+                    searchContext = "\n\n" + LLMClient.formatSearchResults(results)
                     NSLog("ReadAloud: web search returned \(results.count) results")
                 }
             }
@@ -583,11 +583,11 @@ class ReadAloudManager {
             }
             await MainActor.run { self.answerTTSTask = ttsTask }
 
-            for try await token in ollamaClient.streamChat(system: systemPrompt, user: userMessage) {
+            for try await token in llmClient.streamChat(system: systemPrompt, user: userMessage) {
                 guard !Task.isCancelled else { break }
 
                 fullAnswer += token
-                let stripped = OllamaClient.stripThinkBlocks(fullAnswer)
+                let stripped = LLMClient.stripThinkBlocks(fullAnswer)
 
                 await MainActor.run {
                     self.streamingAnswer = stripped
@@ -607,7 +607,7 @@ class ReadAloudManager {
             }
 
             // Queue remaining text
-            let finalStripped = OllamaClient.stripThinkBlocks(fullAnswer)
+            let finalStripped = LLMClient.stripThinkBlocks(fullAnswer)
             let finalSentences = SmartSentenceSplitter.splitIntoSentences(finalStripped)
             if finalSentences.count > ttsQueuedCount {
                 let remaining = Array(finalSentences[ttsQueuedCount...])
@@ -762,11 +762,11 @@ class ReadAloudManager {
 
     // MARK: - Translation
 
-    /// Detect if text is non-English using Ollama.
+    /// Detect if text is non-English using the LLM.
     private func detectNonEnglish(_ text: String) async -> Bool {
         let sample = String(text.prefix(300))
         do {
-            let result = try await ollamaClient.chat(
+            let result = try await llmClient.chat(
                 system: "You are a language detector. Reply with ONLY the two-letter ISO 639-1 language code of the text. Nothing else.",
                 user: sample
             )
@@ -783,10 +783,10 @@ class ReadAloudManager {
         }
     }
 
-    /// Translate text to English using Ollama.
+    /// Translate text to English using the LLM.
     private func translateToEnglish(_ text: String) async -> String? {
         do {
-            let result = try await ollamaClient.chat(
+            let result = try await llmClient.chat(
                 system: "You are a translator. Translate the following text to English. Output ONLY the translated text, nothing else. Preserve paragraph structure.",
                 user: text
             )

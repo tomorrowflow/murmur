@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import SharedModels
 
 struct ReadAloudSettingsView: View {
     @StateObject private var viewModel = ReadAloudSettingsViewModel()
@@ -7,9 +8,9 @@ struct ReadAloudSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
-                Section("Ollama") {
+                Section("LLM Server (OpenAI-compatible)") {
                     HStack(spacing: 8) {
-                        Text("Ollama URL")
+                        Text("Server URL")
                             .frame(width: 120, alignment: .leading)
                         TextField("", text: $viewModel.ollamaURL, prompt: Text("http://localhost:11434"))
                             .textFieldStyle(.roundedBorder)
@@ -38,7 +39,7 @@ struct ReadAloudSettingsView: View {
                                 .font(.system(size: 12))
                         }
                         .buttonStyle(.plain)
-                        .help("Refresh model list from Ollama")
+                        .help("Refresh model list from the LLM server")
                         .disabled(viewModel.isLoadingModels)
                         if viewModel.isLoadingModels {
                             ProgressView()
@@ -197,7 +198,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         isLoadingModels = true
         let url = ollamaURL
         Task {
-            let models = await OllamaClient.listModels(baseURL: url)
+            let models = await LLMClient.listModels(baseURL: url)
             await MainActor.run {
                 self.availableModels = models
                 self.isLoadingModels = false

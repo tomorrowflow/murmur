@@ -189,8 +189,10 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private var watchedApp: NSRunningApplication?
     private var terminationObserver: NSObjectProtocol?
 
-    // Level metering throttle (shared 20 Hz gate, cheap and good enough for meters).
-    private var lastLevelPublish: TimeInterval = 0
+    // Level metering throttle (20 Hz gate). Per-channel timestamps: mic and app
+    // levels arrive on different audio threads, so they must not share state.
+    private var lastMicLevelPublish: TimeInterval = 0
+    private var lastAppLevelPublish: TimeInterval = 0
 
     private static let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -549,8 +551,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
 
     private func publishLevel(_ peak: Float, channel: LevelChannel) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastLevelPublish >= 1.0 / 20.0 else { return }
-        lastLevelPublish = now
+        switch channel {
+        case .mic:
+            guard now - lastMicLevelPublish >= 1.0 / 20.0 else { return }
+            lastMicLevelPublish = now
+        case .app:
+            guard now - lastAppLevelPublish >= 1.0 / 20.0 else { return }
+            lastAppLevelPublish = now
+        }
 
         // Map peak amplitude to a dB-normalized 0...1, matching AudioLevelMonitor.
         let db = 20 * log10(max(peak, 0.00001))

@@ -3002,10 +3002,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                     if json["workflows"] != nil { payload["workflows"] = "not-implemented" }
                     return (200, MurmurHTTPServer.jsonResponse(payload))
                 } catch let error as CallCaptureError {
-                    // 409 for "already capturing" / "app not running"; permission
-                    // denial guides the user to System Settings.
+                    // No alert from the HTTP path — a modal would block the main
+                    // thread and hang the API caller. Guidance goes in the body.
                     if case .permissionDenied = error {
-                        self.showAudioCapturePermissionAlert()
+                        return (409, MurmurHTTPServer.jsonResponse([
+                            "error": error.localizedDescription,
+                            "guidance": "Enable Murmur under System Settings > Privacy & Security > Screen & System Audio Recording, then retry."
+                        ]))
                     }
                     return (409, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
                 } catch {

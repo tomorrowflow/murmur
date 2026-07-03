@@ -41,7 +41,7 @@ struct CallCaptureSessionInfo {
     let app: String          // bundle id, or "system" for the all-output tap
     let directory: URL
     let micFile: URL?
-    let appFile: URL
+    let appFile: URL?          // nil when the far-end never opened (deferred session, no app audio)
     let startedAt: Date
     let endedAt: Date?
 }
@@ -177,7 +177,8 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private var micURL: URL?
     private var appURL: URL?                       // primary far-end file (app.wav), nil until opened
     private var plannedAppFileURL: URL?            // intended app.wav path (before it opens)
-    private var extraAppURLs: [URL] = []           // app-2.wav, … from format-change rebuilds
+    private var extraAppURLs: [URL] = []           // app-2.wav, … from far-end rolls
+    private var extraAppOffsets: [Double] = []     // per-file start offset (s), parallel to extraAppURLs
 
     // Target identity, retained so the process-list listener can re-resolve the
     // match set on change. `systemMode` taps the whole system mixdown.
@@ -241,6 +242,7 @@ final class CallCaptureManager: NSObject, ObservableObject {
 
         // Reset per-session far-end state.
         extraAppURLs = []
+        extraAppOffsets = []
         tappedProcessObjects = []
         farEndActive = false
 
@@ -425,7 +427,7 @@ final class CallCaptureManager: NSObject, ObservableObject {
             app: sessionAppLabel,
             directory: sessionDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory()),
             micFile: micURL,
-            appFile: appURL ?? plannedAppFileURL ?? URL(fileURLWithPath: "/dev/null"),
+            appFile: appURL,   // nil if the far-end never produced audio; don't advertise a nonexistent path
             startedAt: startedAt ?? Date(),
             endedAt: endedAt
         )
@@ -529,19 +531,23 @@ final class CallCaptureManager: NSObject, ObservableObject {
     /// from the process-list listener when the match set changes. Tears down
     /// only the far-end audio objects — the mic keeps recording throughout.
     ///
-    /// File strategy across rebuilds (as specified): when the new tap format
-    /// matches the current one, keep writing to the SAME WAV (a silent gap
-    /// spans any pause, so the timeline stays continuous). Only when the format
-    /// genuinely changes do we finalize the current file and continue into
-    /// `app-<n>.wav`, registered as an extra `app-output` track. That extra
-    /// track reuses the primary app offset in metadata (the anchor holds a
-    /// single app offset); acceptable since a mid-call format change is rare.
+    /// File strategy: the first bring-up opens the primary `app.wav`, whose
+    /// start offset is the anchor's app offset (from its first callback host
+    /// time). EVERY subsequent bring-up — a resumed call, a format change, or a
+    /// helper set that grew — rolls to a fresh `app-<n>.wav` rather than
+    /// appending. The mic runs continuously through any far-end downtime (e.g. a
+    /// call ends and a new one starts in the same session), so appending to one
+    /// file would compress that gap out and desync the tracks. Instead each
+    /// rolled file records its own start offset (seconds from session start),
+    /// carried per-track into metadata.json; the pipeline timestamps the track
+    /// from that offset. Exact alignment, no silence padding, no file bloat.
     /// Empty `processObjectIDs` (non-system) tears the far-end down and waits.
     /// Best-effort: errors are logged (and a permission denial surfaced via the
     /// delegate), never thrown, so a live session keeps its mic track.
     private func activateFarEnd(processObjectIDs: [AudioObjectID]) {
-        // Tear down the existing tap/aggregate/IOProc but keep the open file so
-        // a format-matching rebuild can keep appending to it.
+        // Tear down the existing tap/aggregate/IOProc. The mic is untouched, and
+        // any previously-opened app file has been finalized (or will be, when it
+        // is replaced below).
         teardownFarEndAudioObjects()
 
         guard systemMode || !processObjectIDs.isEmpty else {
@@ -551,35 +557,57 @@ final class CallCaptureManager: NSObject, ObservableObject {
             return
         }
 
+        let isFirstBringUp = (appAudioFile == nil)
+        let previousFormat = appFormat
         do {
             let format = try createFarEndTapAndAggregate(processObjectIDs: processObjectIDs, systemMode: systemMode)
 
-            if appAudioFile == nil {
-                // First activation → open the primary app.wav.
+            if isFirstBringUp {
+                // First far-end bring-up → primary app.wav (anchor offset). Set
+                // appURL only after the IOProc starts, so a failed bring-up
+                // doesn't register a primary that never went live.
                 let url = plannedAppFileURL ?? (sessionDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory())).appendingPathComponent("app.wav")
                 appAudioFile = try openAppFile(at: url, format: format)
                 appFormat = format
+                try startFarEndIOProc()
                 appURL = url
-            } else if let current = appFormat, Self.formatsMatch(current, format) {
-                // Same format → keep the existing file (do not reset the anchor).
             } else {
-                // Format changed → finalize the current file, roll to app-<n>.wav.
-                appAudioFile = nil
+                // Subsequent bring-up → roll to a fresh app-<n>.wav. Assigning
+                // the new file finalizes the previous one (ARC closes its handle).
                 let n = extraAppURLs.count + 2
                 let url = (sessionDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory()))
                     .appendingPathComponent("app-\(n).wav")
                 appAudioFile = try openAppFile(at: url, format: format)
                 appFormat = format
+                try startFarEndIOProc()
+                // Register the rolled file only after the IOProc is running, so a
+                // failed bring-up never advertises an empty file in metadata. Its
+                // offset is measured now (audio flows immediately once started).
+                let offset = hostTimeOffsetSeconds(from: startHostTime, to: AudioGetCurrentHostTime())
                 extraAppURLs.append(url)
+                extraAppOffsets.append(offset)
+                NSLog("[CallCapture] Far-end rolled to \(url.lastPathComponent) at offset \(String(format: "%.2f", offset))s")
             }
 
-            try startFarEndIOProc()
             farEndActive = true
             DispatchQueue.main.async { self.waitingForAppAudio = false }
             writeSessionJSON()
         } catch {
             farEndActive = false
             teardownFarEndAudioObjects()
+            if isFirstBringUp {
+                // The primary never went live → discard the partial file so the
+                // next bring-up retries app.wav cleanly (nothing registered).
+                appAudioFile = nil
+                appFormat = nil
+                appURL = nil
+            } else {
+                // A roll failed. The previous file is finalized and still
+                // registered; keep appAudioFile pointing at the (unregistered)
+                // rolled file so the next bring-up rolls again rather than
+                // truncating already-captured audio. Restore the format tag.
+                appFormat = previousFormat
+            }
             NSLog("[CallCapture] Far-end activation failed: \(error.localizedDescription)")
             if case CallCaptureError.permissionDenied = error {
                 delegate?.callCaptureDidFail(error.localizedDescription)
@@ -859,15 +887,17 @@ final class CallCaptureManager: NSObject, ObservableObject {
         guard let dir = sessionDirectory, let id = sessionId, let started = startedAt else { return }
 
         // Emit an app-output track per opened far-end file. In the common case
-        // that's just app.wav; a mid-call format change adds app-2.wav, etc.
-        // When the far-end never opened (app targeted but never produced audio),
-        // appURL is nil and no app track is written — so transcription doesn't
-        // fail loading a file that doesn't exist.
+        // that's just app.wav (anchor offset); each far-end roll adds an
+        // app-<n>.wav carrying its own start offset so the pipeline places it on
+        // the timeline exactly. When the far-end never opened (app targeted but
+        // never produced audio), appURL is nil and no app track is written — so
+        // transcription doesn't fail loading a file that doesn't exist.
         var tracks: [CallSessionMetadata.Track] = []
         if let appURL {
             tracks.append(.init(role: "app-output", file: appURL.lastPathComponent))
-            for extra in extraAppURLs {
-                tracks.append(.init(role: "app-output", file: extra.lastPathComponent))
+            for (i, extra) in extraAppURLs.enumerated() {
+                let offset: Double? = i < extraAppOffsets.count ? extraAppOffsets[i] : nil
+                tracks.append(.init(role: "app-output", file: extra.lastPathComponent, offsetSeconds: offset))
             }
         }
         if let micURL {
@@ -1034,15 +1064,6 @@ final class CallCaptureManager: NSObject, ObservableObject {
         let err = AudioObjectGetPropertyData(obj, &address, 0, nil, &size, &pid)
         guard err == noErr else { return 0 }
         return pid
-    }
-
-    /// Whether two tap formats are interchangeable for file reuse across a
-    /// far-end rebuild (same sample rate / channels / sample type / layout).
-    private static func formatsMatch(_ a: AVAudioFormat, _ b: AVAudioFormat) -> Bool {
-        a.sampleRate == b.sampleRate &&
-        a.channelCount == b.channelCount &&
-        a.commonFormat == b.commonFormat &&
-        a.isInterleaved == b.isInterleaved
     }
 
     private static func describe(_ procs: [ResolvedProcess]) -> String {

@@ -3091,7 +3091,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
                 guard let info = manager.stop() else {
                     return (409, MurmurHTTPServer.jsonResponse(["error": "No capture in progress"]))
                 }
-                var files: [String: Any] = ["app": info.appFile.path]
+                var files: [String: Any] = [:]
+                if let app = info.appFile { files["app"] = app.path }
                 if let mic = info.micFile { files["mic"] = mic.path }
                 return (200, MurmurHTTPServer.jsonResponse([
                     "sessionId": info.id,

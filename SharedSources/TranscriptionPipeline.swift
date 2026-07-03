@@ -47,8 +47,14 @@ public struct CallSessionMetadata: Codable {
         public var role: String        // "mic" | "app-output" | "audio"
         public var file: String
         public var error: String?
-        public init(role: String, file: String, error: String? = nil) {
-            self.role = role; self.file = file; self.error = error
+        /// Start offset (seconds) of this track's first sample from the session
+        /// start anchor. Optional and additive: when absent, the pipeline falls
+        /// back to the anchor offset for the track's role (existing behavior).
+        /// Set for far-end files that rolled mid-session (app-2.wav, …), whose
+        /// start time differs from the primary app track's anchor offset.
+        public var offsetSeconds: Double?
+        public init(role: String, file: String, error: String? = nil, offsetSeconds: Double? = nil) {
+            self.role = role; self.file = file; self.error = error; self.offsetSeconds = offsetSeconds
         }
     }
     public struct WorkflowOutput: Codable {
@@ -221,10 +227,13 @@ public final class TranscriptionPipeline {
         var metadata = metadataIn
         metadata.engine = engine
 
-        // Resolve track offsets from the anchor (by role) if present.
-        func offset(forRole role: String) -> Double {
+        // Resolve a track's timestamp base: its explicit per-track offset when
+        // present (a far-end file that rolled mid-session carries its own start
+        // time), otherwise the shared anchor offset for its role.
+        func offset(forTrack track: CallSessionMetadata.Track) -> Double {
+            if let explicit = track.offsetSeconds { return explicit }
             guard let anchor = metadata.anchor else { return 0 }
-            switch role {
+            switch track.role {
             case "mic": return anchor.micOffsetSeconds
             case "app-output", "app": return anchor.appOffsetSeconds
             default: return 0
@@ -258,7 +267,7 @@ public final class TranscriptionPipeline {
             let regions = segmentRegions(samples: samples)
             progress?("\(track.file): \(regions.count) segment(s)")
 
-            let trackOffset = offset(forRole: track.role)
+            let trackOffset = offset(forTrack: track)
             for (idx, region) in regions.enumerated() {
                 let slice = Array(samples[region.start..<region.end])
                 let startSec = trackOffset + Double(region.start) / sampleRate

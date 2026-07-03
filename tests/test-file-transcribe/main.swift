@@ -85,13 +85,19 @@ struct FixtureResult {
 
 /// Run `paths` through the pipeline and report what came back. `segmentCount`
 /// is summed from the pipeline's per-track progress ("N segment(s)").
-func runFixture(paths: [URL], transcribe: @escaping SegmentTranscribe) async throws -> FixtureResult {
+/// `trackOffsets`, when given, sets each track's explicit offsetSeconds.
+func runFixture(paths: [URL], trackOffsets: [Double?]? = nil,
+                transcribe: @escaping SegmentTranscribe) async throws -> FixtureResult {
+    func offsetAt(_ i: Int) -> Double? {
+        guard let trackOffsets, i < trackOffsets.count else { return nil }
+        return trackOffsets[i]
+    }
     var tracks: [CallSessionMetadata.Track] = []
     if paths.count >= 2 {
-        tracks = [.init(role: "mic", file: paths[0].path),
-                  .init(role: "app-output", file: paths[1].path)]
+        tracks = [.init(role: "mic", file: paths[0].path, offsetSeconds: offsetAt(0)),
+                  .init(role: "app-output", file: paths[1].path, offsetSeconds: offsetAt(1))]
     } else {
-        tracks = [.init(role: "audio", file: paths[0].path)]
+        tracks = [.init(role: "audio", file: paths[0].path, offsetSeconds: offsetAt(0))]
     }
 
     let id = "test-\(Int(Date().timeIntervalSince1970 * 1000))"
@@ -219,8 +225,50 @@ Task {
             failures.append("short-utterance fixture produced an empty transcript")
         }
 
+        // 3. Two-track per-track-offset fixture — the app track starts 5s into
+        // the session, so the merged transcript must order mic (Me) before app
+        // (Them) and stamp the app turn at ~00:05, not 00:00. This guards the
+        // per-track offsetSeconds path that fixes far-end roll timeline drift.
+        let micTrackURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tft-2t-mic-\(UUID().uuidString).aiff")
+        let appTrackURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tft-2t-app-\(UUID().uuidString).aiff")
+        try synthesizeSpeech("This is the first speaker on the microphone.", to: micTrackURL)
+        try synthesizeSpeech("And this is the second speaker answering back.", to: appTrackURL)
+        defer {
+            try? FileManager.default.removeItem(at: micTrackURL)
+            try? FileManager.default.removeItem(at: appTrackURL)
+        }
+        print("\n▶︎ Fixture 3: two-track with per-track offsets (app track offset 5.0s)")
+        let twoTrack = try await runFixture(
+            paths: [micTrackURL, appTrackURL],
+            trackOffsets: [0.0, 5.0],
+            transcribe: transcribe)
+        print("   transcript: \(twoTrack.markdown.replacingOccurrences(of: "\n", with: " ⏎ "))")
+        let meIdx = twoTrack.markdown.range(of: "**Me ")?.lowerBound
+        let themIdx = twoTrack.markdown.range(of: "**Them ")?.lowerBound
+        if meIdx == nil || themIdx == nil {
+            failures.append("two-track fixture didn't produce both Me and Them turns")
+        } else if meIdx! >= themIdx! {
+            failures.append("two-track fixture ordered Them before Me (offset merge broken)")
+        }
+        // The Them turn header is "**Them [mm:ss]:**"; parse and check it reflects
+        // the 5s offset rather than 00:00.
+        if let r = twoTrack.markdown.range(of: "**Them ["),
+           let close = twoTrack.markdown[r.upperBound...].firstIndex(of: "]") {
+            let stamp = String(twoTrack.markdown[r.upperBound..<close])   // "mm:ss"
+            let parts = stamp.split(separator: ":").compactMap { Int($0) }
+            let seconds = parts.count == 2 ? parts[0] * 60 + parts[1] : -1
+            print("   Them turn timestamp: \(stamp) (\(seconds)s)")
+            if seconds < 4 {
+                failures.append("two-track fixture: Them timestamp \(stamp) doesn't reflect the 5s offset")
+            }
+        } else {
+            failures.append("two-track fixture: couldn't find a Them turn timestamp")
+        }
+
         if failures.isEmpty {
-            print("\n✅ PASS: both fixtures transcribed (control + short utterance).")
+            print("\n✅ PASS: all fixtures transcribed (control + short utterance + two-track offsets).")
         } else {
             print("\n❌ FAIL:")
             for f in failures { print("   • \(f)") }

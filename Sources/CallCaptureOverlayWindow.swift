@@ -79,9 +79,20 @@ struct CallCaptureOverlayView: View {
                 // Level meters
                 VStack(spacing: 6) {
                     CaptureLevelMeter(label: "App", systemImage: "speaker.wave.2.fill",
-                                      level: manager.appLevel, tint: .blue, enabled: true)
+                                      level: manager.appLevel, tint: .blue, enabled: !manager.waitingForAppAudio)
                     CaptureLevelMeter(label: "Mic", systemImage: "mic.fill",
                                       level: manager.micLevel, tint: .red, enabled: manager.micEnabled)
+                }
+
+                if manager.waitingForAppAudio {
+                    HStack(spacing: 5) {
+                        Image(systemName: "hourglass")
+                            .font(.system(size: 10))
+                        Text("Waiting for \(manager.capturingAppLabel) audio…")
+                            .font(.system(size: 11))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(.secondary)
                 }
 
                 // Stop button

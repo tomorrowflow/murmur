@@ -113,6 +113,9 @@ final class CallCaptureManager: NSObject, ObservableObject {
     @Published private(set) var elapsedSeconds: Int = 0
     @Published private(set) var capturingAppLabel: String = ""
     @Published private(set) var micEnabled: Bool = false
+    /// True when the app is targeted but hasn't produced audio yet, so the
+    /// far-end tap is deferred and we're waiting for a matching audio process.
+    @Published private(set) var waitingForAppAudio: Bool = false
 
     // MARK: Known apps
 
@@ -172,7 +175,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private var startedAt: Date?
     private var endedAt: Date?
     private var micURL: URL?
-    private var appURL: URL?
+    private var appURL: URL?                       // primary far-end file (app.wav), nil until opened
+    private var plannedAppFileURL: URL?            // intended app.wav path (before it opens)
+    private var extraAppURLs: [URL] = []           // app-2.wav, … from format-change rebuilds
+
+    // Target identity, retained so the process-list listener can re-resolve the
+    // match set on change. `systemMode` taps the whole system mixdown.
+    private var systemMode = false
+    private var targetBundleID: String?
 
     // Host-time anchor + per-track first-sample host times (offsets computed at finalize).
     private var startHostTime: UInt64 = 0
@@ -186,6 +196,13 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private var appAudioFile: AVAudioFile?
     private var appFormat: AVAudioFormat?
     private let appQueue = DispatchQueue(label: "com.murmur.callcapture.app")
+    private var farEndActive = false
+    /// The process-object set currently being tapped, so the listener can tell
+    /// whether a process-list change actually affects our target.
+    private var tappedProcessObjects: Set<AudioObjectID> = []
+    /// Listener block on kAudioHardwarePropertyProcessObjectList (retained so we
+    /// can remove exactly this registration).
+    private var processListListenerBlock: AudioObjectPropertyListenerBlock?
 
     // Near-end (microphone) plumbing.
     private var micEngine: AVAudioEngine?
@@ -222,10 +239,16 @@ final class CallCaptureManager: NSObject, ObservableObject {
     func start(app: String, includeMic: Bool) throws -> CallCaptureSessionInfo {
         guard state == .idle else { throw CallCaptureError.alreadyCapturing }
 
+        // Reset per-session far-end state.
+        extraAppURLs = []
+        tappedProcessObjects = []
+        farEndActive = false
+
         // Resolve the target: system-wide or a specific bundle id.
         let systemMode = ["system", "all", "all-system-output"].contains(app.lowercased())
+        self.systemMode = systemMode
         var targetBundleID: String? = nil
-        var processObjectIDs: [AudioObjectID] = []
+        var resolved: [ResolvedProcess] = []
 
         if !systemMode {
             let bundleID = Self.resolveBundleID(from: app)
@@ -236,18 +259,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
                 throw CallCaptureError.appNotRunning(Self.friendlyName(forBundleID: bundleID))
             }
             watchedApp = running
-            for a in runningApps {
-                if let obj = Self.processObject(forPID: a.processIdentifier) {
-                    processObjectIDs.append(obj)
-                }
-            }
-            if processObjectIDs.isEmpty {
-                // App is running but Core Audio has no process object for it
-                // yet (it hasn't produced audio). Tapping an empty process
-                // list captures silence — surface that clearly.
-                throw CallCaptureError.appNotRunning("\(Self.friendlyName(forBundleID: bundleID)) (no active audio process)")
-            }
+            // Family-matching resolution: covers Electron/Chromium helper
+            // processes (Slack/Teams render audio in a helper whose bundle id
+            // extends the main app's). An empty result is allowed — the app is
+            // running but hasn't produced audio yet; the process-list listener
+            // brings the far-end up when a matching process appears.
+            resolved = Self.resolveProcessObjects(forBundleID: bundleID)
         }
+        self.targetBundleID = targetBundleID
 
         // Build the session directory.
         let label = systemMode ? "system" : (targetBundleID.map(Self.shortSlug) ?? "app")
@@ -269,13 +288,33 @@ final class CallCaptureManager: NSObject, ObservableObject {
         appFirstHostTime = 0
         micFirstHostTime = 0
 
-        // Start the far end first — it's the one that can hit the TCC prompt.
-        do {
-            try startFarEndCapture(processObjectIDs: processObjectIDs, systemMode: systemMode, outputURL: appFileURL)
-        } catch {
-            teardownFarEnd()
-            watchedApp = nil
-            throw error
+        sessionDirectory = dir
+        plannedAppFileURL = appFileURL
+        appURL = nil
+
+        // Bring the far end up (it can hit the TCC prompt). When a specific app
+        // is targeted but not yet producing audio, defer: start mic + the
+        // listener and let activateFarEnd() bring the tap up on first audio.
+        let processObjectIDs = resolved.map(\.object)
+        tappedProcessObjects = Set(processObjectIDs)
+        if systemMode || !processObjectIDs.isEmpty {
+            do {
+                let format = try createFarEndTapAndAggregate(processObjectIDs: processObjectIDs, systemMode: systemMode)
+                appAudioFile = try openAppFile(at: appFileURL, format: format)
+                appFormat = format
+                appURL = appFileURL
+                try startFarEndIOProc()
+                farEndActive = true
+            } catch {
+                teardownFarEnd()
+                watchedApp = nil
+                self.systemMode = false
+                self.targetBundleID = nil
+                throw error
+            }
+            NSLog("[CallCapture] Far-end tapping \(systemMode ? "system output" : Self.describe(resolved))")
+        } else {
+            NSLog("[CallCapture] \(Self.friendlyName(forBundleID: targetBundleID ?? "")) running but no audio process yet — deferring far-end, waiting for audio")
         }
 
         // Near end is best-effort: a mic failure shouldn't lose the far-end
@@ -292,27 +331,34 @@ final class CallCaptureManager: NSObject, ObservableObject {
 
         // Commit session state.
         sessionId = "\(stamp)-\(label)"
-        sessionDirectory = dir
         sessionAppLabel = systemMode ? "system" : (targetBundleID ?? "app")
         startedAt = Date()
         endedAt = nil
-        appURL = appFileURL
         micURL = micStarted ? micFileURL : nil
 
+        let deferredFarEnd = !farEndActive && !systemMode
         DispatchQueue.main.async {
             self.micEnabled = micStarted
             self.capturingAppLabel = systemMode ? "System Audio" : Self.friendlyName(forBundleID: targetBundleID ?? "")
+            self.waitingForAppAudio = deferredFarEnd
             self.micLevel = 0
             self.appLevel = 0
             self.elapsedSeconds = 0
         }
 
         installTerminationObserver()
+        installProcessListListener()
         startElapsedTimer()
         writeSessionJSON()
         setState(.recording)
 
-        NSLog("[CallCapture] Started session \(sessionId ?? "?") app=\(sessionAppLabel) mic=\(micStarted) dir=\(dir.path)")
+        // Reconcile once now that state is .recording: catches a matching audio
+        // process that appeared between the initial resolve and the listener
+        // registration (a listener only fires on subsequent changes). No-op when
+        // the set is unchanged.
+        if !systemMode { processListDidChange() }
+
+        NSLog("[CallCapture] Started session \(sessionId ?? "?") app=\(sessionAppLabel) mic=\(micStarted) farEnd=\(farEndActive) dir=\(dir.path)")
         return currentSessionInfo()
     }
 
@@ -329,6 +375,7 @@ final class CallCaptureManager: NSObject, ObservableObject {
 
         stopElapsedTimer()
         removeTerminationObserver()
+        removeProcessListListener()
         teardownFarEnd()
         teardownMic()
 
@@ -337,6 +384,7 @@ final class CallCaptureManager: NSObject, ObservableObject {
         let info = currentSessionInfo()
         micLevel = 0
         appLevel = 0
+        waitingForAppAudio = false
 
         NSLog("[CallCapture] Stopped session \(sessionId ?? "?"); files in \(sessionDirectory?.path ?? "?")")
 
@@ -377,7 +425,7 @@ final class CallCaptureManager: NSObject, ObservableObject {
             app: sessionAppLabel,
             directory: sessionDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory()),
             micFile: micURL,
-            appFile: appURL ?? URL(fileURLWithPath: "/dev/null"),
+            appFile: appURL ?? plannedAppFileURL ?? URL(fileURLWithPath: "/dev/null"),
             startedAt: startedAt ?? Date(),
             endedAt: endedAt
         )
@@ -385,7 +433,12 @@ final class CallCaptureManager: NSObject, ObservableObject {
 
     // MARK: - Far-end (process tap) capture
 
-    private func startFarEndCapture(processObjectIDs: [AudioObjectID], systemMode: Bool, outputURL: URL) throws {
+    /// Create the process tap + its private aggregate device for the given
+    /// targets and return the tap's audio format. Does NOT open the output file
+    /// or start the IOProc — the caller wires the file, then calls
+    /// `startFarEndIOProc()`. Split out from the old monolithic setup so the
+    /// process-list listener can rebuild the tap without touching the mic.
+    private func createFarEndTapAndAggregate(processObjectIDs: [AudioObjectID], systemMode: Bool) throws -> AVAudioFormat {
         let tapDescription: CATapDescription
         if systemMode {
             // Tap everything, excluding nothing → the full system mixdown.
@@ -409,12 +462,11 @@ final class CallCaptureManager: NSObject, ObservableObject {
         }
         tapID = newTapID
 
-        // Read the tap's actual output format and mirror it in the WAV file.
+        // Read the tap's actual output format.
         var asbd = try readTapFormat(tapID: newTapID)
         guard let format = AVAudioFormat(streamDescription: &asbd) else {
             throw CallCaptureError.formatUnavailable
         }
-        appFormat = format
 
         // Build a private aggregate device that owns just this tap.
         let aggUID = "com.murmur.callcapture.\(tapDescription.uuid.uuidString)"
@@ -437,11 +489,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
             throw CallCaptureError.aggregateCreationFailed(aggErr)
         }
         aggregateDeviceID = newAggID
+        return format
+    }
 
-        // Open the output WAV matching the tap format exactly (no conversion).
+    /// Open a WAV for writing that mirrors the tap format exactly (no conversion).
+    private func openAppFile(at url: URL, format: AVAudioFormat) throws -> AVAudioFile {
         do {
-            appAudioFile = try AVAudioFile(
-                forWriting: outputURL,
+            return try AVAudioFile(
+                forWriting: url,
                 settings: format.settings,
                 commonFormat: format.commonFormat,
                 interleaved: format.isInterleaved
@@ -449,10 +504,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
         } catch {
             throw CallCaptureError.fileCreationFailed(error.localizedDescription)
         }
+    }
 
+    /// Create + start the IOProc against the current aggregate device. The
+    /// output file and `appFormat` must already be set.
+    private func startFarEndIOProc() throws {
         // IOProc reads the tap stream on our dedicated (non-realtime) queue.
         var newProcID: AudioDeviceIOProcID?
-        let procErr = AudioDeviceCreateIOProcIDWithBlock(&newProcID, newAggID, appQueue) { [weak self] _, inInputData, inInputTime, _, _ in
+        let procErr = AudioDeviceCreateIOProcIDWithBlock(&newProcID, aggregateDeviceID, appQueue) { [weak self] _, inInputData, inInputTime, _, _ in
             self?.handleAppAudio(inInputData: inInputData, inInputTime: inInputTime)
         }
         guard procErr == noErr, let procID = newProcID else {
@@ -460,9 +519,71 @@ final class CallCaptureManager: NSObject, ObservableObject {
         }
         appIOProcID = procID
 
-        let startErr = AudioDeviceStart(newAggID, procID)
+        let startErr = AudioDeviceStart(aggregateDeviceID, procID)
         guard startErr == noErr else {
             throw CallCaptureError.ioProcSetupFailed(startErr)
+        }
+    }
+
+    /// Bring the far-end tap up (or rebuild it) for `processObjectIDs`, called
+    /// from the process-list listener when the match set changes. Tears down
+    /// only the far-end audio objects — the mic keeps recording throughout.
+    ///
+    /// File strategy across rebuilds (as specified): when the new tap format
+    /// matches the current one, keep writing to the SAME WAV (a silent gap
+    /// spans any pause, so the timeline stays continuous). Only when the format
+    /// genuinely changes do we finalize the current file and continue into
+    /// `app-<n>.wav`, registered as an extra `app-output` track. That extra
+    /// track reuses the primary app offset in metadata (the anchor holds a
+    /// single app offset); acceptable since a mid-call format change is rare.
+    /// Empty `processObjectIDs` (non-system) tears the far-end down and waits.
+    /// Best-effort: errors are logged (and a permission denial surfaced via the
+    /// delegate), never thrown, so a live session keeps its mic track.
+    private func activateFarEnd(processObjectIDs: [AudioObjectID]) {
+        // Tear down the existing tap/aggregate/IOProc but keep the open file so
+        // a format-matching rebuild can keep appending to it.
+        teardownFarEndAudioObjects()
+
+        guard systemMode || !processObjectIDs.isEmpty else {
+            farEndActive = false
+            DispatchQueue.main.async { self.waitingForAppAudio = true }
+            NSLog("[CallCapture] No matching audio process — far-end idle, waiting for \(targetBundleID ?? "app") audio")
+            return
+        }
+
+        do {
+            let format = try createFarEndTapAndAggregate(processObjectIDs: processObjectIDs, systemMode: systemMode)
+
+            if appAudioFile == nil {
+                // First activation → open the primary app.wav.
+                let url = plannedAppFileURL ?? (sessionDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory())).appendingPathComponent("app.wav")
+                appAudioFile = try openAppFile(at: url, format: format)
+                appFormat = format
+                appURL = url
+            } else if let current = appFormat, Self.formatsMatch(current, format) {
+                // Same format → keep the existing file (do not reset the anchor).
+            } else {
+                // Format changed → finalize the current file, roll to app-<n>.wav.
+                appAudioFile = nil
+                let n = extraAppURLs.count + 2
+                let url = (sessionDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory()))
+                    .appendingPathComponent("app-\(n).wav")
+                appAudioFile = try openAppFile(at: url, format: format)
+                appFormat = format
+                extraAppURLs.append(url)
+            }
+
+            try startFarEndIOProc()
+            farEndActive = true
+            DispatchQueue.main.async { self.waitingForAppAudio = false }
+            writeSessionJSON()
+        } catch {
+            farEndActive = false
+            teardownFarEndAudioObjects()
+            NSLog("[CallCapture] Far-end activation failed: \(error.localizedDescription)")
+            if case CallCaptureError.permissionDenied = error {
+                delegate?.callCaptureDidFail(error.localizedDescription)
+            }
         }
     }
 
@@ -480,13 +601,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
         }
     }
 
-    private func teardownFarEnd() {
+    /// Tear down just the tap/aggregate/IOProc, leaving `appAudioFile` /
+    /// `appFormat` intact so a format-matching rebuild keeps the same WAV.
+    private func teardownFarEndAudioObjects() {
         if aggregateDeviceID != kAudioObjectUnknown, let procID = appIOProcID {
             AudioDeviceStop(aggregateDeviceID, procID)
         }
-        // Flush any in-flight callback before closing the file.
+        // Flush any in-flight callback before touching the file/objects.
         appQueue.sync {}
-        appAudioFile = nil
 
         if aggregateDeviceID != kAudioObjectUnknown, let procID = appIOProcID {
             AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
@@ -500,7 +622,14 @@ final class CallCaptureManager: NSObject, ObservableObject {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = kAudioObjectUnknown
         }
+    }
+
+    /// Full far-end teardown (session end): audio objects + the output file.
+    private func teardownFarEnd() {
+        teardownFarEndAudioObjects()
+        appAudioFile = nil
         appFormat = nil
+        farEndActive = false
     }
 
     private func readTapFormat(tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
@@ -665,6 +794,61 @@ final class CallCaptureManager: NSObject, ObservableObject {
         watchedApp = nil
     }
 
+    // MARK: - Process-list watch (helper processes appearing mid-call)
+
+    /// Listen for changes to the system's audio process list. Electron/Chromium
+    /// call apps spin up (and tear down) helper render processes as a call
+    /// starts, and a call may begin AFTER capture starts, so the initial match
+    /// set can miss the process that actually renders audio. On any change we
+    /// re-resolve and, if our match set changed, rebuild the far-end tap.
+    /// Only installed for app-targeted sessions (system mode taps everything).
+    private func installProcessListListener() {
+        guard !systemMode else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.processListDidChange()
+        }
+        let err = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block)
+        if err == noErr {
+            processListListenerBlock = block
+        } else {
+            NSLog("[CallCapture] Failed to add process-list listener (OSStatus \(err))")
+        }
+    }
+
+    private func removeProcessListListener() {
+        guard let block = processListListenerBlock else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block)
+        processListListenerBlock = nil
+    }
+
+    /// Runs on the main queue (the listener's dispatch queue). Re-resolve the
+    /// target's match set; rebuild the far-end only when it actually changed.
+    private func processListDidChange() {
+        guard state == .recording, !systemMode, let bundleID = targetBundleID else { return }
+        let resolved = Self.resolveProcessObjects(forBundleID: bundleID)
+        let newSet = Set(resolved.map(\.object))
+        guard newSet != tappedProcessObjects else { return }
+        tappedProcessObjects = newSet
+        if resolved.isEmpty {
+            NSLog("[CallCapture] Process list changed: no audio process for \(bundleID) — far-end idle")
+        } else {
+            NSLog("[CallCapture] Process list changed: rebuilding far-end tap for \(bundleID) → \(Self.describe(resolved))")
+        }
+        activateFarEnd(processObjectIDs: resolved.map(\.object))
+    }
+
     // MARK: - metadata.json sidecar
 
     /// The metadata.json contract for the current session, pre-transcription.
@@ -674,8 +858,18 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private func writeSessionJSON() {
         guard let dir = sessionDirectory, let id = sessionId, let started = startedAt else { return }
 
+        // Emit an app-output track per opened far-end file. In the common case
+        // that's just app.wav; a mid-call format change adds app-2.wav, etc.
+        // When the far-end never opened (app targeted but never produced audio),
+        // appURL is nil and no app track is written — so transcription doesn't
+        // fail loading a file that doesn't exist.
         var tracks: [CallSessionMetadata.Track] = []
-        tracks.append(.init(role: "app-output", file: appURL?.lastPathComponent ?? "app.wav"))
+        if let appURL {
+            tracks.append(.init(role: "app-output", file: appURL.lastPathComponent))
+            for extra in extraAppURLs {
+                tracks.append(.init(role: "app-output", file: extra.lastPathComponent))
+            }
+        }
         if let micURL {
             tracks.append(.init(role: "mic", file: micURL.lastPathComponent))
         }
@@ -755,6 +949,106 @@ final class CallCaptureManager: NSObject, ObservableObject {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+
+    /// A Core Audio process object matched to a capture target, with its bundle
+    /// id and pid for logging.
+    private struct ResolvedProcess {
+        let object: AudioObjectID
+        let bundleID: String
+        let pid: pid_t
+    }
+
+    /// Resolve the Core Audio process objects to tap for `bundleID`. Electron/
+    /// Chromium apps (Slack, Teams) render call audio in HELPER processes whose
+    /// bundle ids extend the main app's (e.g.
+    /// `com.tinyspeck.slackmacgap.helper`), so match every process object whose
+    /// bundle id equals the target OR has the target as a dotted prefix, unioned
+    /// with the PID-translate result for the running main app(s). Processes
+    /// appear in the system list only once they produce audio.
+    private static func resolveProcessObjects(forBundleID bundleID: String) -> [ResolvedProcess] {
+        var byObject: [AudioObjectID: ResolvedProcess] = [:]
+
+        // 1. Family match against the full audio process list.
+        for obj in processObjectList() {
+            guard let objBundleID = processBundleID(obj) else { continue }
+            if objBundleID == bundleID || objBundleID.hasPrefix(bundleID + ".") {
+                byObject[obj] = ResolvedProcess(object: obj, bundleID: objBundleID, pid: processPID(obj))
+            }
+        }
+
+        // 2. Union the PID-translate result for the running main app(s).
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+            if let obj = processObject(forPID: app.processIdentifier) {
+                byObject[obj] = ResolvedProcess(object: obj, bundleID: bundleID, pid: app.processIdentifier)
+            }
+        }
+
+        return byObject.values.sorted { $0.object < $1.object }
+    }
+
+    /// Every audio process object the system currently knows about.
+    private static func processObjectList() -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        let sizeErr = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize)
+        guard sizeErr == noErr, dataSize > 0 else { return [] }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var ids = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        let err = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &ids)
+        guard err == noErr else { return [] }
+        return ids
+    }
+
+    /// Bundle id for a Core Audio process object, or nil if unavailable/empty.
+    private static func processBundleID(_ obj: AudioObjectID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyBundleID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        // The property returns a +1-retained CFString (Copy semantics), so read
+        // into an Unmanaged and balance the retain with takeRetainedValue().
+        var unmanaged: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let err = AudioObjectGetPropertyData(obj, &address, 0, nil, &size, &unmanaged)
+        guard err == noErr, let cf = unmanaged?.takeRetainedValue() else { return nil }
+        let s = cf as String
+        return s.isEmpty ? nil : s
+    }
+
+    /// PID backing a Core Audio process object (0 if unavailable) — for logging.
+    private static func processPID(_ obj: AudioObjectID) -> pid_t {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var pid: pid_t = 0
+        var size = UInt32(MemoryLayout<pid_t>.size)
+        let err = AudioObjectGetPropertyData(obj, &address, 0, nil, &size, &pid)
+        guard err == noErr else { return 0 }
+        return pid
+    }
+
+    /// Whether two tap formats are interchangeable for file reuse across a
+    /// far-end rebuild (same sample rate / channels / sample type / layout).
+    private static func formatsMatch(_ a: AVAudioFormat, _ b: AVAudioFormat) -> Bool {
+        a.sampleRate == b.sampleRate &&
+        a.channelCount == b.channelCount &&
+        a.commonFormat == b.commonFormat &&
+        a.isInterleaved == b.isInterleaved
+    }
+
+    private static func describe(_ procs: [ResolvedProcess]) -> String {
+        guard !procs.isEmpty else { return "(none)" }
+        return procs.map { "\($0.bundleID)#\($0.object)(pid \($0.pid))" }.joined(separator: ", ")
+    }
 
     /// Translate a running app's PID into a Core Audio process object, creating
     /// one if needed. Returns nil if the process has no audio object.

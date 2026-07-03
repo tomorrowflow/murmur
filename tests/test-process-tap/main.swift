@@ -49,6 +49,56 @@ func processObject(forPID pid: pid_t) -> AudioObjectID? {
     return obj
 }
 
+func processObjectList() -> [AudioObjectID] {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var dataSize: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(
+        AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr, dataSize > 0 else { return [] }
+    let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+    var ids = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+    guard AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &ids) == noErr else { return [] }
+    return ids
+}
+
+func processBundleID(_ obj: AudioObjectID) -> String? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyBundleID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var unmanaged: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(obj, &address, 0, nil, &size, &unmanaged) == noErr,
+          let cf = unmanaged?.takeRetainedValue() else { return nil }
+    let s = cf as String
+    return s.isEmpty ? nil : s
+}
+
+/// Family-matching resolution mirroring CallCaptureManager: match any audio
+/// process object whose bundle id equals the target or has it as a dotted
+/// prefix (covers Electron/Chromium helper processes — the reason a Slack/Teams
+/// main-PID-only tap captured silence), unioned with the PID-translate result.
+func resolveProcessObjects(forBundleID bundleID: String) -> [(object: AudioObjectID, bundleID: String)] {
+    var byObject: [AudioObjectID: String] = [:]
+    for obj in processObjectList() {
+        guard let objBundleID = processBundleID(obj) else { continue }
+        if objBundleID == bundleID || objBundleID.hasPrefix(bundleID + ".") {
+            byObject[obj] = objBundleID
+        }
+    }
+    for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+        if let obj = processObject(forPID: app.processIdentifier) {
+            byObject[obj] = byObject[obj] ?? bundleID
+        }
+    }
+    return byObject.map { (object: $0.key, bundleID: $0.value) }.sorted { $0.object < $1.object }
+}
+
 func readTapFormat(_ tapID: AudioObjectID) -> AudioStreamBasicDescription? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioTapPropertyFormat,
@@ -103,19 +153,19 @@ guard !runningApps.isEmpty else {
     exit(2)
 }
 
-var processIDs: [AudioObjectID] = []
-for app in runningApps {
-    if let obj = processObject(forPID: app.processIdentifier) { processIDs.append(obj) }
-}
+let resolved = resolveProcessObjects(forBundleID: bundle)
+let processIDs = resolved.map(\.object)
 guard !processIDs.isEmpty else {
     print("""
-    ❌ \(bundle) is running but has no active Core Audio process object yet.
-       It must produce audio before it can be tapped — start playback and retry.
+    ❌ \(bundle) is running but has no active Core Audio process object yet
+       (including helper processes). It must produce audio before it can be
+       tapped — start playback and retry.
     """)
     exit(2)
 }
 
 print("🎧 Target: \(bundle)  (\(processIDs.count) audio process object(s))")
+for r in resolved { print("     • \(r.bundleID) #\(r.object)") }
 print("⏱  Capturing for \(seconds)s — make sure the app is playing audio...")
 
 // MARK: - Build the tap + aggregate device

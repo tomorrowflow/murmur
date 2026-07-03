@@ -182,6 +182,7 @@ public final class TranscriptionPipeline {
     public let minSilenceToSplitSeconds: Double
     public let bridgeGapSeconds: Double
     public let minSegmentSeconds: Double
+    public let contextPadSeconds: Double
 
     /// Injected engine. Set before calling `run`.
     public var transcribe: SegmentTranscribe
@@ -192,7 +193,8 @@ public final class TranscriptionPipeline {
         maxSegmentSeconds: Double = 30,
         minSilenceToSplitSeconds: Double = 0.6,
         bridgeGapSeconds: Double = 0.35,
-        minSegmentSeconds: Double = 0.4
+        minSegmentSeconds: Double = 0.15,
+        contextPadSeconds: Double = 0.15
     ) {
         self.transcribe = transcribe
         self.sampleRate = sampleRate
@@ -200,6 +202,7 @@ public final class TranscriptionPipeline {
         self.minSilenceToSplitSeconds = minSilenceToSplitSeconds
         self.bridgeGapSeconds = bridgeGapSeconds
         self.minSegmentSeconds = minSegmentSeconds
+        self.contextPadSeconds = contextPadSeconds
     }
 
     // MARK: Run
@@ -409,7 +412,10 @@ public final class TranscriptionPipeline {
     /// Energy-based segmentation. Detects speech frames against a peak-relative
     /// threshold (adapts to per-track level — a call's app track is silent when
     /// the far end isn't talking), bridges short internal gaps so sentences stay
-    /// whole, drops sub-`minSegment` blips, and caps each segment at
+    /// whole, drops sub-`minSegment` blips, pads each region with
+    /// `contextPadSeconds` of surrounding audio (so a short single-word burst
+    /// keeps its onset/tail rather than being clipped to unintelligibility),
+    /// merges regions that overlap once padded, and caps each segment at
     /// `maxSegment` by splitting at the quietest nearby frame.
     private func segmentRegions(samples: [Float]) -> [Region] {
         let frameLen = Int(0.03 * sampleRate)       // 30 ms
@@ -464,10 +470,26 @@ public final class TranscriptionPipeline {
             f = max(lastSpeech + 1, g)
         }
 
+        // Pad each region with context on both sides (clamped to the track) and
+        // merge any that now overlap or touch. Short bursts otherwise get cut
+        // flush against their first/last loud frame, which strips the quiet
+        // onset/tail the recognizer needs to resolve the word.
+        let padSamples = Int(contextPadSeconds * sampleRate)
+        var padded: [Region] = []
+        for region in regions {
+            let start = max(0, region.start - padSamples)
+            let end = min(samples.count, region.end + padSamples)
+            if let last = padded.last, start <= last.end {
+                padded[padded.count - 1] = Region(start: last.start, end: max(last.end, end))
+            } else {
+                padded.append(Region(start: start, end: end))
+            }
+        }
+
         // Cap long regions at silence points near the max length.
         let maxSamples = Int(maxSegmentSeconds * sampleRate)
         var capped: [Region] = []
-        for region in regions {
+        for region in padded {
             var start = region.start
             while region.end - start > maxSamples {
                 let hardCut = start + maxSamples

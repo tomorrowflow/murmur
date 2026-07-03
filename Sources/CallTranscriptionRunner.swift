@@ -238,6 +238,13 @@ final class CallTranscriptionRunner {
     }
 
     /// Trim, drop likely hallucinations on short audio, apply text replacements.
+    // TODO: WhisperKit emitted a bare "you" on a near-silent segment that was
+    // longer than the 1.5s short-audio threshold, so it slipped past the filter.
+    // Consider a single-token hallucination stop-list ("you", "thanks", …) gated
+    // on marginal segment RMS (energy just above the segmentation threshold)
+    // rather than on duration alone, so quiet-but-long segments are covered too.
+    // The segment's RMS/peak is available in TranscriptionPipeline.segmentRegions
+    // and would need threading through the SegmentTranscribe boundary.
     nonisolated private static func postProcess(_ raw: String, sampleCount: Int) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }

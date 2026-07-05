@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "Murmur",
     platforms: [
-        .macOS(.v14)
+        .macOS("14.4")
     ],
     products: [
         .executable(
@@ -54,6 +54,15 @@ let package = Package(
         .executable(
             name: "TranscribeVideo",
             targets: ["TranscribeVideo"]),
+        .executable(
+            name: "TestProcessTap",
+            targets: ["TestProcessTap"]),
+        .executable(
+            name: "TestFileTranscribe",
+            targets: ["TestFileTranscribe"]),
+        .executable(
+            name: "TestEngineGate",
+            targets: ["TestEngineGate"]),
         .library(
             name: "SharedModels",
             targets: ["SharedModels"])
@@ -72,7 +81,18 @@ let package = Package(
             name: "Murmur",
             dependencies: ["KeyboardShortcuts", "WhisperKit", "SharedModels", "FluidAudio"],
             path: "Sources",
-            exclude: ["Assets.xcassets", "AppIcon.icns"]),
+            exclude: ["Assets.xcassets", "AppIcon.icns"],
+            linkerSettings: [
+                // Embed Info.plist into the bare `swift run` binary. Without it,
+                // TCC has no usage descriptions to show, so the system-audio
+                // permission prompt never appears and process taps record silence.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Info.plist"
+                ])
+            ]),
         .executableTarget(
             name: "TestDownload",
             dependencies: ["WhisperKit", "SharedModels"],
@@ -128,6 +148,18 @@ let package = Package(
         .executableTarget(
             name: "TranscribeVideo",
             dependencies: [],
-            path: "tools/transcribe-video")
+            path: "tools/transcribe-video"),
+        .executableTarget(
+            name: "TestProcessTap",
+            dependencies: [],
+            path: "tests/test-process-tap"),
+        .executableTarget(
+            name: "TestFileTranscribe",
+            dependencies: ["SharedModels"],
+            path: "tests/test-file-transcribe"),
+        .executableTarget(
+            name: "TestEngineGate",
+            dependencies: ["SharedModels"],
+            path: "tests/test-engine-gate")
     ]
 )

@@ -448,25 +448,28 @@ class AudioTranscriptionManager {
         print("Transcribing \(audioBuffer.count) samples (\(Double(audioBuffer.count) / sampleRate) seconds) with WhisperKit...")
 
         do {
-            let transcriptionResult = try await whisperKit.transcribe(
-                audioArray: paddedBuffer,
-                decodeOptions: DecodingOptions(
-                    verbose: false,
-                    task: .transcribe,
-                    language: "en",
-                    temperature: 0.0,
-                    temperatureFallbackCount: 3,
-                    sampleLength: 224,
-                    topK: 5,
-                    usePrefillPrompt: true,
-                    usePrefillCache: true,
-                    skipSpecialTokens: true,
-                    withoutTimestamps: true,
-                    clipTimestamps: [],
-                    suppressBlank: true,
-                    supressTokens: nil
+            // Serialize shared-model access with background call transcription.
+            let transcriptionResult = try await TranscriptionEngineGate.shared.run {
+                try await whisperKit.transcribe(
+                    audioArray: paddedBuffer,
+                    decodeOptions: DecodingOptions(
+                        verbose: false,
+                        task: .transcribe,
+                        language: "en",
+                        temperature: 0.0,
+                        temperatureFallbackCount: 3,
+                        sampleLength: 224,
+                        topK: 5,
+                        usePrefillPrompt: true,
+                        usePrefillCache: true,
+                        skipSpecialTokens: true,
+                        withoutTimestamps: true,
+                        clipTimestamps: [],
+                        suppressBlank: true,
+                        supressTokens: nil
+                    )
                 )
-            )
+            }
 
             isTranscribing = false
 
@@ -512,7 +515,10 @@ class AudioTranscriptionManager {
         print("Transcribing \(audioBuffer.count) samples (\(Double(audioBuffer.count) / sampleRate) seconds) with Parakeet...")
 
         do {
-            let transcription = try await transcriber.transcribe(audioSamples: paddedBuffer)
+            // Serialize shared-model access with background call transcription.
+            let transcription = try await TranscriptionEngineGate.shared.run {
+                try await transcriber.transcribe(audioSamples: paddedBuffer)
+            }
             isTranscribing = false
             handleTranscriptionResult(transcription)
         } catch {

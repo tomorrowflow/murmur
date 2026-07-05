@@ -105,8 +105,8 @@ class DraftEditingManager {
     private var escapeGlobalMonitor: Any?
     private var escapeLocalMonitor: Any?
 
-    // Ollama
-    private let ollamaClient = OllamaClient()
+    // LLM
+    private let llmClient = LLMClient()
 
     // MARK: - Public API
 
@@ -454,10 +454,10 @@ class DraftEditingManager {
             NSLog("[DraftEdit] Sending edit request to LLM (\(userMessage.count) chars)")
 
             var fullResponse = ""
-            for try await token in ollamaClient.streamChat(system: systemPrompt, user: userMessage) {
+            for try await token in llmClient.streamChat(system: systemPrompt, user: userMessage) {
                 guard !Task.isCancelled else { return }
                 fullResponse += token
-                let stripped = OllamaClient.stripThinkBlocks(fullResponse)
+                let stripped = LLMClient.stripThinkBlocks(fullResponse)
 
                 await MainActor.run {
                     self.streamingEditText = stripped
@@ -467,7 +467,7 @@ class DraftEditingManager {
 
             guard !Task.isCancelled else { return }
 
-            let finalText = OllamaClient.stripThinkBlocks(fullResponse).trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalText = LLMClient.stripThinkBlocks(fullResponse).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !finalText.isEmpty else {
                 await MainActor.run {
                     self.state = .error("LLM returned empty response")

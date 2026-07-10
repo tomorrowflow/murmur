@@ -26,6 +26,7 @@ class PTTTonePlayer {
     private let startToneNoteDuration: Double = 0.07
     private let stopToneNoteDuration: Double = 0.09
     private let interruptToneNoteDuration: Double = 0.06
+    private let followUpToneNoteDuration: Double = 0.05
 
     /// Play a short rising two-tone beep (recording started).
     func playStartTone() {
@@ -43,6 +44,24 @@ class PTTTonePlayer {
     func playInterruptTone() {
         let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
         playTone(frequencies: [660, 880, 660], noteDuration: interruptToneNoteDuration, prependSilence: bluetooth ? bluetoothLeadInSecs : 0)
+    }
+
+    /// Play a distinct three-note ascending chirp used when the OpenClaw mic
+    /// auto-opens for a follow-up question. Pitched higher than the manual
+    /// start tone so the user can tell at a glance whether they triggered the
+    /// mic or the system did.
+    func playOpenClawFollowUpTone() {
+        let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
+        playTone(frequencies: [988, 1318, 1568], noteDuration: followUpToneNoteDuration, prependSilence: bluetooth ? bluetoothLeadInSecs : 0)
+    }
+
+    /// Delay callers should wait after `playOpenClawFollowUpTone()` before
+    /// opening the mic, mirroring `startToneDelayBeforeRecording()`.
+    func openClawFollowUpToneDelayBeforeRecording() -> TimeInterval {
+        let bluetooth = AudioDeviceManager.shared.isCurrentOutputDeviceBluetooth()
+        let leadIn = bluetooth ? bluetoothLeadInSecs : 0
+        let toneDuration = 3 * followUpToneNoteDuration
+        return leadIn + toneDuration + postToneBufferSecs
     }
 
     /// How long callers should wait after `playStartTone()` before opening the

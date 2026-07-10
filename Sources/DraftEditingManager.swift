@@ -584,8 +584,9 @@ class DraftEditingManager {
     }
 
     private func synthesizeCue(_ text: String) async -> Data? {
-        // Check cache first
-        if let cached = cueAudioCache[text] {
+        // Cache is owned by the main thread (reset() clears it there);
+        // this runs on the cooperative pool, so hop for access.
+        if let cached = await MainActor.run(body: { cueAudioCache[text] }) {
             NSLog("[DraftEdit] Cue cache hit: \"\(text)\"")
             return cached
         }
@@ -594,7 +595,7 @@ class DraftEditingManager {
         guard let audio = await synthesizeSentence(text, speed: speed) else {
             return nil
         }
-        cueAudioCache[text] = audio
+        await MainActor.run { cueAudioCache[text] = audio }
         return audio
     }
 
@@ -611,12 +612,14 @@ class DraftEditingManager {
             .appendingPathComponent("draftEdit_tts_\(UUID().uuidString).wav")
         try data.write(to: tempURL)
 
-        // Collect audio for export
-        audioSegments.append(data)
+        // Collect audio for export. audioSegments/currentPlayer are owned by
+        // the main thread (stop/export mutate them there); this task runs on
+        // the cooperative pool, so hop for every mutation.
+        await MainActor.run { audioSegments.append(data) }
 
         let player = try AVAudioPlayer(contentsOf: tempURL)
         player.prepareToPlay()
-        currentPlayer = player
+        await MainActor.run { currentPlayer = player }
 
         // Bluetooth output (AirPods etc.) needs the playback profile to
         // commit before audio actually starts; otherwise the first
@@ -626,10 +629,14 @@ class DraftEditingManager {
             hasPrimedBluetoothOutput = true
         }
 
-        // Ensure cleanup happens on all exit paths
+        // Ensure cleanup happens on all exit paths (defer can't await, so
+        // the main-owned currentPlayer is cleared via an async hop; the
+        // identity check avoids clobbering a newer player installed since).
         defer {
             player.stop()
-            currentPlayer = nil
+            DispatchQueue.main.async { [weak self] in
+                if self?.currentPlayer === player { self?.currentPlayer = nil }
+            }
             try? FileManager.default.removeItem(at: tempURL)
         }
 

@@ -27,7 +27,12 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     // Audio properties
     private var audioEngine: AVAudioEngine!
     private var inputNode: AVAudioInputNode!
+    // Tap callback appends on the audio thread while main clears/reads —
+    // all access must go through bufferQueue (see AudioTranscriptionManager).
     private var audioBuffer: [Float] = []
+    private let bufferQueue = DispatchQueue(label: "com.murmur.openclaw.audioBuffer")
+    private var autoStopRequested = false  // confined to bufferQueue
+    private var activeMaxBufferSamples = Int.max  // snapshot taken at recording start
     private let sampleRate: Double = 16000
     private var maxBufferSamples: Int {
         let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
@@ -63,8 +68,27 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     private var ttsQueuedCount = 0  // number of complete sentences already queued
     private var ttsSentenceQueue: [String] = []
     private var ttsQueueTask: Task<Void, Never>?
+    /// Incremented on every consumer start so a cancelled task's epilogue
+    /// can't nil out the handle of a newer consumer that replaced it.
+    private var ttsQueueGeneration = 0
     private var ttsFinishSignaled = false
     private var ttsSpeaking = false
+    /// The AVAudioPlayer currently rendering a Kokoro WAV chunk, kept so
+    /// `cancelStreamingTTS()` can stop it mid-buffer instead of waiting for
+    /// the 100ms cancellation poll inside `playWavData` to elapse.
+    private var activeWavPlayer: AVAudioPlayer?
+
+    /// True while a TTS sentence (Kokoro or Gemini fallback) is actively
+    /// playing audio. Lets the rest of the app distinguish "answer streaming
+    /// in" (no audio yet) from "speaker is talking, interruptible".
+    var isTTSPlaying: Bool { ttsSpeaking }
+
+    /// True while the TTS pipeline is alive — actively rendering a sentence
+    /// OR between sentences with more queued. Use this for "is OpenClaw
+    /// currently delivering an answer?" decisions like interrupt eligibility,
+    /// since a double-tap during a brief inter-sentence gap should still
+    /// interrupt cleanly.
+    var isAnswering: Bool { ttsQueueTask != nil }
 
     init(openClawManager: OpenClawManager, streamingPlayer: GeminiStreamingPlayer?, audioCollector: GeminiAudioCollector?) {
         self.openClawManager = openClawManager
@@ -84,32 +108,8 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
 
     private func configureInputDevice() {
-        let deviceManager = AudioDeviceManager.shared
-
-        if !deviceManager.useSystemDefaultInput,
-           let selectedUID = deviceManager.selectedInputDeviceUID,
-           let deviceID = deviceManager.getAudioDeviceID(for: selectedUID) {
-
-            var propertyAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultInputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            var deviceIDValue = deviceID
-            let status = AudioObjectSetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &propertyAddress,
-                0,
-                nil,
-                UInt32(MemoryLayout<AudioDeviceID>.size),
-                &deviceIDValue
-            )
-
-            if status == noErr {
-                let deviceName = deviceManager.availableInputDevices.first { $0.uid == selectedUID }?.name ?? selectedUID
-                print("OpenClaw: set input to: \(deviceName)")
-            }
+        if let deviceName = AudioDeviceManager.shared.applyInputDeviceOverrideIfNeeded() {
+            print("OpenClaw: set input to: \(deviceName)")
         }
     }
 
@@ -117,7 +117,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
     /// Discard any audio captured so far (used after Bluetooth mic warmup).
     func clearAudioBuffer() {
-        audioBuffer.removeAll()
+        bufferQueue.sync { audioBuffer.removeAll() }
     }
 
     func toggleRecording() {
@@ -137,7 +137,8 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             inputNode.removeTap(onBus: 0)
             audioEngine.stop()
             audioEngine.reset()
-            audioBuffer.removeAll()
+            AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
+            clearAudioBuffer()
             removeEscapeMonitor()
             cancelStreamingTTS()
             print("OpenClaw: recording cancelled")
@@ -155,7 +156,11 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
     private func startRecording() {
         isStartingRecording = true
-        audioBuffer.removeAll()
+        bufferQueue.sync {
+            audioBuffer.removeAll()
+            autoStopRequested = false
+        }
+        activeMaxBufferSamples = maxBufferSamples
         micReadyFired = false
         accumulatedResponse = ""
         currentRunId = nil
@@ -199,17 +204,21 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             print("OpenClaw: failed to start audio engine: \(error)")
             isStartingRecording = false
             removeConfigChangeObserver()
+            inputNode.removeTap(onBus: 0)
+            AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
+            removeEscapeMonitor()
+            delegate?.openClawDidFail(error: "Could not start the microphone: \(error.localizedDescription)")
         }
     }
 
     private func installInputTap() {
         let recordingFormat = inputNode.outputFormat(forBus: 0)
+        let resampler = StreamingResampler(targetSampleRate: sampleRate)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
             let channelData = buffer.floatChannelData?[0]
             let frameLength = Int(buffer.frameLength)
-            let inputSampleRate = buffer.format.sampleRate
 
             if let channelData = channelData {
                 // Fire mic-ready callback on first buffer (Bluetooth profile switch complete)
@@ -223,25 +232,20 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
                     }
                 }
 
-                let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
+                let samples = resampler?.resample(buffer)
+                    ?? Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 
-                if inputSampleRate != self.sampleRate {
-                    let ratio = Int(inputSampleRate / self.sampleRate)
-                    let resampledSamples = stride(from: 0, to: samples.count, by: ratio).map { samples[$0] }
-                    self.audioBuffer.append(contentsOf: resampledSamples)
-                } else {
+                self.bufferQueue.async {
                     self.audioBuffer.append(contentsOf: samples)
-                }
 
-                if self.audioBuffer.count > self.maxBufferSamples {
-                    let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
-                    let label = seconds > 0 ? "\(seconds / 60) min" : "limit"
-                    print("OpenClaw: buffer limit reached (\(label)). Auto-stopping.")
-                    DispatchQueue.main.async {
-                        self.isRecording = false
-                        self.stopRecording()
+                    if self.audioBuffer.count > self.activeMaxBufferSamples && !self.autoStopRequested {
+                        self.autoStopRequested = true
+                        print("OpenClaw: buffer limit reached. Auto-stopping.")
+                        DispatchQueue.main.async {
+                            guard self.isRecording else { return }
+                            self.stopRecording()
+                        }
                     }
-                    return
                 }
 
                 let rms = sqrt(channelData.withMemoryRebound(to: Float.self, capacity: frameLength) { ptr in
@@ -287,8 +291,9 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             inputNode.removeTap(onBus: 0)
             audioEngine.stop()
             audioEngine.reset()
+            AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
             isRecording = false
-            audioBuffer.removeAll()
+            clearAudioBuffer()
             removeEscapeMonitor()
             delegate?.openClawDidFail(error: "Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
             return
@@ -318,17 +323,21 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()
+        AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
         removeEscapeMonitor()
 
-        print("OpenClaw: recording stopped (\(audioBuffer.count) samples)")
+        // Snapshot under the queue: late tap callbacks may still be appending.
+        let samples = bufferQueue.sync { audioBuffer }
+
+        print("OpenClaw: recording stopped (\(samples.count) samples)")
 
         // Validate audio
-        guard !audioBuffer.isEmpty else {
+        guard !samples.isEmpty else {
             delegate?.openClawRecordingWasCancelled()
             return
         }
 
-        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        let durationSeconds = Double(samples.count) / sampleRate
         // Sub-0.6s clips reliably hallucinate to nonsense after zero-padding,
         // and shipping that to Claude triggers spurious chat sessions.
         if durationSeconds < 0.60 {
@@ -337,7 +346,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             return
         }
 
-        let rms = sqrt(audioBuffer.reduce(0) { $0 + $1 * $1 } / Float(audioBuffer.count))
+        let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
         let db = 20 * log10(max(rms, 0.00001))
         if db < -55.0 {
             print("OpenClaw: audio too quiet (dB: \(db))")
@@ -350,16 +359,16 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         delegate?.openClawDidStartProcessing()
 
         Task {
-            await transcribeAndSend()
+            await transcribeAndSend(samples: samples)
         }
     }
 
     @MainActor
-    private func transcribeAndSend() async {
+    private func transcribeAndSend(samples: [Float]) async {
         // Pad short audio
-        var paddedBuffer = audioBuffer
+        var paddedBuffer = samples
         let minSamplesForPadding = Int(1.5 * sampleRate)
-        if audioBuffer.count < minSamplesForPadding {
+        if samples.count < minSamplesForPadding {
             paddedBuffer.append(contentsOf: [Float](repeating: 0.0, count: Int(sampleRate)))
         }
 
@@ -373,13 +382,18 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             transcription = await transcribeWithParakeet(paddedBuffer)
         }
 
-        guard let text = transcription, !text.isEmpty else {
+        guard let text = transcription else {
+            // The transcriber already reported a specific error via the delegate.
+            isProcessing = false
+            return
+        }
+        guard !text.isEmpty else {
             isProcessing = false
             delegate?.openClawDidFail(error: "Transcription produced no text")
             return
         }
 
-        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        let durationSeconds = Double(samples.count) / sampleRate
         if STTHallucinationFilter.isLikelyHallucination(text, audioDurationSeconds: durationSeconds) {
             print("OpenClaw: dropping likely hallucination on short audio (\(String(format: "%.2f", durationSeconds))s): \"\(text)\"")
             isProcessing = false
@@ -390,12 +404,11 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         lastTranscription = text
         print("OpenClaw: transcription: \"\(text)\"")
 
-        // Ensure WebSocket is connected
+        // Ensure WebSocket is connected — waits for the actual handshake
+        // instead of a fixed sleep, so slow networks don't drop the question.
         if !openClawManager.isAuthenticated {
-            openClawManager.connect()
-            // Wait briefly for connection
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if !openClawManager.isAuthenticated {
+            let authenticated = await openClawManager.connectAndWaitForAuth(timeout: 10)
+            if !authenticated {
                 isProcessing = false
                 delegate?.openClawDidFail(error: "Not connected to OpenClaw gateway")
                 return
@@ -447,6 +460,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             return text
         } catch {
             print("OpenClaw: WhisperKit error: \(error)")
+            delegate?.openClawDidFail(error: "Transcription failed: \(error.localizedDescription)")
             return nil
         }
     }
@@ -473,6 +487,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             return text
         } catch {
             print("OpenClaw: Parakeet error: \(error)")
+            delegate?.openClawDidFail(error: "Transcription failed: \(error.localizedDescription)")
             return nil
         }
     }
@@ -499,6 +514,8 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         ttsFinishSignaled = false
         ttsSpeaking = false
         ttsQueueTask?.cancel()
+        ttsQueueGeneration += 1
+        let generation = ttsQueueGeneration
 
         // Start the queue consumer with look-ahead synthesis
         ttsQueueTask = Task { [weak self] in
@@ -592,10 +609,23 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
                 await MainActor.run { self.ttsSpeaking = false }
             }
 
-            // Consumer finished — signal TTS complete
+            // Consumer finished — signal TTS complete ONLY if it ended on
+            // its own (queue drained after the final delta). If the loop
+            // exited because we were cancelled (e.g. the user double-tapped
+            // to interrupt mid-speech), do not fire the delegate. Firing it
+            // on cancel previously caused armOpenClawAutoMicAfterTTS to
+            // schedule a follow-up mic that collided with the manual
+            // interrupt recording — the auto-mic work item would fire ~0.4s
+            // after the user's recording started and stop it prematurely,
+            // then a fresh recording would start in the same overlay when
+            // the user released the key.
+            let wasCancelled = Task.isCancelled
             await MainActor.run { [weak self] in
-                self?.ttsQueueTask = nil
-                self?.delegate?.openClawTTSDidFinish()
+                guard let self, self.ttsQueueGeneration == generation else { return }
+                self.ttsQueueTask = nil
+                if !wasCancelled {
+                    self.delegate?.openClawTTSDidFinish()
+                }
             }
         }
     }
@@ -645,7 +675,12 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         }
     }
 
-    private func cancelStreamingTTS() {
+    /// Stop any active TTS playback and drain the synthesis queue. Safe to
+    /// call from any thread; Kokoro buffer playback is stopped immediately,
+    /// the Gemini fallback engine is told to stop, and the queue consumer
+    /// task is cancelled. Must be called on the main thread for thread-safety
+    /// of the queue arrays.
+    func cancelStreamingTTS() {
         ttsQueueTask?.cancel()
         ttsQueueTask = nil
         currentTTSTask?.cancel()
@@ -654,6 +689,13 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         ttsQueuedCount = 0
         ttsFinishSignaled = false
         ttsSpeaking = false
+
+        if let player = activeWavPlayer {
+            player.stop()
+            activeWavPlayer = nil
+        }
+        // Also stop the Gemini fallback path if it's currently rendering.
+        streamingPlayer?.stopAudioEngine()
     }
 
     /// Synthesize text to WAV data using Kokoro. Returns nil if Kokoro unavailable or fails.
@@ -703,12 +745,22 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
         let player = try AVAudioPlayer(contentsOf: tempURL)
         player.prepareToPlay()
+        // Register so an external cancel (interrupt) can stop us mid-buffer.
+        await MainActor.run { self.activeWavPlayer = player }
         player.play()
 
-        // Wait for playback to finish
+        defer {
+            Task { @MainActor in
+                if self.activeWavPlayer === player { self.activeWavPlayer = nil }
+            }
+        }
+
         while player.isPlaying {
-            try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            if Task.isCancelled {
+                player.stop()
+                throw CancellationError()
+            }
+            try await Task.sleep(nanoseconds: 50_000_000) // 50ms — tighter loop so cancel feels snappier
         }
     }
 

@@ -692,8 +692,10 @@ class ReadAloudManager {
     private func playWavData(_ data: Data) async throws {
         try Task.checkCancellation()
 
-        // Collect audio for export
-        audioSegments.append(data)
+        // Collect audio for export. audioSegments/currentPlayer are owned by
+        // the main thread (stop/export/interrupt mutate them there); this
+        // task runs on the cooperative pool, so hop for every mutation.
+        await MainActor.run { audioSegments.append(data) }
 
         // Per user setting: pause Spotify/Music/Podcasts/etc. for the whole
         // playback session. resumeIfWePaused() in the session-end path
@@ -713,7 +715,7 @@ class ReadAloudManager {
         // duration so the transcript advances at the natural rate even
         // while silenced.
         player.volume = isMuted ? 0 : 1
-        currentPlayer = player
+        await MainActor.run { currentPlayer = player }
 
         // Bluetooth output (AirPods etc.) takes 1-2s to switch from A2DP to
         // a profile that handles low-latency playback. Without a pre-warm,
@@ -757,7 +759,11 @@ class ReadAloudManager {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
 
-        currentPlayer = nil
+        await MainActor.run {
+            // Only clear our own player — stop()/skip may have already
+            // installed a different one.
+            if currentPlayer === player { currentPlayer = nil }
+        }
     }
 
     // MARK: - Translation

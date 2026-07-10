@@ -38,14 +38,18 @@ public class GeminiAudioCollector {
     }
     
     private func performCollection(text: String, continuation: AsyncThrowingStream<Data, Error>.Continuation, onComplete: ((Result<Void, Error>) -> Void)? = nil) async throws {
-        guard let url = URL(string: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(apiKey)") else {
+        guard let url = URL(string: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent") else {
             throw GeminiAudioCollectorError.invalidURL
         }
-        
+        // Key in the handshake header rather than the URL — query strings
+        // end up in logs and proxies.
+        var request = URLRequest(url: url)
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+
         // Always create a fresh connection to avoid stale socket issues
         // (Gemini WebSocket connections timeout after ~10 minutes of idle)
         closeConnection()
-        let task = session.webSocketTask(with: url)
+        let task = session.webSocketTask(with: request)
         task.resume()
         webSocketTask = task
 

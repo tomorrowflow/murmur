@@ -1165,6 +1165,12 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     // MARK: - Audio Export
 
+    /// Run `body` on the main thread, synchronously, from any thread.
+    private func onMainSync<T>(_ body: () -> T) -> T {
+        if Thread.isMainThread { return body() }
+        return DispatchQueue.main.sync(execute: body)
+    }
+
     /// Combine all collected audio segments into a single WAV file.
     /// Uses AVAudioFile to decode any format (WAV, FLAC, etc.) to PCM.
     ///
@@ -1175,13 +1181,18 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     ///    the path taken when the user exports a podcast they downloaded but
     ///    never fully played through (e.g. cached offline on disconnect).
     func combinedAudioData() -> Data? {
-        let segments: [Data]
-        if totalChunks > 0 && audioSegments.count >= totalChunks {
-            segments = audioSegments
-        } else if !chunkAudioByIndex.isEmpty {
-            segments = chunkAudioByIndex.keys.sorted().compactMap { chunkAudioByIndex[$0] }
-        } else {
-            segments = audioSegments
+        // audioSegments/chunkAudioByIndex are appended on the main thread
+        // during playback; export runs on a background queue. Snapshot them
+        // on main before iterating so streaming-in chunks can't mutate the
+        // collections mid-read.
+        let segments: [Data] = onMainSync {
+            if totalChunks > 0 && audioSegments.count >= totalChunks {
+                return audioSegments
+            } else if !chunkAudioByIndex.isEmpty {
+                return chunkAudioByIndex.keys.sorted().compactMap { chunkAudioByIndex[$0] }
+            } else {
+                return audioSegments
+            }
         }
         guard !segments.isEmpty else { return nil }
 

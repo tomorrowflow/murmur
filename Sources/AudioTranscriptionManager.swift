@@ -20,7 +20,18 @@ class AudioTranscriptionManager {
     // Audio properties
     private var audioEngine: AVAudioEngine!
     private var inputNode: AVAudioInputNode!
+    // The tap callback runs on AVAudioEngine's internal thread while the main
+    // thread clears/reads the buffer (Bluetooth warmup, cancel, stop) — all
+    // access must go through bufferQueue to avoid heap-corrupting races.
     private var audioBuffer: [Float] = []
+    private let bufferQueue = DispatchQueue(label: "com.murmur.stt.audioBuffer")
+    /// Serializes every AVAudioEngine mutation off the main thread. Starting the engine
+    /// on a Bluetooth mic blocks for 1-2s while the device renegotiates A2DP→HFP; doing
+    /// that on main froze the UI and skewed the push-to-talk key timings. Serial, so a
+    /// stop enqueued during a start always runs after that start completes.
+    private let engineQueue = DispatchQueue(label: "com.murmur.stt.engine")
+    private var autoStopRequested = false  // confined to bufferQueue
+    private var activeMaxBufferSamples = Int.max  // snapshot taken at recording start
     private let sampleRate: Double = 16000
     private var maxBufferSamples: Int {
         let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
@@ -62,36 +73,8 @@ class AudioTranscriptionManager {
     }
 
     private func configureInputDevice() {
-        let deviceManager = AudioDeviceManager.shared
-
-        // Check if user selected a specific device - set it as system default temporarily
-        if !deviceManager.useSystemDefaultInput,
-           let selectedUID = deviceManager.selectedInputDeviceUID,
-           let deviceID = deviceManager.getAudioDeviceID(for: selectedUID) {
-
-            // Set as system default input device
-            var propertyAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultInputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            var deviceIDValue = deviceID
-            let status = AudioObjectSetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &propertyAddress,
-                0,
-                nil,
-                UInt32(MemoryLayout<AudioDeviceID>.size),
-                &deviceIDValue
-            )
-
-            if status == noErr {
-                let deviceName = deviceManager.availableInputDevices.first { $0.uid == selectedUID }?.name ?? selectedUID
-                print("✅ Set system default input to: \(deviceName)")
-            } else {
-                print("⚠️ Failed to set default input device (error: \(status))")
-            }
+        if let deviceName = AudioDeviceManager.shared.applyInputDeviceOverrideIfNeeded() {
+            print("✅ Set system default input to: \(deviceName)")
         } else {
             print("✅ Using system default input device")
         }
@@ -118,33 +101,49 @@ class AudioTranscriptionManager {
         alert.messageText = "Microphone Permission Required"
         alert.informativeText = "Please grant microphone access in System Settings > Privacy & Security > Microphone"
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
     }
     
     /// Discard any audio captured so far (used after Bluetooth mic warmup).
     func clearAudioBuffer() {
-        audioBuffer.removeAll()
+        bufferQueue.sync { audioBuffer.removeAll() }
     }
 
     func toggleRecording() {
-        // Prevent race condition if called while starting
-        if isStartingRecording {
-            return
-        }
-
-        isRecording.toggle()
-
         if isRecording {
-            startRecording()
-        } else {
+            // A stop is always honoured, even mid-start: the engine work is serialized,
+            // so the teardown simply runs once the in-flight start finishes. Dropping it
+            // here would strand a live recording with no way to stop it.
+            isRecording = false
             stopRecording()
+        } else {
+            // Ignore a second start while one is still coming up.
+            guard !isStartingRecording else { return }
+            isRecording = true
+            startRecording()
         }
     }
 
     func startRecording() {
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if authStatus == .denied || authStatus == .restricted {
+            isRecording = false
+            delegate?.transcriptionDidFail(error: "Microphone access denied. Enable it in System Settings > Privacy & Security > Microphone.")
+            showPermissionAlert()
+            return
+        }
+
         isStartingRecording = true
-        audioBuffer.removeAll()
+        bufferQueue.sync {
+            audioBuffer.removeAll()
+            autoStopRequested = false
+        }
+        activeMaxBufferSamples = maxBufferSamples
         micReadyFired = false
 
         // Set up global Escape key monitor to cancel recording
@@ -177,37 +176,59 @@ class AudioTranscriptionManager {
         }
     }
 
+    /// Brings the engine up on `engineQueue`. `AVAudioEngine.start()` blocks for 1-2s on a
+    /// Bluetooth mic; keeping it off main is what lets the overlay paint and the push-to-talk
+    /// key timings stay honest.
     private func startRecordingWithAVAudioEngine() {
-        // Create fresh audio engine to avoid state issues
-        audioEngine = AVAudioEngine()
-        inputNode = audioEngine.inputNode
-        configureInputDevice()
-        configChangeRetries = 0
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
 
-        installInputTap()
-        registerConfigChangeObserver()
+            // Create fresh audio engine to avoid state issues
+            self.audioEngine = AVAudioEngine()
+            self.inputNode = self.audioEngine.inputNode
+            self.configureInputDevice()
+            self.configChangeRetries = 0
 
-        do {
-            audioEngine.prepare()
-            try audioEngine.start()
-            print("🎤 Recording started...")
-            isStartingRecording = false
-        } catch {
-            print("Failed to start audio engine: \(error)")
-            isRecording = false
-            isStartingRecording = false
-            removeConfigChangeObserver()
+            self.installInputTap()
+            self.registerConfigChangeObserver()
+
+            do {
+                self.audioEngine.prepare()
+                try self.audioEngine.start()
+                print("🎤 Recording started...")
+                DispatchQueue.main.async { self.isStartingRecording = false }
+            } catch {
+                print("Failed to start audio engine: \(error)")
+                self.removeConfigChangeObserver()
+                self.inputNode.removeTap(onBus: 0)
+                AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
+                DispatchQueue.main.async {
+                    self.isRecording = false
+                    self.isStartingRecording = false
+                    AudioDucker.shared.restore()
+                    MediaRemoteController.shared.resumeIfWePaused()
+                    self.removeEscapeKeyMonitor()
+                    self.delegate?.transcriptionDidFail(error: "Could not start the microphone: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func removeEscapeKeyMonitor() {
+        if let monitor = escapeKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeKeyMonitor = nil
         }
     }
 
     private func installInputTap() {
         let recordingFormat = inputNode.outputFormat(forBus: 0)
+        let resampler = StreamingResampler(targetSampleRate: sampleRate)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
             let channelData = buffer.floatChannelData?[0]
             let frameLength = Int(buffer.frameLength)
-            let inputSampleRate = buffer.format.sampleRate
 
             if let channelData = channelData {
                 // Fire mic-ready callback on first buffer (Bluetooth profile switch complete)
@@ -221,25 +242,21 @@ class AudioTranscriptionManager {
                     }
                 }
 
-                let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
+                let samples = resampler?.resample(buffer)
+                    ?? Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 
-                if inputSampleRate != self.sampleRate {
-                    let ratio = Int(inputSampleRate / self.sampleRate)
-                    let resampledSamples = stride(from: 0, to: samples.count, by: ratio).map { samples[$0] }
-                    self.audioBuffer.append(contentsOf: resampledSamples)
-                } else {
+                self.bufferQueue.async {
                     self.audioBuffer.append(contentsOf: samples)
-                }
 
-                if self.audioBuffer.count > self.maxBufferSamples {
-                    let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
-                    let label = seconds > 0 ? "\(seconds / 60) min" : "limit"
-                    print("⚠️ Audio buffer limit reached (\(label)). Auto-stopping recording.")
-                    DispatchQueue.main.async {
-                        self.isRecording = false
-                        self.stopRecording()
+                    if self.audioBuffer.count > self.activeMaxBufferSamples && !self.autoStopRequested {
+                        self.autoStopRequested = true
+                        print("⚠️ Audio buffer limit reached. Auto-stopping recording.")
+                        DispatchQueue.main.async {
+                            guard self.isRecording else { return }
+                            self.isRecording = false
+                            self.stopRecording()
+                        }
                     }
-                    return
                 }
 
                 let rms = sqrt(channelData.withMemoryRebound(to: Float.self, capacity: frameLength) { ptr in
@@ -279,63 +296,82 @@ class AudioTranscriptionManager {
 
     private func handleConfigurationChange() {
         guard isRecording else { return }
-        guard configChangeRetries < maxConfigChangeRetries else {
-            print("⚠️ Audio engine restart budget exhausted after Bluetooth codec switch")
-            removeConfigChangeObserver()
-            inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
-            audioEngine.reset()
-            AudioDucker.shared.restore()
-            MediaRemoteController.shared.resumeIfWePaused()
-            isRecording = false
-            audioBuffer.removeAll()
-            delegate?.transcriptionDidFail(error: "Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
-            return
-        }
-        configChangeRetries += 1
-        print("🔁 Audio engine config changed (Bluetooth codec switch?). Restart attempt \(configChangeRetries)/\(maxConfigChangeRetries)")
 
-        inputNode.removeTap(onBus: 0)
-        // Re-acquire input node — its format may have changed after the codec switch.
-        inputNode = audioEngine.inputNode
-        installInputTap()
+        // Restarting the engine must not race the start that is still coming up on
+        // engineQueue — the codec switch that triggers this notification is emitted
+        // from inside that very start on Bluetooth.
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
 
-        do {
-            audioEngine.prepare()
-            try audioEngine.start()
-        } catch {
-            print("⚠️ Failed to restart audio engine after config change: \(error)")
-            // Schedule a retry on next config-change notification, or bail out
-            // if the engine refuses to come back up.
-            removeConfigChangeObserver()
-            isRecording = false
-            AudioDucker.shared.restore()
-            MediaRemoteController.shared.resumeIfWePaused()
-            delegate?.transcriptionDidFail(error: "Failed to restart audio engine: \(error.localizedDescription)")
+            let failOnMain: (String) -> Void = { [weak self] message in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.isRecording = false
+                    AudioDucker.shared.restore()
+                    MediaRemoteController.shared.resumeIfWePaused()
+                    self.removeEscapeKeyMonitor()
+                    self.delegate?.transcriptionDidFail(error: message)
+                }
+            }
+
+            guard self.configChangeRetries < self.maxConfigChangeRetries else {
+                print("⚠️ Audio engine restart budget exhausted after Bluetooth codec switch")
+                self.teardownEngine()
+                self.clearAudioBuffer()
+                failOnMain("Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
+                return
+            }
+            self.configChangeRetries += 1
+            print("🔁 Audio engine config changed (Bluetooth codec switch?). Restart attempt \(self.configChangeRetries)/\(self.maxConfigChangeRetries)")
+
+            self.inputNode.removeTap(onBus: 0)
+            // Re-acquire input node — its format may have changed after the codec switch.
+            self.inputNode = self.audioEngine.inputNode
+            self.installInputTap()
+
+            do {
+                self.audioEngine.prepare()
+                try self.audioEngine.start()
+            } catch {
+                print("⚠️ Failed to restart audio engine after config change: \(error)")
+                // Schedule a retry on next config-change notification, or bail out
+                // if the engine refuses to come back up.
+                self.removeConfigChangeObserver()
+                failOnMain("Failed to restart audio engine: \(error.localizedDescription)")
+            }
         }
     }
 
     func stopRecording() {
+        // AppKit and playback state stay on main; the engine teardown is serialized behind
+        // any start still in flight, so releasing the key mid-warm-up still stops cleanly.
+        removeEscapeKeyMonitor()
+        AudioDucker.shared.restore()
+        MediaRemoteController.shared.resumeIfWePaused()
+
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.teardownEngine()
+
+            // Snapshot under the queue: late tap callbacks may still be appending.
+            let samples = self.bufferQueue.sync { self.audioBuffer }
+
+            print("⏹ Recording stopped")
+            print("Captured \(samples.count) audio samples")
+
+            Task { @MainActor in
+                await self.processRecording(samples: samples)
+            }
+        }
+    }
+
+    /// Engine teardown. Must run on `engineQueue`.
+    private func teardownEngine() {
         removeConfigChangeObserver()
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()
-        AudioDucker.shared.restore()
-        MediaRemoteController.shared.resumeIfWePaused()
-
-        // Remove Escape key monitor
-        if let monitor = escapeKeyMonitor {
-            NSEvent.removeMonitor(monitor)
-            escapeKeyMonitor = nil
-        }
-
-        print("⏹ Recording stopped")
-        print("Captured \(audioBuffer.count) audio samples")
-
-        // Process the recording
-        Task {
-            await processRecording()
-        }
+        AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
     }
 
     /// Cancel an in-flight recording.
@@ -345,18 +381,14 @@ class AudioTranscriptionManager {
     ///   louder "recording cancelled" notification.
     func cancelRecording(asSilence: Bool = false) {
         isRecording = false
-        removeConfigChangeObserver()
-        inputNode.removeTap(onBus: 0)
-        audioEngine.stop()
-        audioEngine.reset()
         AudioDucker.shared.restore()
         MediaRemoteController.shared.resumeIfWePaused()
-        audioBuffer.removeAll()
+        removeEscapeKeyMonitor()
 
-        // Remove Escape key monitor
-        if let monitor = escapeKeyMonitor {
-            NSEvent.removeMonitor(monitor)
-            escapeKeyMonitor = nil
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.teardownEngine()
+            self.clearAudioBuffer()
         }
 
         print(asSilence ? "Recording cancelled — silence timeout" : "Recording cancelled")
@@ -369,8 +401,8 @@ class AudioTranscriptionManager {
     }
     
     @MainActor
-    private func processRecording() async {
-        guard !audioBuffer.isEmpty else {
+    private func processRecording(samples: [Float]) async {
+        guard !samples.isEmpty else {
             print("No audio recorded")
             // Nothing to transcribe; ensure UI resets
             delegate?.recordingWasSkippedDueToSilence()
@@ -381,7 +413,7 @@ class AudioTranscriptionManager {
         // Anything under ~0.6s is almost always a stray double-tap or clipped
         // start; Whisper/Parakeet hallucinate single tokens on zero-padded
         // sub-second audio.
-        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        let durationSeconds = Double(samples.count) / sampleRate
         let minDurationSeconds: Double = 0.60
         if durationSeconds < minDurationSeconds {
             print("Recording too short (\(String(format: "%.2f", durationSeconds))s). Skipping transcription.")
@@ -390,7 +422,7 @@ class AudioTranscriptionManager {
         }
 
         // Calculate RMS (Root Mean Square) to detect silence
-        let rms = sqrt(audioBuffer.reduce(0) { $0 + $1 * $1 } / Float(audioBuffer.count))
+        let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
         let db = 20 * log10(max(rms, 0.00001))
 
         // Threshold for silence detection (stricter to avoid false positives)
@@ -411,14 +443,14 @@ class AudioTranscriptionManager {
         // Route to appropriate transcriber based on selected engine
         switch ModelStateManager.shared.selectedEngine {
         case .whisperKit:
-            await transcribeWithWhisperKit()
+            await transcribeWithWhisperKit(samples: samples)
         case .parakeet:
-            await transcribeWithParakeet()
+            await transcribeWithParakeet(samples: samples)
         }
     }
 
     @MainActor
-    private func transcribeWithWhisperKit() async {
+    private func transcribeWithWhisperKit(samples: [Float]) async {
         // Load model if not already loaded
         if ModelStateManager.shared.loadedWhisperKit == nil {
             if let selectedModel = ModelStateManager.shared.selectedModel {
@@ -439,13 +471,13 @@ class AudioTranscriptionManager {
         let minSamplesForPadding = Int(paddingThresholdSeconds * sampleRate)
         let paddingSamples = Int(paddingDurationSeconds * sampleRate)
 
-        var paddedBuffer = audioBuffer
-        if audioBuffer.count < minSamplesForPadding {
+        var paddedBuffer = samples
+        if samples.count < minSamplesForPadding {
             paddedBuffer.append(contentsOf: [Float](repeating: 0.0, count: paddingSamples))
             print("Padded short audio with \(paddingDurationSeconds)s of silence")
         }
 
-        print("Transcribing \(audioBuffer.count) samples (\(Double(audioBuffer.count) / sampleRate) seconds) with WhisperKit...")
+        print("Transcribing \(samples.count) samples (\(Double(samples.count) / sampleRate) seconds) with WhisperKit...")
 
         do {
             let transcriptionResult = try await whisperKit.transcribe(
@@ -472,7 +504,7 @@ class AudioTranscriptionManager {
 
             if let firstResult = transcriptionResult.first {
                 let transcription = firstResult.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-                handleTranscriptionResult(transcription)
+                handleTranscriptionResult(transcription, samples: samples)
             }
         } catch {
             print("WhisperKit transcription error: \(error)")
@@ -482,7 +514,7 @@ class AudioTranscriptionManager {
     }
 
     @MainActor
-    private func transcribeWithParakeet() async {
+    private func transcribeWithParakeet(samples: [Float]) async {
         // Load model if not already loaded
         if ModelStateManager.shared.loadedParakeetTranscriber == nil ||
            ModelStateManager.shared.parakeetLoadingState != .loaded {
@@ -503,18 +535,18 @@ class AudioTranscriptionManager {
         let minSamplesForPadding = Int(paddingThresholdSeconds * sampleRate)
         let paddingSamples = Int(paddingDurationSeconds * sampleRate)
 
-        var paddedBuffer = audioBuffer
-        if audioBuffer.count < minSamplesForPadding {
+        var paddedBuffer = samples
+        if samples.count < minSamplesForPadding {
             paddedBuffer.append(contentsOf: [Float](repeating: 0.0, count: paddingSamples))
             print("Padded short audio with \(paddingDurationSeconds)s of silence")
         }
 
-        print("Transcribing \(audioBuffer.count) samples (\(Double(audioBuffer.count) / sampleRate) seconds) with Parakeet...")
+        print("Transcribing \(samples.count) samples (\(Double(samples.count) / sampleRate) seconds) with Parakeet...")
 
         do {
             let transcription = try await transcriber.transcribe(audioSamples: paddedBuffer)
             isTranscribing = false
-            handleTranscriptionResult(transcription)
+            handleTranscriptionResult(transcription, samples: samples)
         } catch {
             print("Parakeet transcription error: \(error)")
             isTranscribing = false
@@ -523,9 +555,9 @@ class AudioTranscriptionManager {
     }
 
     @MainActor
-    private func handleTranscriptionResult(_ rawTranscription: String) {
+    private func handleTranscriptionResult(_ rawTranscription: String, samples: [Float]) {
         let transcription = rawTranscription.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        let durationSeconds = Double(samples.count) / sampleRate
         if STTHallucinationFilter.isLikelyHallucination(transcription, audioDurationSeconds: durationSeconds) {
             print("Skipping likely hallucination on short audio (\(String(format: "%.2f", durationSeconds))s): \"\(transcription)\"")
             delegate?.recordingWasSkippedDueToSilence()
@@ -537,7 +569,7 @@ class AudioTranscriptionManager {
             // Attempt Gemini fallback if API key is available
             if ProcessInfo.processInfo.environment["GEMINI_API_KEY"] != nil {
                 print("Local transcription returned empty — falling back to Gemini")
-                Task { await fallbackToGemini() }
+                Task { await fallbackToGemini(samples: samples) }
             } else {
                 print("No transcription generated (possibly silence)")
                 delegate?.recordingWasSkippedDueToSilence()
@@ -561,9 +593,9 @@ class AudioTranscriptionManager {
     }
 
     @MainActor
-    private func fallbackToGemini() async {
+    private func fallbackToGemini(samples: [Float]) async {
         let gemini = GeminiAudioTranscriber()
-        let buffer = audioBuffer
+        let buffer = samples
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             gemini.transcribe(audioBuffer: buffer) { [weak self] result in

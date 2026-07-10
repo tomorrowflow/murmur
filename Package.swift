@@ -128,6 +128,10 @@ let package = Package(
         .executableTarget(
             name: "TranscribeVideo",
             dependencies: [],
-            path: "tools/transcribe-video")
+            path: "tools/transcribe-video"),
+        .testTarget(
+            name: "SharedModelsTests",
+            dependencies: ["SharedModels"],
+            path: "tests/SharedModelsTests")
     ]
 )

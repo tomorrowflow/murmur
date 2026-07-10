@@ -129,15 +129,35 @@ public class OpenClawManager: NSObject {
     }
 
     deinit {
-        disconnect()
+        // Tear down directly — do NOT route through disconnect(), which calls
+        // fireStatusChange() and captures `[weak self]`. Forming a weak
+        // reference to an object that is already deallocating is a hard runtime
+        // trap (objc_initWeak → _objc_fatal → SIGABRT). This deinit can run on
+        // the URLSession work queue when invalidateAndCancel() releases the
+        // session's last strong reference to its delegate (self).
+        shouldReconnect = false
+        reconnectTask?.cancel()
+        listenTask?.cancel()
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
     }
 
     // MARK: - Connection
 
     public func connect() {
+        // All connection state (isConnected/isAuthenticated/webSocketTask/
+        // reconnectAttempt) is owned by the main thread; reconnect tasks and
+        // delegate-queue callbacks hop here before touching it.
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.connect() }
+            return
+        }
         guard !isConnected else { return }
         guard let wsURL = URL(string: url) else {
             NSLog("OpenClaw: invalid URL: \(url)")
+            let error = NSError(domain: "OpenClaw", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid gateway URL: \(url)"
+            ])
+            delegate?.openClawDidDisconnect(error: error)
             return
         }
 
@@ -149,6 +169,21 @@ public class OpenClawManager: NSObject {
         webSocketTask = task
         NSLog("OpenClaw: connecting to \(url)")
         startListening()
+    }
+
+    /// Connect and wait until authentication completes, or give up after
+    /// `timeout`. Replaces the fixed-sleep pattern at call sites, which
+    /// discarded the user's recording whenever the handshake took longer
+    /// than the sleep.
+    public func connectAndWaitForAuth(timeout: TimeInterval = 10) async -> Bool {
+        if isAuthenticated { return true }
+        connect()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isAuthenticated { return true }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return isAuthenticated
     }
 
     public func disconnect() {
@@ -163,6 +198,15 @@ public class OpenClawManager: NSObject {
         isAuthenticated = false
         isPendingPairing = false
         fireStatusChange()
+    }
+
+    /// Permanently tear down this manager before discarding it. URLSession
+    /// retains its delegate (self) until the session is invalidated, so a
+    /// manager dropped without this call — e.g. on settings re-save — leaks
+    /// itself, the session, and its worker threads; `deinit` never runs.
+    public func shutdown() {
+        disconnect()
+        urlSession.invalidateAndCancel()
     }
 
     // MARK: - Chat
@@ -226,7 +270,9 @@ public class OpenClawManager: NSObject {
                 guard let self = self, let ws = self.webSocketTask else { return }
                 do {
                     let message = try await ws.receive()
-                    self.handleMessage(message)
+                    // Handle on main: hello-ok / challenge handlers mutate
+                    // connection state, which is main-owned.
+                    DispatchQueue.main.async { self.handleMessage(message) }
                 } catch {
                     if !Task.isCancelled {
                         NSLog("OpenClaw: WebSocket receive error: \(error.localizedDescription)")
@@ -447,15 +493,23 @@ public class OpenClawManager: NSObject {
     // MARK: - Private: Reconnection
 
     private func handleDisconnect(error: Error?) {
+        // Both the receive-loop failure and URLSession's didCloseWith fire
+        // for a single drop. Serialize on main so the guard below reliably
+        // lets only the first run teardown — otherwise two reconnect timers
+        // race each other.
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.handleDisconnect(error: error) }
+            return
+        }
+        guard isConnected || webSocketTask != nil else { return }
+
         let wasAuthenticated = isAuthenticated
         isConnected = false
         isAuthenticated = false
         webSocketTask = nil
         fireStatusChange()
 
-        DispatchQueue.main.async { [weak self] in
-            self?.delegate?.openClawDidDisconnect(error: error)
-        }
+        delegate?.openClawDidDisconnect(error: error)
 
         // Reconnect if we were authenticated, or if we're waiting for pairing approval
         if shouldReconnect && (wasAuthenticated || isPendingPairing) {
@@ -464,6 +518,7 @@ public class OpenClawManager: NSObject {
     }
 
     private func scheduleReconnect() {
+        reconnectTask?.cancel()
         let maxAttempts = isPendingPairing ? 60 : maxReconnectAttempt  // Keep trying longer during pairing
         guard reconnectAttempt < maxAttempts else {
             NSLog("OpenClaw: max reconnect attempts reached")

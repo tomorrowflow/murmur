@@ -284,13 +284,22 @@ class AudioTranscriptionOverlayWindow {
     }
 
     func show(state: AudioTranscriptionOverlayState) {
-        DispatchQueue.main.async { [self] in
+        // Run inline when already on main. Hopping through the main queue would
+        // queue the panel behind whatever the caller does next — and the PTT path
+        // goes straight on to start the audio engine, which stalls main for 1-2s
+        // on a Bluetooth mic. The overlay is the user's only confirmation that the
+        // double-tap registered; it must not wait on the microphone.
+        onMain { [self] in
             let wasHidden = !(panel?.isVisible ?? false)
             viewModel.show(state: state)
             ensurePanel()
             if wasHidden { repositionPanel() }
             panel?.orderFront(nil)
         }
+    }
+
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
     }
 
     func showError(_ message: String) {

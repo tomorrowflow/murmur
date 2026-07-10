@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SharedModels
 
 // MARK: - HTTP Router
 
@@ -155,19 +156,96 @@ class MurmurHTTPServer {
 
     // MARK: - Connection Handling
 
+    /// Upper bound on a single request (headers + body). Recap texts can be
+    /// long, but nothing legitimate approaches megabytes.
+    private static let maxRequestBytes = 2 * 1024 * 1024
+
     private func handleConnection(_ connection: NWConnection) {
         connection.start(queue: queue)
 
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, error in
-            guard let self = self, let data = data, error == nil else {
+        // Idle guard: drop connections that haven't completed a request
+        // within 30s, so port scanners / stalled clients don't accumulate
+        // open connections. Cancelling an already-finished connection is a
+        // no-op.
+        queue.asyncAfter(deadline: .now() + 30) { [weak connection] in
+            connection?.cancel()
+        }
+
+        receiveRequest(connection: connection, accumulated: Data())
+    }
+
+    /// Read from the connection until the header section AND the
+    /// Content-Length-declared body have fully arrived. A single receive()
+    /// only returns one batch of TCP segments — POST bodies routinely span
+    /// several (long recap texts, curl's separate header/body writes), and
+    /// parsing the first segment alone truncated them into opaque 400s.
+    private func receiveRequest(connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self = self else {
                 connection.cancel()
                 return
             }
 
-            guard let request = self.parseHTTPRequest(data) else {
-                self.sendResponse(connection: connection, statusCode: 400, body: self.jsonBytes(["error": "Bad request"]))
+            var buffer = accumulated
+            if let data = data { buffer.append(data) }
+
+            if error != nil {
+                connection.cancel()
                 return
             }
+            if buffer.count > Self.maxRequestBytes {
+                self.sendResponse(connection: connection, statusCode: 400, body: self.jsonBytes(["error": "Request too large"]))
+                return
+            }
+
+            // Keep reading until the blank line that ends the headers.
+            guard let headerEnd = HTTPRequestParser.headerEndRange(in: buffer) else {
+                if isComplete {
+                    self.sendResponse(connection: connection, statusCode: 400, body: self.jsonBytes(["error": "Bad request"]))
+                } else {
+                    self.receiveRequest(connection: connection, accumulated: buffer)
+                }
+                return
+            }
+
+            // Keep reading until the declared body length has arrived.
+            let bodyCount = buffer.count - headerEnd.upperBound
+            if let expected = HTTPRequestParser.contentLength(inHeaderSection: buffer[..<headerEnd.lowerBound]),
+               bodyCount < expected, !isComplete {
+                self.receiveRequest(connection: connection, accumulated: buffer)
+                return
+            }
+
+            self.processRequest(buffer, connection: connection)
+        }
+    }
+
+    private func processRequest(_ data: Data, connection: NWConnection) {
+        guard let request = HTTPRequestParser.parse(data) else {
+            self.sendResponse(connection: connection, statusCode: 400, body: self.jsonBytes(["error": "Bad request"]))
+            return
+        }
+
+        // Browsers attach an Origin header to cross-origin fetches and most
+        // POSTs; no browser-based client exists, so any Origin-bearing
+        // request is a webpage trying to drive the API from inside the
+        // localhost trust boundary. Reject it. Same for DNS-rebinding
+        // attempts, which arrive with the attacker's hostname in Host.
+        if request.headers["origin"] != nil {
+            self.sendResponse(connection: connection, statusCode: 403, body: self.jsonBytes(["error": "Browser-originated requests are not allowed"]))
+            return
+        }
+        if let host = request.headers["host"] {
+            let hostName = host.split(separator: ":").first.map(String.init)?.lowercased() ?? ""
+            let allowedNames: Set<String> = ["127.0.0.1", "localhost", "::1", "[::1]"]
+            let isOwnAddress = allowedNames.contains(hostName)
+                || hostName == Self.localHostname()
+                || hostName.allSatisfy { $0.isNumber || $0 == "." }  // raw LAN IP
+            if !isOwnAddress {
+                self.sendResponse(connection: connection, statusCode: 403, body: self.jsonBytes(["error": "Unexpected Host header"]))
+                return
+            }
+        }
 
             let sourceIp = Self.extractSourceIP(connection: connection)
 
@@ -202,7 +280,10 @@ class MurmurHTTPServer {
                 )
                 self.sendResponse(connection: connection, statusCode: statusCode, body: responseBody)
             }
-        }
+    }
+
+    private static func localHostname() -> String {
+        ProcessInfo.processInfo.hostName.lowercased()
     }
 
     private func isAuthorized(sourceIp: String?, path: String) -> Bool {
@@ -232,55 +313,6 @@ class MurmurHTTPServer {
         }
     }
 
-    // MARK: - HTTP Parsing
-
-    private struct HTTPRequest {
-        let method: String
-        let path: String
-        let headers: [String: String]
-        let body: Data?
-    }
-
-    private func parseHTTPRequest(_ data: Data) -> HTTPRequest? {
-        guard let raw = String(data: data, encoding: .utf8) else { return nil }
-
-        // Split headers from body
-        let parts = raw.components(separatedBy: "\r\n\r\n")
-        guard let headerSection = parts.first else { return nil }
-
-        let headerLines = headerSection.components(separatedBy: "\r\n")
-        guard let requestLine = headerLines.first else { return nil }
-
-        // Parse request line: METHOD /path HTTP/1.1
-        let requestParts = requestLine.components(separatedBy: " ")
-        guard requestParts.count >= 2 else { return nil }
-
-        let method = requestParts[0]
-        let path = requestParts[1]
-
-        // Parse headers
-        var headers: [String: String] = [:]
-        for i in 1..<headerLines.count {
-            let line = headerLines[i]
-            if let colonIndex = line.firstIndex(of: ":") {
-                let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces).lowercased()
-                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
-                headers[key] = value
-            }
-        }
-
-        // Extract body
-        var body: Data? = nil
-        if parts.count > 1 {
-            let bodyString = parts.dropFirst().joined(separator: "\r\n\r\n")
-            if !bodyString.isEmpty {
-                body = bodyString.data(using: .utf8)
-            }
-        }
-
-        return HTTPRequest(method: method, path: path, headers: headers, body: body)
-    }
-
     // MARK: - Response
 
     private func sendResponse(connection: NWConnection, statusCode: Int, body: Data) {
@@ -295,10 +327,13 @@ class MurmurHTTPServer {
         default: statusText = "Unknown"
         }
 
+        // Deliberately NO Access-Control-Allow-Origin header: combined with
+        // the localhost auto-trust, a wildcard let any webpage drive this API
+        // (start recordings, trigger TTS, open draft sessions) via fetch().
+        // No browser-based client exists, so CORS stays locked down.
         var response = "HTTP/1.1 \(statusCode) \(statusText)\r\n"
         response += "Content-Type: application/json\r\n"
         response += "Content-Length: \(body.count)\r\n"
-        response += "Access-Control-Allow-Origin: *\r\n"
         response += "Connection: close\r\n"
         response += "\r\n"
 

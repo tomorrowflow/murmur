@@ -4,6 +4,8 @@ import KeyboardShortcuts
 
 struct ShortcutsSettingsView: View {
     @AppStorage("ptt.openClaw.enabled") private var openClawPTTEnabled = true
+    @AppStorage("ptt.openClaw.interruptDuringTTS") private var openClawInterruptDuringTTS = true
+    @AppStorage("ptt.openClaw.autoRecordAfterTTS") private var openClawAutoRecordAfterTTS = true
     @AppStorage("ptt.stt.enabled") private var sttPTTEnabled = true
     @AppStorage("ptt.stt.sendReturn") private var sttPTTSendReturn = true
     @AppStorage("ptt.stt.promptRefinement") private var sttPromptRefinement = false
@@ -35,6 +37,28 @@ struct ShortcutsSettingsView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+
+                    Toggle(isOn: $openClawInterruptDuringTTS) {
+                        HStack {
+                            Text("Interrupt OpenClaw while speaking")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Double-tap Left Option to cut audio")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(!openClawPTTEnabled)
+
+                    Toggle(isOn: $openClawAutoRecordAfterTTS) {
+                        HStack {
+                            Text("Auto follow-up after answer")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Distinct chirp + silence-stop mic")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(!openClawPTTEnabled)
 
                     Toggle(isOn: $sttPTTEnabled) {
                         HStack {

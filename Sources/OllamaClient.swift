@@ -1,4 +1,5 @@
 import Foundation
+import SharedModels
 
 // MARK: - Ollama Chat Client
 
@@ -18,7 +19,7 @@ class OllamaClient {
     }
 
     private var ollamaAPIKey: String? {
-        if let key = UserDefaults.standard.string(forKey: "readAloud.ollamaAPIKey"), !key.isEmpty {
+        if let key = SecretsStore.get("readAloud.ollamaAPIKey"), !key.isEmpty {
             return key
         }
         return ProcessInfo.processInfo.environment["OLLAMA_API_KEY"]

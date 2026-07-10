@@ -14,6 +14,16 @@ struct ClaudeSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
                 Section("Claude Code Recap") {
+                    Toggle(isOn: $viewModel.recapEnabled) {
+                        HStack {
+                            Text("Read Claude recap aloud")
+                                .frame(width: 220, alignment: .leading)
+                            Text(viewModel.recapEnabled ? "Speaks the assistant's final message" : "Hook results are ignored")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
                     HStack(spacing: 8) {
                         Text("Preprocess")
                             .frame(width: 120, alignment: .leading)
@@ -23,6 +33,7 @@ struct ClaudeSettingsView: View {
                             Text("Ollama (LLM summary)").tag("ollama")
                         }
                         .labelsHidden()
+                        .disabled(!viewModel.recapEnabled)
                     }
 
                     Text("Cleans up the assistant's final message before it's spoken. Regex strips code blocks, paths, markdown, and PIDs. Ollama rewrites it as a spoken summary using the Ollama model configured under Read Aloud.")
@@ -196,6 +207,7 @@ private struct ApprovedHostRow: View {
 class ClaudeSettingsViewModel: ObservableObject {
     private var isLoading = false
 
+    @Published var recapEnabled: Bool = true { didSet { persist(recapEnabled, forKey: "recap.enabled") } }
     @Published var recapPreprocessMode: String = "none" { didSet { persist(recapPreprocessMode, forKey: "recap.preprocessMode") } }
     @Published var autoApproveTools: Bool = false { didSet { persist(autoApproveTools, forKey: "claude.autoApproveTools") } }
     @Published var exposeToLan: Bool = false {
@@ -219,6 +231,7 @@ class ClaudeSettingsViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         let defaults = UserDefaults.standard
+        recapEnabled = defaults.object(forKey: "recap.enabled") as? Bool ?? true
         recapPreprocessMode = defaults.string(forKey: "recap.preprocessMode") ?? "none"
         autoApproveTools = defaults.bool(forKey: "claude.autoApproveTools")
         exposeToLan = defaults.bool(forKey: "claude.exposeToLan")

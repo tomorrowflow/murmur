@@ -143,8 +143,8 @@ class OpenClawSettingsViewModel: ObservableObject {
     func loadCredentials() {
         let defaults = UserDefaults.standard
         url = defaults.string(forKey: "openClaw.url") ?? ""
-        token = defaults.string(forKey: "openClaw.token") ?? ""
-        password = defaults.string(forKey: "openClaw.password") ?? ""
+        token = SecretsStore.get("openClaw.token") ?? ""
+        password = SecretsStore.get("openClaw.password") ?? ""
         sessionKey = defaults.string(forKey: "openClaw.sessionKey") ?? "voice-assistant"
         refreshStatus()
     }
@@ -152,8 +152,8 @@ class OpenClawSettingsViewModel: ObservableObject {
     func saveCredentials() {
         let defaults = UserDefaults.standard
         defaults.set(url, forKey: "openClaw.url")
-        defaults.set(token, forKey: "openClaw.token")
-        defaults.set(password, forKey: "openClaw.password")
+        SecretsStore.set(token, forKey: "openClaw.token")
+        SecretsStore.set(password, forKey: "openClaw.password")
         defaults.set(sessionKey, forKey: "openClaw.sessionKey")
     }
 

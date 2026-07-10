@@ -19,7 +19,12 @@ class GeminiAudioRecordingManager {
     // Audio properties
     private var audioEngine: AVAudioEngine!
     private var inputNode: AVAudioInputNode!
+    // Tap callback appends on the audio thread while main clears/reads —
+    // all access must go through bufferQueue (see AudioTranscriptionManager).
     private var audioBuffer: [Float] = []
+    private let bufferQueue = DispatchQueue(label: "com.murmur.gemini.audioBuffer")
+    private var autoStopRequested = false  // confined to bufferQueue
+    private var activeMaxBufferSamples = Int.max  // snapshot taken at recording start
     private let sampleRate: Double = 16000
     private var maxBufferSamples: Int {
         let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
@@ -49,36 +54,8 @@ class GeminiAudioRecordingManager {
 
 
     private func configureInputDevice() {
-        let deviceManager = AudioDeviceManager.shared
-
-        // Check if user selected a specific device - set it as system default temporarily
-        if !deviceManager.useSystemDefaultInput,
-           let selectedUID = deviceManager.selectedInputDeviceUID,
-           let deviceID = deviceManager.getAudioDeviceID(for: selectedUID) {
-
-            // Set as system default input device
-            var propertyAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultInputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            var deviceIDValue = deviceID
-            let status = AudioObjectSetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &propertyAddress,
-                0,
-                nil,
-                UInt32(MemoryLayout<AudioDeviceID>.size),
-                &deviceIDValue
-            )
-
-            if status == noErr {
-                let deviceName = deviceManager.availableInputDevices.first { $0.uid == selectedUID }?.name ?? selectedUID
-                print("✅ Set system default input to: \(deviceName)")
-            } else {
-                print("⚠️ Failed to set default input device (error: \(status))")
-            }
+        if let deviceName = AudioDeviceManager.shared.applyInputDeviceOverrideIfNeeded() {
+            print("✅ Set system default input to: \(deviceName)")
         } else {
             print("✅ Using system default input device")
         }
@@ -126,7 +103,11 @@ class GeminiAudioRecordingManager {
 
     func startRecording() {
         isStartingRecording = true
-        audioBuffer.removeAll()
+        bufferQueue.sync {
+            audioBuffer.removeAll()
+            autoStopRequested = false
+        }
+        activeMaxBufferSamples = maxBufferSamples
 
         // Create fresh audio engine to avoid state issues
         audioEngine = AVAudioEngine()
@@ -146,37 +127,32 @@ class GeminiAudioRecordingManager {
         }
 
         let recordingFormat = inputNode.outputFormat(forBus: 0)
+        let resampler = StreamingResampler(targetSampleRate: sampleRate)
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
             let channelData = buffer.floatChannelData?[0]
             let frameLength = Int(buffer.frameLength)
-            let inputSampleRate = buffer.format.sampleRate
 
             if let channelData = channelData {
-                // Collect raw samples
-                let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
+                // Resample to 16kHz mono
+                let samples = resampler?.resample(buffer)
+                    ?? Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 
-                // Resample to 16kHz
-                if inputSampleRate != self.sampleRate {
-                    let ratio = Int(inputSampleRate / self.sampleRate)
-                    let resampledSamples = stride(from: 0, to: samples.count, by: ratio).map { samples[$0] }
-                    self.audioBuffer.append(contentsOf: resampledSamples)
-                } else {
+                self.bufferQueue.async {
                     self.audioBuffer.append(contentsOf: samples)
-                }
 
-                // Prevent memory explosion from runaway recording
-                if self.audioBuffer.count > self.maxBufferSamples {
-                    let seconds = UserDefaults.standard.integer(forKey: "ptt.maxRecordingSeconds")
-                    let label = seconds > 0 ? "\(seconds / 60) min" : "limit"
-                    print("⚠️ Audio buffer limit reached (\(label)). Auto-stopping recording.")
-                    DispatchQueue.main.async {
-                        self.isRecording = false
-                        self.stopRecording()
+                    // Prevent memory explosion from runaway recording
+                    if self.audioBuffer.count > self.activeMaxBufferSamples && !self.autoStopRequested {
+                        self.autoStopRequested = true
+                        print("⚠️ Audio buffer limit reached. Auto-stopping recording.")
+                        DispatchQueue.main.async {
+                            guard self.isRecording else { return }
+                            self.isRecording = false
+                            self.stopRecording()
+                        }
                     }
-                    return
                 }
 
                 // Calculate audio level
@@ -205,6 +181,13 @@ class GeminiAudioRecordingManager {
             print("Failed to start audio engine: \(error)")
             isRecording = false
             isStartingRecording = false
+            inputNode.removeTap(onBus: 0)
+            AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
+            if let monitor = escapeKeyMonitor {
+                NSEvent.removeMonitor(monitor)
+                escapeKeyMonitor = nil
+            }
+            delegate?.transcriptionDidFail(error: "Could not start the microphone: \(error.localizedDescription)")
         }
     }
 
@@ -212,6 +195,7 @@ class GeminiAudioRecordingManager {
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()
+        AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
 
         // Remove Escape key monitor
         if let monitor = escapeKeyMonitor {
@@ -219,11 +203,14 @@ class GeminiAudioRecordingManager {
             escapeKeyMonitor = nil
         }
 
+        // Snapshot under the queue: late tap callbacks may still be appending.
+        let samples = bufferQueue.sync { audioBuffer }
+
         print("⏹ Gemini recording stopped")
-        print("Captured \(audioBuffer.count) audio samples")
+        print("Captured \(samples.count) audio samples")
 
         // Process the recording
-        processRecording()
+        processRecording(samples: samples)
     }
 
     func cancelRecording() {
@@ -231,7 +218,8 @@ class GeminiAudioRecordingManager {
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         audioEngine.reset()
-        audioBuffer.removeAll()
+        AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
+        bufferQueue.sync { audioBuffer.removeAll() }
 
         // Remove Escape key monitor
         if let monitor = escapeKeyMonitor {
@@ -244,15 +232,15 @@ class GeminiAudioRecordingManager {
         delegate?.recordingWasCancelled()
     }
 
-    private func processRecording() {
-        guard !audioBuffer.isEmpty else {
+    private func processRecording(samples: [Float]) {
+        guard !samples.isEmpty else {
             print("No audio recorded")
             delegate?.recordingWasSkippedDueToSilence()
             return
         }
 
         // Skip extremely short recordings to avoid spurious transcriptions
-        let durationSeconds = Double(audioBuffer.count) / sampleRate
+        let durationSeconds = Double(samples.count) / sampleRate
         let minDurationSeconds: Double = 0.30
         if durationSeconds < minDurationSeconds {
             print("Recording too short (\(String(format: "%.2f", durationSeconds))s). Skipping transcription.")
@@ -261,7 +249,7 @@ class GeminiAudioRecordingManager {
         }
 
         // Calculate RMS (Root Mean Square) to detect silence
-        let rms = sqrt(audioBuffer.reduce(0) { $0 + $1 * $1 } / Float(audioBuffer.count))
+        let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
         let db = 20 * log10(max(rms, 0.00001))
 
         // Threshold for silence detection
@@ -276,10 +264,10 @@ class GeminiAudioRecordingManager {
         // Start transcription
         delegate?.transcriptionDidStart()
 
-        print("Sending audio to Gemini API for transcription (\(Double(audioBuffer.count) / sampleRate) seconds)...")
+        print("Sending audio to Gemini API for transcription (\(Double(samples.count) / sampleRate) seconds)...")
 
         // Send to Gemini API
-        geminiTranscriber.transcribe(audioBuffer: audioBuffer) { [weak self] result in
+        geminiTranscriber.transcribe(audioBuffer: samples) { [weak self] result in
             DispatchQueue.main.async {
                 switch result {
                 case .success(let transcription):

@@ -235,59 +235,20 @@ public class AudioDeviceManager: ObservableObject {
     }
     
     private func hasInputChannels(deviceID: AudioDeviceID) -> Bool {
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        
-        var dataSize: UInt32 = 0
-        let status = AudioObjectGetPropertyDataSize(
-            deviceID,
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize
-        )
-        
-        guard status == noErr, dataSize > 0 else { return false }
-        
-        let bufferCount = Int(dataSize) / MemoryLayout<AudioBuffer>.size
-        let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        defer { bufferList.deallocate() }
-        
-        bufferList.pointee.mNumberBuffers = UInt32(bufferCount)
-        
-        let getStatus = AudioObjectGetPropertyData(
-            deviceID,
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize,
-            bufferList
-        )
-        
-        guard getStatus == noErr else { return false }
-        
-        for i in 0..<Int(bufferList.pointee.mNumberBuffers) {
-            let buffer = withUnsafePointer(to: &bufferList.pointee.mBuffers) { ptr in
-                UnsafeRawPointer(ptr).assumingMemoryBound(to: AudioBuffer.self)[i]
-            }
-            if buffer.mNumberChannels > 0 {
-                return true
-            }
-        }
-        
-        return false
+        hasChannels(deviceID: deviceID, scope: kAudioDevicePropertyScopeInput)
     }
-    
+
     private func hasOutputChannels(deviceID: AudioDeviceID) -> Bool {
+        hasChannels(deviceID: deviceID, scope: kAudioDevicePropertyScopeOutput)
+    }
+
+    private func hasChannels(deviceID: AudioDeviceID, scope: AudioObjectPropertyScope) -> Bool {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeOutput,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
-        
+
         var dataSize: UInt32 = 0
         let status = AudioObjectGetPropertyDataSize(
             deviceID,
@@ -296,15 +257,20 @@ public class AudioDeviceManager: ObservableObject {
             nil,
             &dataSize
         )
-        
+
         guard status == noErr, dataSize > 0 else { return false }
-        
-        let bufferCount = Int(dataSize) / MemoryLayout<AudioBuffer>.size
-        let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        defer { bufferList.deallocate() }
-        
-        bufferList.pointee.mNumberBuffers = UInt32(bufferCount)
-        
+
+        // Allocate the full property size: a stream configuration holds one
+        // AudioBuffer per stream, and CoreAudio writes dataSize bytes — a
+        // fixed single-AudioBufferList allocation overflows on multi-stream
+        // devices (USB interfaces, aggregates).
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(dataSize),
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { raw.deallocate() }
+        let bufferList = raw.assumingMemoryBound(to: AudioBufferList.self)
+
         let getStatus = AudioObjectGetPropertyData(
             deviceID,
             &propertyAddress,
@@ -313,19 +279,10 @@ public class AudioDeviceManager: ObservableObject {
             &dataSize,
             bufferList
         )
-        
+
         guard getStatus == noErr else { return false }
-        
-        for i in 0..<Int(bufferList.pointee.mNumberBuffers) {
-            let buffer = withUnsafePointer(to: &bufferList.pointee.mBuffers) { ptr in
-                UnsafeRawPointer(ptr).assumingMemoryBound(to: AudioBuffer.self)[i]
-            }
-            if buffer.mNumberChannels > 0 {
-                return true
-            }
-        }
-        
-        return false
+
+        return UnsafeMutableAudioBufferListPointer(bufferList).contains { $0.mNumberChannels > 0 }
     }
     
     public func getCurrentInputDevice() -> AudioDevice? {
@@ -390,6 +347,66 @@ public class AudioDeviceManager: ObservableObject {
 
         guard status == noErr, deviceID != 0 else { return nil }
         return deviceID
+    }
+
+    // MARK: - Default input device override
+
+    /// The system default input that was in effect before
+    /// `applyInputDeviceOverrideIfNeeded()` replaced it, kept so the override
+    /// can be undone when recording ends instead of permanently hijacking the
+    /// user's default microphone for every other app.
+    private var savedDefaultInputDeviceID: AudioDeviceID?
+
+    /// If the user picked a dedicated input device, set it as the system
+    /// default (AVAudioEngine on macOS records from the default input),
+    /// remembering the previous default. Returns the name of the device the
+    /// override applied, or nil when no override was needed.
+    @discardableResult
+    public func applyInputDeviceOverrideIfNeeded() -> String? {
+        guard !useSystemDefaultInput,
+              let selectedUID = selectedInputDeviceUID,
+              let deviceID = getAudioDeviceID(for: selectedUID) else { return nil }
+
+        let current = getSystemDefaultInputDeviceID()
+        guard current != deviceID else { return nil }  // already the default
+
+        guard setSystemDefaultInputDevice(deviceID) else { return nil }
+        // Keep the oldest saved default across repeated applies so nested
+        // calls (e.g. config-change restarts) still restore the original.
+        if savedDefaultInputDeviceID == nil {
+            savedDefaultInputDeviceID = current
+        }
+        return availableInputDevices.first { $0.uid == selectedUID }?.name ?? selectedUID
+    }
+
+    /// Restore the system default input device replaced by
+    /// `applyInputDeviceOverrideIfNeeded()`. Safe to call when no override is
+    /// active.
+    public func restoreDefaultInputDeviceIfOverridden() {
+        guard let saved = savedDefaultInputDeviceID else { return }
+        savedDefaultInputDeviceID = nil
+        if setSystemDefaultInputDevice(saved) {
+            print("Restored previous system default input device")
+        }
+    }
+
+    private func setSystemDefaultInputDevice(_ deviceID: AudioDeviceID) -> Bool {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var deviceIDValue = deviceID
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            0,
+            nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size),
+            &deviceIDValue
+        )
+        return status == noErr
     }
 
     /// Returns true if the given device uses Bluetooth transport.

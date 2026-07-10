@@ -16,9 +16,12 @@ cp -R build/Murmur.app /Applications/
 swift run TestSentenceSplitter
 swift run TestStreamingTTS
 swift run ListModels
+
+# Run unit tests (SharedModels: HTTP parser, resampler, hallucination filter)
+swift test
 ```
 
-There are no unit test suites — tests are standalone executables in `tests/` run via `swift run <Name>`.
+Unit tests live in `tests/SharedModelsTests/` (XCTest, target `SharedModelsTests`) and can only cover code in the `SharedModels` library target — the `Murmur` executable target can't be imported by tests, so extract logic into `SharedSources/` to make it testable. The other directories in `tests/` are standalone executables run via `swift run <Name>`.
 
 ## Background Process Management
 
@@ -37,8 +40,8 @@ There are no unit test suites — tests are standalone executables in `tests/` r
 
 ### Two-target layout
 
-- **`Sources/`** — Main app target (`Murmur`). Entry point is `main.swift` which sets up the NSApplication delegate, registers global hotkeys, manages push-to-talk state machine, and wires overlay windows.
-- **`SharedSources/`** — Library target (`SharedModels`). Reusable components shared between the main app and test/tool executables: transcription engines, TTS players, audio utilities.
+- **`Sources/`** — Main app target (`Murmur`). Entry point is `main.swift`, which holds the `AppDelegate` class declaration (all stored properties), `applicationDidFinishLaunching`, and the top-level NSApplication bootstrap. AppDelegate behavior is split across `AppDelegate+*.swift` extension files: `PushToTalk` (Option double-tap state machine), `Paste`, `StatusBar`, `TranscriptionDelegate`, `OpenClaw`, `ReadAloud`, `Podcast`, `DraftEditing`, `Recap` (recap queue + terminal window resolution), and `HTTPRoutes`. New stored properties go in `main.swift`; methods go in the matching extension file.
+- **`SharedSources/`** — Library target (`SharedModels`). Reusable components shared between the main app and test/tool executables: transcription engines, TTS players, audio utilities, plus testable extracted logic (`HTTPRequestParser`, `StreamingResampler`, `STTHallucinationFilter`, `SecretsStore`).
 
 ### Key patterns
 
@@ -47,7 +50,9 @@ There are no unit test suites — tests are standalone executables in `tests/` r
 - **Prompt refinement**: Optional Ollama-based cleanup of transcribed text (removes filler words, fixes punctuation) before pasting. Only runs for recordings longer than 5 seconds. Uses the LLM configured in Read Aloud settings. Toggle in Shortcuts settings.
 - **Engine routing**: `AudioTranscriptionManager` routes between Parakeet (FluidAudio), WhisperKit, and Gemini (cloud fallback) based on user settings and transcription results.
 - **Local HTTP server**: `MurmurHTTPServer` runs on `127.0.0.1:7878` using `Network.framework` (`NWListener`). Provides editor-agnostic REST API for draft editing session control. Started in `applicationDidFinishLaunching`.
-- **Environment**: `.env` file at project root parsed at startup for `GEMINI_API_KEY` and other secrets.
+- **Environment**: `.env` parsed at startup for `GEMINI_API_KEY` and other env secrets; looked up in cwd (dev), then `Bundle.main.resourceURL`, then `~/Library/Application Support/Murmur/.env` (bundled app).
+- **Secrets**: User-entered secrets (OpenClaw token/password, Ollama API key) go through `SecretsStore` — Keychain in bundled builds, UserDefaults in `swift run` dev builds (Keychain ACLs would prompt on every rebuild of an ad-hoc-signed binary). Never write them to UserDefaults directly.
+- **User-facing notifications**: Use `AppNotifier.notify(title:body:)` — never `NSUserNotification` (deprecated, silently drops) or `UNUserNotificationCenter` directly (crashes in unbundled dev builds).
 
 ### Keyboard shortcuts
 

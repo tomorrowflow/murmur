@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import SharedModels
 
 struct ReadAloudSettingsView: View {
     @StateObject private var viewModel = ReadAloudSettingsViewModel()
@@ -160,7 +161,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
     @Published var ollamaURL: String = "" { didSet { persist(ollamaURL, forKey: "readAloud.ollamaURL") } }
     @Published var ollamaModel: String = "" { didSet { persist(ollamaModel, forKey: "readAloud.ollamaModel") } }
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, forKey: "readAloud.webSearchEnabled") } }
-    @Published var ollamaAPIKey: String = "" { didSet { persist(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
+    @Published var ollamaAPIKey: String = "" { didSet { persistSecret(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
     @Published var resumeBehavior: String = "ask" { didSet { persist(resumeBehavior, forKey: "readAloud.resumeBehavior") } }
     @Published var draftEditingEditor: String = "auto" { didSet { persist(draftEditingEditor, forKey: "draftEditing.editor") } }
     @Published var obsidianPluginReachable: Bool = false
@@ -172,6 +173,11 @@ class ReadAloudSettingsViewModel: ObservableObject {
         UserDefaults.standard.set(value, forKey: key)
     }
 
+    private func persistSecret(_ value: String, forKey key: String) {
+        guard !isLoading else { return }
+        SecretsStore.set(value, forKey: key)
+    }
+
     func load() {
         isLoading = true
         defer { isLoading = false }
@@ -179,7 +185,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         ollamaURL = defaults.string(forKey: "readAloud.ollamaURL") ?? "http://localhost:11434"
         ollamaModel = defaults.string(forKey: "readAloud.ollamaModel") ?? ""
         webSearchEnabled = defaults.bool(forKey: "readAloud.webSearchEnabled")
-        ollamaAPIKey = defaults.string(forKey: "readAloud.ollamaAPIKey") ?? ""
+        ollamaAPIKey = SecretsStore.get("readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"
         draftEditingEditor = defaults.string(forKey: "draftEditing.editor") ?? "auto"
     }

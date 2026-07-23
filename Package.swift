@@ -34,12 +34,6 @@ let package = Package(
             name: "TestLiveTranscription",
             targets: ["TestLiveTranscription"]),
         .executable(
-            name: "TestAudioCollector",
-            targets: ["TestAudioCollector"]),
-        .executable(
-            name: "TestStreamingTTS",
-            targets: ["TestStreamingTTS"]),
-        .executable(
             name: "TestSentenceSplitter",
             targets: ["TestSentenceSplitter"]),
         .executable(
@@ -65,8 +59,11 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ObjCExceptionCatcher",
+            path: "ObjCSupport"),
+        .target(
             name: "SharedModels",
-            dependencies: ["WhisperKit", "FluidAudio"],
+            dependencies: ["WhisperKit", "FluidAudio", "ObjCExceptionCatcher"],
             path: "SharedSources"),
         .executableTarget(
             name: "Murmur",
@@ -101,14 +98,6 @@ let package = Package(
             name: "TestLiveTranscription",
             dependencies: ["WhisperKit", "SharedModels"],
             path: "tests/test-live-transcription"),
-        .executableTarget(
-            name: "TestAudioCollector",
-            dependencies: ["SharedModels"],
-            path: "tests/test-audio-collector"),
-        .executableTarget(
-            name: "TestStreamingTTS",
-            dependencies: ["SharedModels"],
-            path: "tests/test-streaming-tts"),
         .executableTarget(
             name: "TestSentenceSplitter",
             dependencies: ["SharedModels"],

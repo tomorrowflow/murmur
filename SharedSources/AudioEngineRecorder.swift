@@ -20,14 +20,22 @@ public final class AudioEngineRecorder {
         public var label: String
         /// Rate the captured audio is resampled to before it reaches the buffer.
         public var targetSampleRate: Double
-        /// How many times the engine may be restarted after a Bluetooth codec switch
-        /// before the session is declared lost.
-        public var maxConfigChangeRetries: Int
+        /// How long to keep retrying the engine restart after a Bluetooth codec switch
+        /// before the session is declared lost. A single A2DP→HFP switch can take 1-2s to
+        /// settle, during which the input node reports a stale format and `installTap`
+        /// fails with "format mismatch"; we poll across this window until it settles.
+        public var codecSwitchRecoveryWindow: TimeInterval
+        /// Interval between restart attempts inside the recovery window.
+        public var codecSwitchRetryInterval: TimeInterval
 
-        public init(label: String, targetSampleRate: Double = 16000, maxConfigChangeRetries: Int = 3) {
+        public init(label: String,
+                    targetSampleRate: Double = 16000,
+                    codecSwitchRecoveryWindow: TimeInterval = 4.0,
+                    codecSwitchRetryInterval: TimeInterval = 0.15) {
             self.label = label
             self.targetSampleRate = targetSampleRate
-            self.maxConfigChangeRetries = maxConfigChangeRetries
+            self.codecSwitchRecoveryWindow = codecSwitchRecoveryWindow
+            self.codecSwitchRetryInterval = codecSwitchRetryInterval
         }
     }
 
@@ -62,7 +70,16 @@ public final class AudioEngineRecorder {
     private var audioEngine: AVAudioEngine?
     private var inputNode: AVAudioInputNode?
     private var configChangeObserver: NSObjectProtocol?
-    private var configChangeRetries = 0
+    /// True while a codec-switch recovery loop is polling. A single switch emits several
+    /// `.AVAudioEngineConfigurationChange` notifications; this keeps only one loop running so
+    /// they don't stack into overlapping restart chains.
+    private var isRecoveringFromConfigChange = false
+    /// Absolute deadline after which the current recovery loop gives up. Set when a recovery
+    /// begins, cleared when it finishes.
+    private var configRecoveryDeadline: DispatchTime?
+    /// Session the live engine belongs to. Recovery attempts carry this so a retry scheduled
+    /// on the old session can't disrupt an engine the user has since restarted.
+    private var engineSession = 0
 
     /// bufferQueue-confined.
     private var audioBuffer: [Float] = []
@@ -191,7 +208,9 @@ public final class AudioEngineRecorder {
         let input = engine.inputNode
         audioEngine = engine
         inputNode = input
-        configChangeRetries = 0
+        engineSession = session
+        isRecoveringFromConfigChange = false
+        configRecoveryDeadline = nil
         micReadyFired = false
 
         configureInputDevice(input)
@@ -319,55 +338,87 @@ public final class AudioEngineRecorder {
 
     /// macOS stops the engine when a Bluetooth mic switches codec (A2DP→HFP), often before
     /// a single buffer has arrived. Restart it so the recording actually begins.
+    ///
+    /// The switch is asynchronous and can take 1-2s to settle. While it is in flight the input
+    /// node reports a stale format, so reinstalling the tap fails with "format mismatch" and
+    /// `start()` may throw. We therefore poll — reinstalling the tap and restarting the engine
+    /// every `codecSwitchRetryInterval` — until it succeeds or `codecSwitchRecoveryWindow`
+    /// elapses, rather than giving up after a handful of immediate attempts.
     private func handleConfigurationChange() {
         guard isRecording else { return }
 
         // Onto the engine queue: on Bluetooth this notification is emitted from inside the
         // very `start()` that is still running there, so touching the engine here would race it.
         engineQueue.async { [weak self] in
-            guard let self = self, let engine = self.audioEngine else { return }
+            guard let self = self, self.audioEngine != nil else { return }
+            let session = self.engineSession
+            guard self.isCurrent(session) else { return }
+            // A single codec switch emits several notifications; keep just one recovery loop.
+            guard !self.isRecoveringFromConfigChange else { return }
+            self.isRecoveringFromConfigChange = true
+            self.configRecoveryDeadline = .now() + self.config.codecSwitchRecoveryWindow
+            print("🔁 \(self.config.label): engine config changed (codec switch?) — recovering (window \(self.config.codecSwitchRecoveryWindow)s)")
+            self.attemptEngineRecovery(session: session)
+        }
+    }
 
-            let fail: (String) -> Void = { [weak self] message in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    self.isRecording = false
-                    self.isStarting = false
-                    self.onEngineLost?(message)
-                }
+    /// One restart attempt in the codec-switch recovery loop. engineQueue-confined; reschedules
+    /// itself until the engine restarts cleanly or the recovery window expires.
+    private func attemptEngineRecovery(session: Int) {
+        // Bail if the session was stopped/replaced while this attempt was queued.
+        guard isRecording, isCurrent(session), let engine = audioEngine else {
+            isRecoveringFromConfigChange = false
+            configRecoveryDeadline = nil
+            return
+        }
+
+        let fail: (String) -> Void = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isRecording = false
+                self.isStarting = false
+                self.onEngineLost?(message)
             }
+        }
 
-            guard self.configChangeRetries < self.config.maxConfigChangeRetries else {
-                print("⚠️ \(self.config.label): engine restart budget exhausted after codec switch")
+        let windowExpired = configRecoveryDeadline.map { DispatchTime.now() >= $0 } ?? true
+
+        let retryOrGiveUp: (String) -> Void = { [weak self] reason in
+            guard let self = self else { return }
+            if windowExpired {
+                print("⚠️ \(self.config.label): codec switch never settled (\(reason)) — giving up")
+                self.isRecoveringFromConfigChange = false
+                self.configRecoveryDeadline = nil
+                self.removeConfigChangeObserver()
                 self.teardownEngine()
                 self.bufferQueue.sync { self.audioBuffer.removeAll() }
                 fail("Mic failed to start (Bluetooth audio device unstable). Try again or pick a different input device.")
                 return
             }
-            self.configChangeRetries += 1
-            print("🔁 \(self.config.label): engine config changed (codec switch?). Restart \(self.configChangeRetries)/\(self.config.maxConfigChangeRetries)")
-
-            self.inputNode?.removeTap(onBus: 0)
-            // Re-acquire the input node — its format may have changed with the codec.
-            let input = engine.inputNode
-            self.inputNode = input
-            guard self.installInputTap(on: input) else {
-                // Format hasn't settled after the codec switch yet. Retry shortly; the
-                // retry counter (already incremented above) bounds this so we can't spin
-                // forever, and eventually hits the budget-exhausted `fail(...)` path.
-                self.engineQueue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                    self?.handleConfigurationChange()
-                }
-                return
+            self.engineQueue.asyncAfter(deadline: .now() + self.config.codecSwitchRetryInterval) { [weak self] in
+                self?.attemptEngineRecovery(session: session)
             }
+        }
 
-            do {
-                engine.prepare()
-                try engine.start()
-            } catch {
-                print("⚠️ \(self.config.label): failed to restart engine after config change: \(error)")
-                self.removeConfigChangeObserver()
-                fail("Failed to restart audio engine: \(error.localizedDescription)")
-            }
+        inputNode?.removeTap(onBus: 0)
+        // Re-acquire the input node — its format may have changed with the codec.
+        let input = engine.inputNode
+        inputNode = input
+
+        guard installInputTap(on: input) else {
+            retryOrGiveUp("tap install")
+            return
+        }
+
+        do {
+            engine.prepare()
+            try engine.start()
+            isRecoveringFromConfigChange = false
+            configRecoveryDeadline = nil
+            print("🎤 \(config.label): engine recovered after codec switch")
+            DispatchQueue.main.async { [weak self] in self?.isStarting = false }
+        } catch {
+            retryOrGiveUp("start: \(error.localizedDescription)")
         }
     }
 }

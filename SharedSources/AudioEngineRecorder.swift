@@ -247,8 +247,9 @@ public final class AudioEngineRecorder {
         if let deviceName = AudioDeviceManager.shared.applyInputDeviceOverrideIfNeeded() {
             print("✅ \(config.label): set input to \(deviceName)")
         }
-        let format = input.outputFormat(forBus: 0)
-        print("   \(config.label) format: \(format.sampleRate)Hz, \(format.channelCount) channels")
+        let outFormat = input.outputFormat(forBus: 0)
+        let hwFormat = input.inputFormat(forBus: 0)
+        print("   \(config.label) format: out \(outFormat.sampleRate)Hz/\(outFormat.channelCount)ch, hw \(hwFormat.sampleRate)Hz/\(hwFormat.channelCount)ch")
     }
 
     /// Installs the capture tap. Returns `false` (without a usable tap installed) when the
@@ -262,9 +263,18 @@ public final class AudioEngineRecorder {
     ///      call is funnelled through `ObjCTryCatch` and converted into a recoverable error.
     @discardableResult
     private func installInputTap(on input: AVAudioInputNode) -> Bool {
-        let recordingFormat = input.outputFormat(forBus: 0)
+        // Match the tap to the node's *hardware input* format, not its output format.
+        // installTap asserts `format.sampleRate == inputHWFormat.sampleRate`; on a Bluetooth
+        // mic in HFP mode the hardware runs at e.g. 16 kHz while `outputFormat` still reports
+        // 48 kHz, so passing outputFormat throws "format mismatch" until the rates happen to
+        // converge (often never, within any reasonable window). `inputFormat` reflects the real
+        // hardware rate, so the tap installs immediately at whatever the codec is currently
+        // using. Fall back to outputFormat if the hardware format isn't reported.
+        let hwFormat = input.inputFormat(forBus: 0)
+        let outFormat = input.outputFormat(forBus: 0)
+        let recordingFormat = (hwFormat.sampleRate > 0 && hwFormat.channelCount > 0) ? hwFormat : outFormat
         guard recordingFormat.sampleRate > 0, recordingFormat.channelCount > 0 else {
-            print("⚠️ \(config.label): input format not ready (\(recordingFormat.sampleRate)Hz, \(recordingFormat.channelCount)ch) — deferring tap install")
+            print("⚠️ \(config.label): input format not ready (hw \(hwFormat.sampleRate)Hz/\(hwFormat.channelCount)ch, out \(outFormat.sampleRate)Hz/\(outFormat.channelCount)ch) — deferring tap install")
             return false
         }
         let resampler = StreamingResampler(targetSampleRate: config.targetSampleRate)

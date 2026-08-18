@@ -141,6 +141,30 @@ final class MediaRemoteController {
         "com.murmur.app",
     ]
 
+    /// Prefix matches for app families that spawn per-feature helper
+    /// processes with unpredictable bundle-id suffixes (Teams runs call
+    /// audio through com.microsoft.teams2.modulehost, browsers version
+    /// their helpers, Zoom ships aide processes). Exact-match alone turns
+    /// the denylist into whack-a-mole: an unlisted helper reads as a "real
+    /// media player", didPause gets set, and the session-end Play launches
+    /// Apple Music when nothing owns Now Playing.
+    private static let streamHoardingBundlePrefixes: [String] = [
+        "com.microsoft.teams",
+        "com.apple.WebKit",
+        "com.google.Chrome",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "us.zoom.",
+        "com.tinyspeck.slackmacgap",
+        "com.cisco.webex",
+        "ai.krisp.",
+    ]
+
+    private static func isStreamHoarder(_ bundle: String) -> Bool {
+        if streamHoardingBundleIDs.contains(bundle) { return true }
+        return streamHoardingBundlePrefixes.contains { bundle.hasPrefix($0) }
+    }
+
     /// True iff at least one audio process *other than* a known stream-
     /// hoarder (Safari/Chrome/etc.) currently has IsRunningOutput=true.
     /// In other words: a real media player like Spotify or Apple Music is
@@ -176,7 +200,7 @@ final class MediaRemoteController {
         for objID in ids {
             guard let running = boolProp(objID, isRunningOutputSelector), running else { continue }
             let bundle = stringProp(objID, bundleIDSelector) ?? ""
-            if streamHoardingBundleIDs.contains(bundle) { continue }
+            if Self.isStreamHoarder(bundle) { continue }
             info("active media player detected: \(bundle.isEmpty ? "<no bundle>" : bundle)")
             return true
         }

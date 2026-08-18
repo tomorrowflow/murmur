@@ -50,7 +50,85 @@ extension AppDelegate {
         return image
     }
 
+    /// A frame of the "processing" sweep: the same five bars, but instead of
+    /// tracking the live audio level, a single bump of height travels from
+    /// left to right and loops — visually "the waveform is being worked on".
+    /// `phase` runs 0→1 per sweep.
+    func generateProcessingImage(phase: CGFloat) -> NSImage {
+        let width: CGFloat = 18
+        let height: CGFloat = 18
+        let barCount = 5
+        let barWidth: CGFloat = 2.0
+        let barSpacing: CGFloat = 1.0
+        let cornerRadius: CGFloat = 1.0
+        let minBarHeight: CGFloat = 4.0
+        let maxBarHeight: CGFloat = 13.0
+
+        // Bump center sweeps from just left of the first bar to just right of
+        // the last, so the pulse visibly enters and leaves the icon.
+        let center = -1.5 + phase * (CGFloat(barCount) + 2.0)
+        let sigma: CGFloat = 0.85
+
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.lockFocus()
+
+        let totalBarsWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
+        let startX = (width - totalBarsWidth) / 2
+
+        for i in 0..<barCount {
+            let d = CGFloat(i) - center
+            let bump = exp(-(d * d) / (2 * sigma * sigma))
+            let barHeight = minBarHeight + bump * (maxBarHeight - minBarHeight)
+            let x = startX + CGFloat(i) * (barWidth + barSpacing)
+            let y = (height - barHeight) / 2
+            let rect = NSRect(x: x, y: y, width: barWidth, height: barHeight)
+            let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+            NSColor.black.setFill()
+            path.fill()
+        }
+
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    /// Show the processing sweep. No-op while the live level meter is running —
+    /// the meter always outranks the sweep, and whoever stops the meter decides
+    /// whether the sweep should resume.
+    func startProcessingAnimation() {
+        if waveformAnimationTimer != nil { return }
+        if processingAnimationTimer != nil { return }
+
+        processingAnimationPhase = 0
+        if let button = statusItem.button {
+            button.title = ""
+            button.image = generateProcessingImage(phase: 0)
+        }
+        processingAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.processingAnimationPhase += 0.03
+            if self.processingAnimationPhase >= 1 { self.processingAnimationPhase -= 1 }
+            if let button = self.statusItem.button {
+                button.title = ""
+                button.image = self.generateProcessingImage(phase: self.processingAnimationPhase)
+            }
+        }
+    }
+
+    func stopProcessingAnimation() {
+        guard processingAnimationTimer != nil else { return }
+        processingAnimationTimer?.invalidate()
+        processingAnimationTimer = nil
+        // Only reset the icon if the level meter isn't drawing it.
+        if waveformAnimationTimer == nil, let button = statusItem.button {
+            button.image = defaultWaveformImage()
+            button.title = ""
+        }
+    }
+
     func startWaveformAnimation() {
+        // The live level meter takes over from the processing sweep.
+        stopProcessingAnimation()
         // Don't start if already animating or screen recording is active
         if waveformAnimationTimer != nil { return }
 
@@ -74,6 +152,9 @@ extension AppDelegate {
         waveformAnimationTimer = nil
         AudioLevelMonitor.shared.reset()
 
+        // If a recap is still being prepared, the processing sweep owns the
+        // icon — its timer keeps redrawing, so don't reset to the idle image.
+        guard processingAnimationTimer == nil else { return }
         if let button = statusItem.button {
             button.image = defaultWaveformImage()
             button.title = ""

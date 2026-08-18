@@ -52,7 +52,10 @@ done
 PAYLOAD=$(jq -n --arg text "$MSG" --arg pids "$ancestors" \
     '{text: $text, autoRecordAfter: true, sourcePids: $pids}')
 
-curl -sS -f --connect-timeout 2 -m 120 \
+# Murmur acknowledges as soon as it has received the text (202); TTS
+# preprocessing and playback happen asynchronously on its side, so the
+# hook doesn't block Claude Code while the recap is being generated.
+curl -sS -f --connect-timeout 2 -m 10 \
     -X POST http://127.0.0.1:7878/api/v1/read-aloud \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD" >/dev/null 2>&1 || true

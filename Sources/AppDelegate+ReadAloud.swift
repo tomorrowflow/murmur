@@ -293,6 +293,7 @@ extension AppDelegate {
             readAloudManager = nil
             readAloudOverlay = nil
             readAloudInterruptActive = false
+            stopProcessingAnimation()
             stopWaveformAnimation()
             let targetApp = recapTargetApp
             let targetWindow = recapTargetWindow
@@ -309,8 +310,15 @@ extension AppDelegate {
         readAloudOverlay?.updateState(state)
         switch state {
         case .reading, .speakingAnswer:
-            startWaveformAnimation()
+            // If the recap processing sweep is running, keep it — .reading
+            // fires before any audio is synthesized, and the level meter
+            // would just show flat bars. The meter takes over on the first
+            // audible sentence (readAloudDidActivateSentence).
+            if processingAnimationTimer == nil {
+                startWaveformAnimation()
+            }
         case .complete, .error, .idle:
+            stopProcessingAnimation()
             stopWaveformAnimation()
         default:
             break
@@ -322,6 +330,9 @@ extension AppDelegate {
     }
 
     func readAloudDidActivateSentence(index: Int) {
+        // Audio is audible from here — switch the status bar from the
+        // processing sweep to the live level meter. Idempotent per sentence.
+        startWaveformAnimation()
         readAloudOverlay?.activateSentence(index: index)
     }
 

@@ -107,6 +107,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     private var engineCancellable: AnyCancellable?
     private var parakeetVersionCancellable: AnyCancellable?
     var waveformAnimationTimer: Timer?
+    // Status-bar "processing" sweep: shown while a recap is being prepared
+    // (LLM preprocess + TTS synthesis) before any audio is audible. The live
+    // level meter (waveformAnimationTimer) always takes precedence.
+    var processingAnimationTimer: Timer?
+    var processingAnimationPhase: CGFloat = 0
+    // Recaps whose preprocessing Task is still in flight (not yet enqueued).
+    // Keeps the processing sweep alive across drainRecapQueueIfIdle calls
+    // that find the queue empty while a rewrite is still running.
+    var recapPreprocessingCount = 0
     var audioManager: AudioTranscriptionManager!
     var audioOverlay: AudioTranscriptionOverlayWindow?
     var isCurrentlyPlaying = false

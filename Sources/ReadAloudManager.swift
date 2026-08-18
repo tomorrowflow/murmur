@@ -230,11 +230,32 @@ class ReadAloudManager {
             NSLog("ReadAloud: BT prime engine failed: \(error.localizedDescription)")
             return
         }
-        await withCheckedContinuation { continuation in
-            player.scheduleBuffer(buffer, at: nil, options: []) {
+        // The buffer-completion callback is the normal resume path, but it
+        // never fires if the Bluetooth device stalls or vanishes mid-codec-
+        // switch — which would suspend this task forever and wedge the whole
+        // recap queue behind a session that never plays. Race it against a
+        // hard timeout; resuming exactly once is guarded by the lock.
+        let resumed = NSLock()
+        var didResume = false
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let finish: (String) -> Void = { reason in
+                resumed.lock()
+                let first = !didResume
+                didResume = true
+                resumed.unlock()
+                guard first else { return }
+                if reason != "completed" {
+                    NSLog("ReadAloud: BT prime \(reason) — continuing without full prime")
+                }
                 continuation.resume()
             }
+            player.scheduleBuffer(buffer, at: nil, options: []) {
+                finish("completed")
+            }
             player.play()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) {
+                finish("timed out")
+            }
         }
         engine.stop()
         NSLog("ReadAloud: BT output primed")

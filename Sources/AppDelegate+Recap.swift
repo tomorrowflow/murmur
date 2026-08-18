@@ -41,6 +41,12 @@ extension AppDelegate {
             startReadAloudWithText(head.text, skipTranslation: true, sourceAppOverride: head.targetApp)
             return
         }
+        // Queue exhausted without starting playback (empty, or every entry was
+        // dropped for a terminated app). If no recap preprocessing is still in
+        // flight, nothing will play — retire the processing sweep.
+        if recapPreprocessingCount == 0 {
+            stopProcessingAnimation()
+        }
     }
 
     // MARK: - Terminal window resolution

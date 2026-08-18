@@ -325,34 +325,52 @@ extension AppDelegate {
                 return (app, window)
             }
 
-            let text = await Self.preprocessRecap(rawText, mode: mode)
+            // Preprocessing (optional LLM rewrite for speech) can take many
+            // seconds — run it detached so the Stop hook gets its response as
+            // soon as the text is received. Terminal binding was already
+            // captured above, synchronously, while the request-time process
+            // state was still valid.
+            Task { [weak self] in
+                // Immediate feedback: the status-bar icon switches to the
+                // travelling-pulse sweep while the recap is prepared. Ends when
+                // the first sentence becomes audible (level meter takes over)
+                // or the read-aloud session terminates.
+                await MainActor.run {
+                    guard let self = self else { return }
+                    self.recapPreprocessingCount += 1
+                    self.startProcessingAnimation()
+                }
 
-            // Persist the raw assistant message to history. If the LLM rewrote
-            // it into a shorter spoken summary, keep that too so the user can
-            // copy either version from the history window.
-            let storedSpoken = (text != rawText) ? text : nil
+                let text = await Self.preprocessRecap(rawText, mode: mode)
 
-            await MainActor.run {
-                // TranscriptionHistory is main-thread-only; every other writer
-                // already runs on main.
-                TranscriptionHistory.shared.addRecapEntry(rawText, spokenText: storedSpoken)
-                guard let self = self else { return }
-                // Enqueue rather than clobber: FIFO across parallel Claude
-                // terminals. drainRecapQueueIfIdle pops and starts the next
-                // entry whenever the audio device becomes free.
-                let entry = QueuedRecap(
-                    id: UUID(),
-                    text: text,
-                    autoRecordAfter: autoRecord,
-                    targetApp: capturedApp,
-                    targetWindow: capturedWindow
-                )
-                self.recapQueue.append(entry)
-                NSLog("Recap: enqueued (queue depth: \(self.recapQueue.count))")
-                self.drainRecapQueueIfIdle()
+                // Persist the raw assistant message to history. If the LLM rewrote
+                // it into a shorter spoken summary, keep that too so the user can
+                // copy either version from the history window.
+                let storedSpoken = (text != rawText) ? text : nil
+
+                await MainActor.run {
+                    // TranscriptionHistory is main-thread-only; every other writer
+                    // already runs on main.
+                    TranscriptionHistory.shared.addRecapEntry(rawText, spokenText: storedSpoken)
+                    guard let self = self else { return }
+                    self.recapPreprocessingCount = max(0, self.recapPreprocessingCount - 1)
+                    // Enqueue rather than clobber: FIFO across parallel Claude
+                    // terminals. drainRecapQueueIfIdle pops and starts the next
+                    // entry whenever the audio device becomes free.
+                    let entry = QueuedRecap(
+                        id: UUID(),
+                        text: text,
+                        autoRecordAfter: autoRecord,
+                        targetApp: capturedApp,
+                        targetWindow: capturedWindow
+                    )
+                    self.recapQueue.append(entry)
+                    NSLog("Recap: enqueued (queue depth: \(self.recapQueue.count))")
+                    self.drainRecapQueueIfIdle()
+                }
             }
 
-            return (200, MurmurHTTPServer.jsonResponse(["ok": true, "autoRecordAfter": autoRecord, "queued": true]))
+            return (202, MurmurHTTPServer.jsonResponse(["ok": true, "autoRecordAfter": autoRecord, "accepted": true]))
         }
 
         server.post("/api/v1/draft/cursor-sync") { [weak self] body in
@@ -455,6 +473,8 @@ extension AppDelegate {
                 self.readAloudManager = nil
                 self.readAloudOverlay = nil
                 self.readAloudInterruptActive = false
+                self.recapPreprocessingCount = 0
+                self.stopProcessingAnimation()
                 self.stopWaveformAnimation()
 
                 if self.audioManager.isRecording {

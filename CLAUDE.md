@@ -15,6 +15,7 @@ cp -R build/Murmur.app /Applications/
 # Run a specific test/tool executable
 swift run TestSentenceSplitter
 swift run TestStreamingTTS
+swift run TestLLMClient   # optional: [baseURL] [model], hits an OpenAI-compatible server
 swift run ListModels
 
 # Run unit tests (SharedModels: HTTP parser, resampler, hallucination filter)
@@ -47,7 +48,7 @@ Unit tests live in `tests/SharedModelsTests/` (XCTest, target `SharedModelsTests
 
 - **Manager + OverlayWindow pairs**: Each feature has a manager (business logic, WebSocket, audio) and a companion overlay window (SwiftUI-in-NSWindow floating UI). Examples: `OpenClawManager` + `OpenClawOverlayWindow`, `PodcastManager` + `PodcastOverlayWindow`, `DraftEditingManager` + `DraftEditingOverlayWindow`.
 - **Push-to-talk state machine**: Double-tap detection for Option keys, implemented in `main.swift`. Right Option → STT, Left Option → OpenClaw/Draft Edit/Read Aloud interrupt (priority: podcast > draft edit > read-aloud > OpenClaw). Two modes: **hold mode** (double-tap and keep holding, release to stop) and **toggle mode** (double-tap and release quickly, tap again to stop). The 0.3s hold threshold distinguishes the two. STT PTT captures the frontmost window (via AXUIElement) at recording start and pastes into that window even if the user switches away during transcription/LLM processing.
-- **Prompt refinement**: Optional Ollama-based cleanup of transcribed text (removes filler words, fixes punctuation) before pasting. Only runs for recordings longer than 5 seconds. Uses the LLM configured in Read Aloud settings. Toggle in Shortcuts settings.
+- **Prompt refinement**: Optional LLM-based cleanup of transcribed text (removes filler words, fixes punctuation) before pasting. Only runs for recordings longer than 5 seconds. Uses the LLM configured in Read Aloud settings. Toggle in Shortcuts settings.
 - **Engine routing**: `AudioTranscriptionManager` routes between Parakeet (FluidAudio), WhisperKit, and Gemini (cloud fallback) based on user settings and transcription results.
 - **Local HTTP server**: `MurmurHTTPServer` runs on `127.0.0.1:7878` using `Network.framework` (`NWListener`). Provides editor-agnostic REST API for draft editing session control. Started in `applicationDidFinishLaunching`.
 - **Environment**: `.env` parsed at startup for `GEMINI_API_KEY` and other env secrets; looked up in cwd (dev), then `Bundle.main.resourceURL`, then `~/Library/Application Support/Murmur/.env` (bundled app).
@@ -109,7 +110,7 @@ Read markdown documents paragraph-by-paragraph with structured TTS, then edit pa
 ### Key behaviors
 
 - **Cmd+Opt+D** toggles draft editing. Reads cursor position from TextMate via Accessibility API and starts from that paragraph.
-- **Double-tap Left Option** during a session starts voice edit: STT records instruction → Ollama rewrites paragraph → file updated atomically → TextMate reloads
+- **Double-tap Left Option** during a session starts voice edit: STT records instruction → LLM rewrites paragraph → file updated atomically → TextMate reloads
 - **Escape key** stops the session and cleans up highlight markers
 - Highlights clear from the file before edits are applied (prevents merge conflicts with TextMate's change detection)
 - Paragraph types skipped during reading: front matter, HTML comments (`<!-- -->`), horizontal rules (`---`)

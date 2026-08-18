@@ -30,13 +30,13 @@ struct ClaudeSettingsView: View {
                         Picker("", selection: $viewModel.recapPreprocessMode) {
                             Text("None (raw text)").tag("none")
                             Text("Regex cleanup").tag("regex")
-                            Text("Ollama (LLM summary)").tag("ollama")
+                            Text("LLM summary").tag("ollama")
                         }
                         .labelsHidden()
                         .disabled(!viewModel.recapEnabled)
                     }
 
-                    Text("Cleans up the assistant's final message before it's spoken. Regex strips code blocks, paths, markdown, and PIDs. Ollama rewrites it as a spoken summary using the Ollama model configured under Read Aloud.")
+                    Text("Cleans up the assistant's final message before it's spoken. Regex strips code blocks, paths, markdown, and PIDs. LLM summary rewrites it for speech using the model configured under Read Aloud.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }

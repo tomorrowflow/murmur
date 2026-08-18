@@ -434,25 +434,28 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         }
 
         do {
-            let result = try await whisperKit.transcribe(
-                audioArray: samples,
-                decodeOptions: DecodingOptions(
-                    verbose: false,
-                    task: .transcribe,
-                    language: "en",
-                    temperature: 0.0,
-                    temperatureFallbackCount: 3,
-                    sampleLength: 224,
-                    topK: 5,
-                    usePrefillPrompt: true,
-                    usePrefillCache: true,
-                    skipSpecialTokens: true,
-                    withoutTimestamps: true,
-                    clipTimestamps: [],
-                    suppressBlank: true,
-                    supressTokens: nil
+            // Serialize shared-model access with background call transcription.
+            let result = try await TranscriptionEngineGate.shared.run {
+                try await whisperKit.transcribe(
+                    audioArray: samples,
+                    decodeOptions: DecodingOptions(
+                        verbose: false,
+                        task: .transcribe,
+                        language: "en",
+                        temperature: 0.0,
+                        temperatureFallbackCount: 3,
+                        sampleLength: 224,
+                        topK: 5,
+                        usePrefillPrompt: true,
+                        usePrefillCache: true,
+                        skipSpecialTokens: true,
+                        withoutTimestamps: true,
+                        clipTimestamps: [],
+                        suppressBlank: true,
+                        supressTokens: nil
+                    )
                 )
-            )
+            }
             var text = result.first?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !text.isEmpty {
                 text = TextReplacements.shared.processText(text)
@@ -479,7 +482,10 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         }
 
         do {
-            var text = try await transcriber.transcribe(audioSamples: samples)
+            // Serialize shared-model access with background call transcription.
+            var text = try await TranscriptionEngineGate.shared.run {
+                try await transcriber.transcribe(audioSamples: samples)
+            }
             text = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
                 text = TextReplacements.shared.processText(text)

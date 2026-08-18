@@ -13,6 +13,7 @@ struct ShortcutsSettingsView: View {
     @AppStorage("ptt.cursorAnchoredOverlay") private var cursorAnchoredOverlay = false
     @AppStorage("ptt.autoStopAfterSilence") private var autoStopAfterSilence = false
     @AppStorage("ptt.silenceTimeoutSeconds") private var silenceTimeoutSeconds: Double = 5.0
+    @AppStorage("callCapture.autoTranscribe") private var callCaptureAutoTranscribe = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -25,6 +26,7 @@ struct ShortcutsSettingsView: View {
                     shortcutRow("OpenClaw Interface", for: .openclawRecording)
                     shortcutRow("Podcast Tool", for: .podcastToggle)
                     shortcutRow("Draft Editing", for: .draftEditing)
+                    shortcutRow("Capture Call", for: .captureCall)
                 }
 
                 Section("Push-to-Talk (Double-Tap & Hold)") {
@@ -85,7 +87,7 @@ struct ShortcutsSettingsView: View {
                         HStack {
                             Text("Prompt Refinement")
                                 .frame(width: 220, alignment: .leading)
-                            Text("Clean up speech via Ollama before pasting — only for recordings longer than 5s (uses LLM from Read Aloud settings)")
+                            Text("Clean up speech via the LLM before pasting — only for recordings longer than 5s (uses LLM from Read Aloud settings)")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
                         }
@@ -137,6 +139,18 @@ struct ShortcutsSettingsView: View {
                         .disabled(!sttPTTEnabled)
                     }
                 }
+
+                Section("Call Capture") {
+                    Toggle(isOn: $callCaptureAutoTranscribe) {
+                        HStack {
+                            Text("Transcribe on stop")
+                                .frame(width: 220, alignment: .leading)
+                            Text("Automatically transcribe captured calls when recording stops (hotkey / menu)")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
             .formStyle(.grouped)
 
@@ -169,6 +183,7 @@ struct ShortcutsSettingsView: View {
         KeyboardShortcuts.setShortcut(.init(.o, modifiers: [.command, .option]), for: .openclawRecording)
         KeyboardShortcuts.setShortcut(.init(.p, modifiers: [.command, .option]), for: .podcastToggle)
         KeyboardShortcuts.setShortcut(.init(.d, modifiers: [.command, .option]), for: .draftEditing)
+        KeyboardShortcuts.setShortcut(.init(.h, modifiers: [.command, .option]), for: .captureCall)
         openClawPTTEnabled = true
         sttPTTEnabled = true
         sttPTTSendReturn = true

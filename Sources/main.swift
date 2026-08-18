@@ -72,6 +72,7 @@ extension KeyboardShortcuts.Name {
     static let openclawRecording = Self("openclawRecording")
     static let podcastToggle = Self("podcastToggle")
     static let draftEditing = Self("draftEditing")
+    static let captureCall = Self("captureCall")
 }
 
 /// A single physical modifier-key event. The global and local event monitors can each deliver
@@ -95,7 +96,7 @@ enum OptionDoubleTapState {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate, DraftEditingManagerDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDelegate, OpenClawRecordingManagerDelegate, PodcastManagerDelegate, ReadAloudManagerDelegate, DraftEditingManagerDelegate, CallCaptureManagerDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var settingsWindow: SettingsWindowController?
     private var unifiedWindow: UnifiedManagerWindow?
@@ -203,6 +204,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     var draftEditInterruptActive = false
     var cursorAnchoredOverlay: CursorAnchoredOverlayWindow?
     var httpServer: MurmurHTTPServer?
+    var callCaptureManager: CallCaptureManager?
+    var callCaptureOverlay: CallCaptureOverlayWindow?
+    var captureSubmenu: NSMenu?
+    // Whether the current/last capture session should transcribe on stop.
+    // Set at start time: HTTP uses the request's `transcribe`; hotkey/menu use
+    // the `callCapture.autoTranscribe` default.
+    var captureTranscribeOnStop: Bool = true
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
@@ -256,6 +264,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         menu.addItem(openClawHintItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "View History...", action: #selector(showTranscriptionHistory), keyEquivalent: "h"))
+
+        // Capture Call submenu — repopulated on open via NSMenuDelegate.
+        let captureItem = NSMenuItem(title: "Capture Call", action: nil, keyEquivalent: "")
+        let captureMenu = NSMenu(title: "Capture Call")
+        captureMenu.delegate = self
+        captureItem.submenu = captureMenu
+        captureSubmenu = captureMenu
+        menu.addItem(captureItem)
+
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -272,7 +289,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             (.v, .pasteLastTranscription),
             (.o, .openclawRecording),
             (.p, .podcastToggle),
-            (.d, .draftEditing)
+            (.d, .draftEditing),
+            (.h, .captureCall)
         ]
         for (key, name) in defaults {
             if KeyboardShortcuts.getShortcut(for: name) == nil {
@@ -298,7 +316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             }
             self.audioManager.toggleRecording()
         }
-        
+
         KeyboardShortcuts.onKeyUp(for: .showHistory) { [weak self] in
             self?.showTranscriptionHistory()
         }
@@ -352,6 +370,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             self?.toggleDraftEditing()
         }
 
+        KeyboardShortcuts.onKeyUp(for: .captureCall) { [weak self] in
+            NSLog("CallCapture: Cmd+Opt+H pressed")
+            self?.toggleCallCapture()
+        }
+
         // Log current podcast shortcut binding
         if let shortcut = KeyboardShortcuts.getShortcut(for: .podcastToggle) {
             print("Podcast shortcut registered: \(shortcut)")
@@ -366,6 +389,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
         // Set up audio manager
         audioManager = AudioTranscriptionManager()
         audioManager.delegate = self
+
+        // Set up call capture (process tap + mic)
+        let capture = CallCaptureManager()
+        capture.delegate = self
+        callCaptureManager = capture
+        callCaptureOverlay = CallCaptureOverlayWindow(manager: capture)
+        callCaptureOverlay?.onStop = { [weak self] in
+            self?.stopCallCapture()
+        }
 
         // Initialize OpenClaw if configured (URL in UserDefaults, secrets in
         // SecretsStore — Keychain for bundled builds)
@@ -498,7 +530,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     
     
 
-    lazy var promptRefinementClient = OllamaClient()
+    lazy var promptRefinementClient = LLMClient()
 
 
 

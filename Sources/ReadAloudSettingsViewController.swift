@@ -8,14 +8,26 @@ struct ReadAloudSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
-                Section("Ollama") {
+                Section("LLM Server (OpenAI-compatible)") {
                     HStack(spacing: 8) {
-                        Text("Ollama URL")
+                        Text("Server URL")
                             .frame(width: 120, alignment: .leading)
                         TextField("", text: $viewModel.ollamaURL, prompt: Text("http://localhost:11434"))
                             .textFieldStyle(.roundedBorder)
                     }
                     .labelsHidden()
+
+                    HStack(spacing: 8) {
+                        Text("API Key")
+                            .frame(width: 120, alignment: .leading)
+                        SecureField("", text: $viewModel.llmServerAPIKey, prompt: Text("Optional — for authenticated servers"))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    .labelsHidden()
+
+                    Text("Sent as a Bearer token to the LLM server. Leave empty for local servers like Ollama. Separate from the Ollama web-search key below.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
 
                     HStack(spacing: 8) {
                         Text("Model")
@@ -39,7 +51,7 @@ struct ReadAloudSettingsView: View {
                                 .font(.system(size: 12))
                         }
                         .buttonStyle(.plain)
-                        .help("Refresh model list from Ollama")
+                        .help("Refresh model list from the LLM server")
                         .disabled(viewModel.isLoadingModels)
                         if viewModel.isLoadingModels {
                             ProgressView()
@@ -160,6 +172,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
 
     @Published var ollamaURL: String = "" { didSet { persist(ollamaURL, forKey: "readAloud.ollamaURL") } }
     @Published var ollamaModel: String = "" { didSet { persist(ollamaModel, forKey: "readAloud.ollamaModel") } }
+    @Published var llmServerAPIKey: String = "" { didSet { persist(llmServerAPIKey, forKey: "readAloud.llmServerAPIKey") } }
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, forKey: "readAloud.webSearchEnabled") } }
     @Published var ollamaAPIKey: String = "" { didSet { persistSecret(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
     @Published var resumeBehavior: String = "ask" { didSet { persist(resumeBehavior, forKey: "readAloud.resumeBehavior") } }
@@ -184,6 +197,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         ollamaURL = defaults.string(forKey: "readAloud.ollamaURL") ?? "http://localhost:11434"
         ollamaModel = defaults.string(forKey: "readAloud.ollamaModel") ?? ""
+        llmServerAPIKey = defaults.string(forKey: "readAloud.llmServerAPIKey") ?? ""
         webSearchEnabled = defaults.bool(forKey: "readAloud.webSearchEnabled")
         ollamaAPIKey = SecretsStore.get("readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"
@@ -203,7 +217,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
         isLoadingModels = true
         let url = ollamaURL
         Task {
-            let models = await OllamaClient.listModels(baseURL: url)
+            let models = await LLMClient.listModels(baseURL: url)
             await MainActor.run {
                 self.availableModels = models
                 self.isLoadingModels = false

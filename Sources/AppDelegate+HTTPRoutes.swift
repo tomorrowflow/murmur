@@ -20,6 +20,148 @@ extension AppDelegate {
             return (200, MurmurHTTPServer.jsonResponse(["ok": true, "version": "1.0"]))
         }
 
+        // MARK: Call capture (Phase B1)
+
+        server.post("/api/v1/capture/start") { [weak self] body in
+            let json = MurmurHTTPServer.parseJSON(body) ?? [:]
+            let appArg = (json["app"] as? String) ?? "system"
+            let includeMic = json["mic"] as? Bool ?? true
+            // Transcribe on stop when requested (defaults to the autoTranscribe
+            // setting). Workflows remain not-implemented until Phase B3.
+            let wantsTranscribe = json["transcribe"] as? Bool
+            let wantsWorkflows = json["workflows"] != nil
+
+            let result: (Int, Data) = await MainActor.run {
+                guard let self = self, let manager = self.callCaptureManager else {
+                    return (500, MurmurHTTPServer.jsonResponse(["error": "Capture manager unavailable"]))
+                }
+                do {
+                    let info = try manager.start(app: appArg, includeMic: includeMic)
+                    self.captureTranscribeOnStop = wantsTranscribe ?? self.callCaptureAutoTranscribe
+                    self.callCaptureOverlay?.show()
+                    var payload: [String: Any] = [
+                        "sessionId": info.id,
+                        "app": info.app,
+                        "directory": info.directory.path,
+                        "mic": info.micFile != nil,
+                        "transcribe": self.captureTranscribeOnStop
+                    ]
+                    if wantsWorkflows { payload["workflows"] = "not-implemented" }
+                    return (200, MurmurHTTPServer.jsonResponse(payload))
+                } catch let error as CallCaptureError {
+                    // No alert from the HTTP path — a modal would block the main
+                    // thread and hang the API caller. Guidance goes in the body.
+                    if case .permissionDenied = error {
+                        return (409, MurmurHTTPServer.jsonResponse([
+                            "error": error.localizedDescription,
+                            "guidance": "Enable Murmur under System Settings > Privacy & Security > Screen & System Audio Recording, then retry."
+                        ]))
+                    }
+                    return (409, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
+                } catch {
+                    return (500, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
+                }
+            }
+            return result
+        }
+
+        server.post("/api/v1/capture/stop") { [weak self] _ in
+            let result: (Int, Data) = await MainActor.run {
+                guard let self = self, let manager = self.callCaptureManager else {
+                    return (500, MurmurHTTPServer.jsonResponse(["error": "Capture manager unavailable"]))
+                }
+                // stop() fires callCaptureDidFinish → overlay + transcription.
+                guard let info = manager.stop() else {
+                    return (409, MurmurHTTPServer.jsonResponse(["error": "No capture in progress"]))
+                }
+                var files: [String: Any] = [:]
+                if let app = info.appFile { files["app"] = app.path }
+                if let mic = info.micFile { files["mic"] = mic.path }
+                return (200, MurmurHTTPServer.jsonResponse([
+                    "sessionId": info.id,
+                    "directory": info.directory.path,
+                    "files": files,
+                    "transcribe": self.captureTranscribeOnStop
+                ]))
+            }
+            return result
+        }
+
+        // MARK: Transcription pipeline (Phase B2)
+
+        server.post("/api/v1/transcribe") { body in
+            let json = MurmurHTTPServer.parseJSON(body) ?? [:]
+            var paths: [URL] = []
+            if let files = json["files"] as? [String] {
+                paths = files.map { URL(fileURLWithPath: $0) }
+            } else if let filePath = json["filePath"] as? String {
+                paths = [URL(fileURLWithPath: filePath)]
+            }
+            let wantsWorkflows = json["workflows"] != nil
+
+            guard !paths.isEmpty else {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "Provide `filePath` or `files`"]))
+            }
+            for p in paths where !FileManager.default.isReadableFile(atPath: p.path) {
+                return (400, MurmurHTTPServer.jsonResponse(["error": "File not readable: \(p.path)"]))
+            }
+
+            let result: (Int, Data) = await MainActor.run {
+                do {
+                    let session = try CallTranscriptionRunner.shared.transcribeFiles(paths)
+                    var payload: [String: Any] = [
+                        "sessionId": session.id,
+                        "directory": session.dir.path
+                    ]
+                    if wantsWorkflows { payload["workflows"] = "not-implemented" }
+                    return (202, MurmurHTTPServer.jsonResponse(payload))
+                } catch {
+                    return (400, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
+                }
+            }
+            return result
+        }
+
+        server.get("/api/v1/sessions") { _ in
+            let list: [[String: Any]] = await MainActor.run {
+                CallTranscriptionRunner.shared.listSessions()
+            }
+            return (200, MurmurHTTPServer.jsonResponse(["sessions": list]))
+        }
+
+        server.getPrefix("/api/v1/sessions/") { path, _ in
+            let id = String(path.dropFirst("/api/v1/sessions/".count))
+                .removingPercentEncoding ?? ""
+            // Reject empty ids and path traversal (the id is used as a directory name).
+            guard !id.isEmpty, !id.contains("/"), !id.contains("..") else {
+                return (404, MurmurHTTPServer.jsonResponse(["error": "Invalid session id"]))
+            }
+            let data: Data? = await MainActor.run {
+                CallTranscriptionRunner.shared.metadataJSON(forSessionId: id)
+            }
+            if let data {
+                return (200, data)
+            }
+            return (404, MurmurHTTPServer.jsonResponse(["error": "Unknown session \(id)"]))
+        }
+
+        server.get("/api/v1/capture/status") { [weak self] _ in
+            let result: (Int, Data) = await MainActor.run {
+                guard let self = self, let manager = self.callCaptureManager else {
+                    return (200, MurmurHTTPServer.jsonResponse(["state": "idle"]))
+                }
+                let snap = manager.statusSnapshot()
+                var payload: [String: Any] = [
+                    "state": snap.state,
+                    "elapsedSeconds": snap.elapsedSeconds
+                ]
+                payload["sessionId"] = snap.sessionId ?? NSNull()
+                payload["app"] = snap.app ?? NSNull()
+                return (200, MurmurHTTPServer.jsonResponse(payload))
+            }
+            return result
+        }
+
         server.get("/api/v1/draft/status") { [weak self] _ in
             guard let manager = self?.draftEditingManager, manager.isActive,
                   let doc = manager.document else {

@@ -68,9 +68,6 @@ extension AppDelegate {
         currentPlayingSound?.stop()
         currentPlayingSound = nil
 
-        // Stop the Gemini audio player
-        streamingPlayer?.stopAudioEngine()
-
         // Reset playing state
         isCurrentlyPlaying = false
         stopWaveformAnimation()
@@ -86,8 +83,6 @@ extension AppDelegate {
         }
 
         NSLog("TTS: got selected text via Accessibility (\(selectedText.count) chars)")
-
-        let hasGemini = audioCollector != nil && streamingPlayer != nil
 
         isCurrentlyPlaying = true
         startWaveformAnimation()
@@ -108,8 +103,6 @@ extension AppDelegate {
                     while sound?.isPlaying == true && !Task.isCancelled {
                         try await Task.sleep(nanoseconds: 100_000_000)
                     }
-                } else if hasGemini, let audioCollector = self?.audioCollector, let streamingPlayer = self?.streamingPlayer {
-                    try await streamingPlayer.playText(selectedText, audioCollector: audioCollector)
                 } else {
                     AppNotifier.notify(title: "TTS Not Available", body: "No TTS engine loaded")
                 }

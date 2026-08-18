@@ -17,11 +17,7 @@ extension AppDelegate {
 
         let manager = OpenClawManager(url: url, token: token, password: password, sessionKey: sessionKey)
         openClawManager = manager
-        openClawRecordingManager = OpenClawRecordingManager(
-            openClawManager: manager,
-            streamingPlayer: streamingPlayer,
-            audioCollector: audioCollector
-        )
+        openClawRecordingManager = OpenClawRecordingManager(openClawManager: manager)
         openClawRecordingManager?.delegate = self
         // Refresh the status bar hint whenever (dis)connection or auth state
         // shifts so the user can tell at a glance whether OpenClaw is ready.

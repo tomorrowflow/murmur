@@ -109,8 +109,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     var waveformAnimationTimer: Timer?
     var audioManager: AudioTranscriptionManager!
     var audioOverlay: AudioTranscriptionOverlayWindow?
-    var streamingPlayer: GeminiStreamingPlayer?
-    var audioCollector: GeminiAudioCollector?
     var isCurrentlyPlaying = false
     var currentStreamingTask: Task<Void, Never>?
     var currentPlayingSound: NSSound?
@@ -230,19 +228,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
             print("✅ Accessibility permission granted")
         }
 
-        // Initialize streaming TTS components if API key is available
-        if let apiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"], !apiKey.isEmpty {
-            if #available(macOS 14.0, *) {
-                streamingPlayer = GeminiStreamingPlayer(playbackSpeed: 1.15)
-                audioCollector = GeminiAudioCollector(apiKey: apiKey)
-                print("✅ Streaming TTS components initialized")
-            } else {
-                print("⚠️ Streaming TTS requires macOS 14.0 or later")
-            }
-        } else {
-            print("⚠️ GEMINI_API_KEY not found in environment variables")
-        }
-        
         // Create the status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -546,6 +531,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
 
 
 }
+
+// Line-buffer stdout so `print()` diagnostics flush per line under `swift run` (where stdout
+// is a pipe and would otherwise be block-buffered, losing logs if the process is killed).
+setvbuf(stdout, nil, _IOLBF, 0)
 
 // Create and run the app
 let app = NSApplication.shared

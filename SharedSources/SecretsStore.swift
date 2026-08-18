@@ -10,7 +10,12 @@ import Security
 /// every rebuild produces a differently-signed binary, and the Keychain ACL
 /// would throw an access prompt per secret per rebuild.
 public enum SecretsStore {
-    private static let isBundled = Bundle.main.bundleIdentifier != nil
+    // Must detect a real .app bundle, not just a bundle identifier: the dev
+    // binary embeds Info.plist via -sectcreate (for the system-audio
+    // permission prompt), which makes bundleIdentifier non-nil under
+    // `swift run` too — and routing dev builds to the Keychain reintroduces
+    // the per-rebuild ACL prompt this split exists to avoid.
+    private static let isBundled = Bundle.main.bundlePath.hasSuffix(".app")
     private static let service = "com.murmur.secrets"
 
     public static func get(_ key: String) -> String? {

@@ -80,6 +80,16 @@ extension AppDelegate {
     func startDraftEditing(filePath: String, adapter: EditorAdapter, startLine: Int? = nil) {
         NSLog("DraftEditing: starting session for \(filePath)")
 
+        // Retire any previous session first. `toggleDraftEditing` only stops an
+        // *active* manager, and `.error`/`.complete` are not active — so a
+        // second Cmd+Opt+D after a failed edit used to stack a new manager on
+        // top of one whose Escape monitors were still installed (swallowing
+        // Escape app-wide) and whose overlay panel was orphaned on screen.
+        if draftEditingManager != nil || draftEditingOverlay != nil {
+            NSLog("DraftEditing: tearing down a previous session before starting a new one")
+            stopDraftEditing()
+        }
+
         let manager = DraftEditingManager()
         manager.delegate = self
         draftEditingManager = manager
@@ -200,7 +210,15 @@ extension AppDelegate {
                 }
             }
         case .error:
+            // The reading task is already cancelled at this point, so the
+            // session can't be resumed. Leave the overlay up briefly so the
+            // message is readable, then tear down — otherwise the manager
+            // lingers with its Escape monitors installed.
             stopWaveformAnimation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                guard let self = self else { return }
+                if case .error = self.draftEditingManager?.state { self.stopDraftEditing() }
+            }
         default:
             break
         }

@@ -219,6 +219,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, AudioTranscriptionManagerDel
     // the `callCapture.autoTranscribe` default.
     var captureTranscribeOnStop: Bool = true
     
+    /// Flush anything that is written lazily. History saves are coalesced onto
+    /// a background queue, so without this a quit within the debounce window
+    /// would drop the last entries.
+    func applicationWillTerminate(_ notification: Notification) {
+        TranscriptionHistory.shared.flushPendingSave()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load environment variables
         loadEnvironmentVariables()

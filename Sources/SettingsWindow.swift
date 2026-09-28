@@ -136,15 +136,18 @@ struct SettingsView: View {
 
         }
         .onAppear {
-            // If models haven't been checked yet (e.g., settings opened very quickly after app start)
-            if modelState.isCheckingModels {
-                Task {
-                    await modelState.checkDownloadedModels()
-                }
-            }
-
-            // Check for incomplete downloads that need auto-resume
+            // These two must run in order. `checkForIncompleteDownloads` decides
+            // what is incomplete by consulting `modelState.downloadedModels`,
+            // which stays empty until the scan finishes — running them
+            // concurrently marked every on-disk model incomplete and
+            // re-downloaded it, deleting the directory the scan was still
+            // validating from.
             Task {
+                if modelState.isCheckingModels {
+                    await modelState.checkDownloadedModels()
+                } else {
+                    modelState.refreshParakeetDownloadState()
+                }
                 await checkForIncompleteDownloads()
             }
         }
@@ -157,15 +160,10 @@ struct SettingsView: View {
             return modelState.parakeetLoadingState
         }
 
-        // For other versions or when WhisperKit is active, check if downloaded on disk
-        let modelName = version == .v2 ? "parakeet-tdt-0.6b-v2-coreml" : "parakeet-tdt-0.6b-v3-coreml"
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let modelPath = documentsPath.appendingPathComponent("FluidAudio").appendingPathComponent(modelName)
-
-        if FileManager.default.fileExists(atPath: modelPath.path) {
-            return .downloaded
-        }
-        return .notDownloaded
+        // For other versions or when WhisperKit is active, use the cached
+        // on-disk state — this runs inside `body`, so it must not touch the
+        // filesystem.
+        return modelState.downloadedParakeetVersions.contains(version) ? .downloaded : .notDownloaded
     }
 
     func checkForIncompleteDownloads() async {

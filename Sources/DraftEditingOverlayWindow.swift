@@ -566,6 +566,20 @@ class DraftEditingOverlayWindow {
         }
     }
 
+    /// One overlay is created per draft-editing session and the panel does not
+    /// release itself on close, so both the window and its resize observer
+    /// leaked per session.
+    deinit {
+        let panel = self.panel
+        let observer = self.panelResizeObserver
+        let cleanup = {
+            if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+            panel?.orderOut(nil)
+            panel?.close()
+        }
+        if Thread.isMainThread { cleanup() } else { DispatchQueue.main.async(execute: cleanup) }
+    }
+
     private func ensurePanel() {
         if panel != nil { return }
 

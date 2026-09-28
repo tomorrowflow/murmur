@@ -4,10 +4,10 @@ import CoreAudio
 import os.log
 
 /// Pauses / resumes whichever app currently owns macOS "Now Playing" — Spotify,
-/// Apple Music, Apple Podcasts, Safari (YouTube/Netflix), Apple TV, anything
-/// that registers with the system. Independent of audio output device — works
-/// the same with built-in speakers, AirPods, USB headsets, etc., because the
-/// scope is the Now Playing app, not the audio path.
+/// Apple Music, Apple Podcasts, Apple TV, anything that registers with the
+/// system. Independent of audio output device — works the same with built-in
+/// speakers, AirPods, USB headsets, etc., because the scope is the Now Playing
+/// app, not the audio path.
 ///
 /// Uses `MRMediaRemoteSendCommand` from MediaRemote.framework via dlsym.
 /// Confirmed working on this user's macOS 26.4.1 Tahoe build (2026-04-27)
@@ -17,9 +17,12 @@ import os.log
 ///
 /// Distinct Pause (1) and Play (0) commands are used instead of the F8 toggle
 /// — Pause is idempotent (no-op on already-paused media), so we can't
-/// accidentally start something the user had paused. The opposite case
-/// remains: if media was paused before Murmur ran, our resume Play *will*
-/// start it. Documented limitation.
+/// accidentally start something the user had paused.
+///
+/// The dangerous command is Play: when *no* app owns Now Playing, macOS
+/// answers a bare Play by launching the default player (Apple Music). Every
+/// guard in this class exists to make sure Play is only ever sent to an app
+/// we actually paused and that is still running.
 final class MediaRemoteController {
     static let shared = MediaRemoteController()
 
@@ -48,13 +51,29 @@ final class MediaRemoteController {
 
     private let sendCommand: SendCommandFn?
 
+    /// A media player process we found producing output.
+    private struct ActivePlayer {
+        let pid: pid_t
+        let bundleID: String
+    }
+
+    // All mutable state below is guarded by `lock`. `pause()` is called from
+    // the cooperative thread pool (Read Aloud / Draft Editing playback tasks)
+    // as well as from main (podcast, STT gate), and `resumeIfWePaused()` from
+    // main — without the lock the two race on `didPause`.
+    private let lock = NSLock()
+
     /// Tracks whether *we* paused playback so we resume only what we
     /// stopped. Note: on macOS 26 the read APIs (`IsPlaying`, `GetInfo`)
     /// are gated for third-party apps, so we can't pre-check whether
-    /// something was actually playing. We trust the user's intent: if
-    /// they triggered Murmur, they want the audio stage clear, and we'll
-    /// restore on resume.
+    /// something was actually playing. We trust the CoreAudio per-process
+    /// "is running output" flag of a known media player instead.
     private var didPause = false
+
+    /// The player we sent Pause to. Resume only fires if this process is
+    /// still alive — if it quit, nothing owns Now Playing and Play would
+    /// launch Apple Music.
+    private var pausedPlayer: ActivePlayer?
 
     /// Pending resume work item — held briefly so a fresh `pause()` call
     /// during the recap chain (TTS end → STT start) cancels the resume
@@ -91,6 +110,7 @@ final class MediaRemoteController {
     private static let prsListSelector: AudioObjectPropertySelector = fourCC("prs#")
     private static let isRunningOutputSelector: AudioObjectPropertySelector = fourCC("piro")
     private static let bundleIDSelector: AudioObjectPropertySelector = fourCC("pbid")
+    private static let pidSelector: AudioObjectPropertySelector = fourCC("ppid")
 
     private static func fourCC(_ s: StaticString) -> AudioObjectPropertySelector {
         precondition(s.utf8CodeUnitCount == 4)
@@ -99,80 +119,55 @@ final class MediaRemoteController {
         }
     }
 
-    /// Bundle IDs that hold the audio output stream open without
-    /// signaling user-pausable media playback. Their presence in the
-    /// `IsRunningOutput=true` list is uninformative:
+    /// Native media players that register with Now Playing and close their
+    /// output stream while paused, so "IsRunningOutput" genuinely means
+    /// "playing". Only a process from this set (plus the user extension
+    /// below) is ever paused.
     ///
-    ///   - Browsers keep WebAudio/Media Session streams open while
-    ///     paused (Safari/Chrome/Brave/Edge/Firefox).
-    ///   - Conferencing / call-overlay apps keep their stream open for
-    ///     the entire duration of a call (Teams, Zoom, Slack huddles,
-    ///     Webex, Discord); their output isn't "media" we should pause
-    ///     with a media-key command.
-    ///   - Real-time audio processors (Krisp, audio routers) sit in the
-    ///     output graph permanently while active.
-    ///
-    /// Sending `Pause` because one of these is "running output" then
-    /// flagging `didPause=true` produces the wrong behavior on resume:
-    /// `Play` wakes up whichever paused media app (e.g. Spotify) owns
-    /// Now Playing, even though no media was playing during the call.
-    private static let streamHoardingBundleIDs: Set<String> = [
-        // Browsers
-        "com.apple.WebKit.GPU",
-        "com.google.Chrome.helper",
-        "com.google.Chrome.helper.plugin",
-        "com.brave.Browser.helper",
-        "com.microsoft.edgemac.helper",
-        "org.mozilla.firefox",
-        // Conferencing / calls
-        "com.microsoft.teams2",
-        "com.microsoft.teams",
-        "us.zoom.xos",
-        "com.tinyspeck.slackmacgap",
-        "com.cisco.webexmeetingsapp",
-        "com.hnc.Discord",
-        "com.electron.WhatsApp",
-        // Audio processors / routers
-        "ai.krisp.krispMac",
-        "com.rogueamoeba.Loopback",
-        "com.rogueamoeba.audiohijack",
-        // System / self
-        "com.apple.audio.coreaudiod",
-        "com.murmur.app",
+    /// This used to be the inverse — a denylist of browsers / conferencing
+    /// helpers, with every *other* process that had output running treated
+    /// as a media player. That is what kept launching Apple Music: any app
+    /// emitting a notification chime during a TTS session (mail client,
+    /// chat app, terminal bell) read as a player, `didPause` was set with
+    /// nothing actually paused, and the session-end Play landed on an empty
+    /// Now Playing. An unknown process is now simply left alone.
+    private static let knownMediaPlayerBundleIDs: Set<String> = [
+        "com.spotify.client",
+        "com.apple.Music",
+        "com.apple.iTunes",
+        "com.apple.podcasts",
+        "com.apple.TV",
+        "com.apple.Books",
+        "com.apple.QuickTimePlayerX",
+        "org.videolan.vlc",
+        "com.colliderli.iina",
+        "io.mpv",
+        "tv.plex.plexamp",
+        "tv.plex.desktop",
+        "com.tidal.desktop",
+        "com.deezer.deezer-desktop",
+        "com.amazon.music",
+        "com.swinsian.Swinsian",
+        "com.audirvana.Audirvana-Studio",
+        "org.foobar2000.foobar2000",
     ]
 
-    /// Prefix matches for app families that spawn per-feature helper
-    /// processes with unpredictable bundle-id suffixes (Teams runs call
-    /// audio through com.microsoft.teams2.modulehost, browsers version
-    /// their helpers, Zoom ships aide processes). Exact-match alone turns
-    /// the denylist into whack-a-mole: an unlisted helper reads as a "real
-    /// media player", didPause gets set, and the session-end Play launches
-    /// Apple Music when nothing owns Now Playing.
-    private static let streamHoardingBundlePrefixes: [String] = [
-        "com.microsoft.teams",
-        "com.apple.WebKit",
-        "com.google.Chrome",
-        "com.brave.Browser",
-        "com.microsoft.edgemac",
-        "us.zoom.",
-        "com.tinyspeck.slackmacgap",
-        "com.cisco.webex",
-        "ai.krisp.",
-    ]
+    /// Bundle IDs the user can add without a rebuild:
+    /// `defaults write com.murmur.app audio.mediaPlayerBundleIDs -array com.example.player`
+    static let userMediaPlayersDefaultsKey = "audio.mediaPlayerBundleIDs"
 
-    private static func isStreamHoarder(_ bundle: String) -> Bool {
-        if streamHoardingBundleIDs.contains(bundle) { return true }
-        return streamHoardingBundlePrefixes.contains { bundle.hasPrefix($0) }
+    private static func isKnownMediaPlayer(_ bundleID: String) -> Bool {
+        guard !bundleID.isEmpty else { return false }
+        if knownMediaPlayerBundleIDs.contains(bundleID) { return true }
+        let extra = UserDefaults.standard.stringArray(forKey: userMediaPlayersDefaultsKey) ?? []
+        return extra.contains(bundleID)
     }
 
-    /// True iff at least one audio process *other than* a known stream-
-    /// hoarder (Safari/Chrome/etc.) currently has IsRunningOutput=true.
-    /// In other words: a real media player like Spotify or Apple Music is
-    /// actively playing right now. Returns false if only browsers (or
-    /// nothing) are running output — in that case we can't tell whether
-    /// real playback is happening, so we treat it as "no playback" and
-    /// skip the pause to avoid the spurious-resume bug.
-    private static func anyMediaPlayerActive() -> Bool {
+    /// The first known media player that currently has `IsRunningOutput=true`,
+    /// or nil when nothing pausable is playing. Processes that are not on
+    /// the allowlist are logged once per call so a missing player can be
+    /// spotted in Console and added via the defaults key.
+    private static func activeMediaPlayer() -> ActivePlayer? {
         var listAddr = AudioObjectPropertyAddress(
             mSelector: prsListSelector,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -184,8 +179,8 @@ final class MediaRemoteController {
             &listAddr, 0, nil, &dataSize
         )
         guard s1 == noErr else {
-            info("ProcessObjectList size query failed (\(s1)) — falling back to 'unknown / skip'")
-            return false
+            info("ProcessObjectList size query failed (\(s1)) — treating as 'nothing playing'")
+            return nil
         }
         let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
         var ids = [AudioObjectID](repeating: 0, count: count)
@@ -195,16 +190,27 @@ final class MediaRemoteController {
         )
         guard s2 == noErr else {
             info("ProcessObjectList read failed (\(s2))")
-            return false
+            return nil
         }
+        var ignored: [String] = []
         for objID in ids {
             guard let running = boolProp(objID, isRunningOutputSelector), running else { continue }
             let bundle = stringProp(objID, bundleIDSelector) ?? ""
-            if Self.isStreamHoarder(bundle) { continue }
-            info("active media player detected: \(bundle.isEmpty ? "<no bundle>" : bundle)")
-            return true
+            guard Self.isKnownMediaPlayer(bundle) else {
+                ignored.append(bundle.isEmpty ? "<no bundle>" : bundle)
+                continue
+            }
+            guard let pid = pidProp(objID) else {
+                info("known media player \(bundle) has no pid — skipping")
+                continue
+            }
+            info("active media player detected: \(bundle) (pid \(pid))")
+            return ActivePlayer(pid: pid, bundleID: bundle)
         }
-        return false
+        if !ignored.isEmpty {
+            info("output running but not a known media player, leaving alone: \(ignored.joined(separator: ", "))")
+        }
+        return nil
     }
 
     private static func boolProp(_ id: AudioObjectID, _ sel: AudioObjectPropertySelector) -> Bool? {
@@ -217,6 +223,18 @@ final class MediaRemoteController {
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &v) == noErr else { return nil }
         return v != 0
+    }
+
+    private static func pidProp(_ id: AudioObjectID) -> pid_t? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: pidSelector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var v: pid_t = 0
+        var size = UInt32(MemoryLayout<pid_t>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &v) == noErr, v > 0 else { return nil }
+        return v
     }
 
     private static func stringProp(_ id: AudioObjectID, _ sel: AudioObjectPropertySelector) -> String? {
@@ -238,63 +256,80 @@ final class MediaRemoteController {
 
     // MARK: - Public API
 
-    /// Send Pause to whichever app owns Now Playing — but only if a real
-    /// media player (not a stream-hoarding browser) is currently producing
-    /// audio. Without this guard, we'd `Pause` against nothing, set
-    /// `didPause=true`, and on resume blindly send `Play` — which would
-    /// *start* music the user had paused before Murmur ran. The CoreAudio
-    /// per-process check tells us whether something is actually playing
-    /// right now (Spotify/Music/Podcasts properly close their output
-    /// stream when paused). If detection comes back negative, we skip
-    /// both the Pause and the `didPause` flag, so the resume Play stays
-    /// dormant.
+    /// Send Pause to whichever app owns Now Playing — but only if a known
+    /// media player is currently producing audio. Without this guard we'd
+    /// `Pause` against nothing, set `didPause=true`, and on resume blindly
+    /// send `Play`, which starts (or launches) music the user never had
+    /// running. Spotify/Music/Podcasts close their output stream when
+    /// paused, so "running output" is a reliable "playing right now".
     ///
-    /// `completion` runs synchronously after the decision is made;
-    /// callers that need to wait for an audio-engine startup can pass one.
+    /// Idempotent: repeated calls while already paused only cancel a pending
+    /// resume (recap chain: TTS end → STT start keeps media paused).
+    ///
+    /// `completion` runs synchronously after the decision is made, outside
+    /// the lock; callers that need to wait for an audio-engine startup can
+    /// pass one.
     func pause(completion: (() -> Void)? = nil) {
+        defer { completion?() }
+        lock.lock()
+        defer { lock.unlock() }
+
         pendingResume?.cancel()
         pendingResume = nil
-        guard !didPause else {
-            completion?()
-            return
-        }
+        guard !didPause else { return }
         guard let send = sendCommand else {
             Self.info("MRMediaRemoteSendCommand unavailable — skipping pause")
-            completion?()
             return
         }
-        guard Self.anyMediaPlayerActive() else {
-            Self.info("no real media player active — skipping pause")
-            completion?()
+        guard let player = Self.activeMediaPlayer() else {
+            Self.info("no known media player active — skipping pause")
             return
         }
         let ok = send(Command.pause.rawValue, nil)
         didPause = true
-        Self.info("sent Pause(1), MRMediaRemoteSendCommand returned \(ok)")
-        completion?()
+        pausedPlayer = player
+        Self.info("sent Pause(1) for \(player.bundleID), MRMediaRemoteSendCommand returned \(ok)")
     }
 
-    /// Send Play to whichever app owns Now Playing — but only if we
-    /// previously paused. Debounced; a fresh `pause()` within
+    /// Send Play to the app we paused — but only if we previously paused
+    /// and that app is still running. Debounced; a fresh `pause()` within
     /// `resumeDebounce` cancels the scheduled resume and media stays
-    /// paused.
-    ///
-    /// Limitation: if the user had media paused before Murmur ran, our
-    /// pause was a no-op but `didPause` was still set; this Play will
-    /// start the media. There's no reliable way to detect that case on
-    /// macOS 26 (the read APIs are gated).
+    /// paused. Safe to call from any session-end path, any thread.
     func resumeIfWePaused() {
+        lock.lock()
+        defer { lock.unlock() }
         guard didPause else { return }
         pendingResume?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self = self, self.didPause else { return }
-            guard let send = self.sendCommand else { return }
-            self.didPause = false
-            self.pendingResume = nil
-            let ok = send(Command.play.rawValue, nil)
-            Self.info("sent Play(0), MRMediaRemoteSendCommand returned \(ok)")
+            self?.performScheduledResume()
         }
         pendingResume = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumeDebounce, execute: work)
+    }
+
+    private func performScheduledResume() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard didPause else { return }
+        didPause = false
+        pendingResume = nil
+        let player = pausedPlayer
+        pausedPlayer = nil
+
+        guard let send = sendCommand else { return }
+        guard let player = player else {
+            Self.info("resume requested but no paused player recorded — skipping Play")
+            return
+        }
+        // If the player quit while we held the pause, Now Playing has no
+        // owner and a bare Play would launch the default player.
+        guard let app = NSRunningApplication(processIdentifier: player.pid),
+              !app.isTerminated,
+              app.bundleIdentifier == player.bundleID else {
+            Self.info("paused player \(player.bundleID) (pid \(player.pid)) is gone — skipping Play")
+            return
+        }
+        let ok = send(Command.play.rawValue, nil)
+        Self.info("sent Play(0) for \(player.bundleID), MRMediaRemoteSendCommand returned \(ok)")
     }
 }

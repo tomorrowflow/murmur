@@ -27,6 +27,28 @@ public struct OpenClawResponseFilter {
     private static let reasoningTagNames = ["think", "thinking", "thought", "antthinking", "final"]
 
     // Quick-scan regex to skip text with no tags
+    /// Compiled-regex cache.
+    ///
+    /// This filter runs twice per streamed delta, over the whole accumulated
+    /// answer, and each call used to compile about a dozen patterns from
+    /// scratch. Compiling once and reusing removes that from the streaming
+    /// path entirely.
+    private static var regexCache: [String: NSRegularExpression] = [:]
+    private static let regexCacheLock = NSLock()
+
+    private static func cachedRegex(
+        pattern: String,
+        options: NSRegularExpression.Options = []
+    ) -> NSRegularExpression? {
+        let key = "\(options.rawValue)|\(pattern)"
+        regexCacheLock.lock()
+        defer { regexCacheLock.unlock() }
+        if let cached = regexCache[key] { return cached }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
+        regexCache[key] = regex
+        return regex
+    }
+
     private static let hasReasoningTagRegex = try! NSRegularExpression(
         pattern: #"<\s*/?\s*(?:think(?:ing)?|thought|antthinking|final)\b"#,
         options: .caseInsensitive
@@ -38,22 +60,15 @@ public struct OpenClawResponseFilter {
             return text
         }
 
-        // Extract fenced code blocks to protect them
-        var protected: [(range: Range<String.Index>, content: String)] = []
-        let codeBlockRegex = try! NSRegularExpression(pattern: #"```[\s\S]*?```"#)
-        let codeMatches = codeBlockRegex.matches(in: text, range: range)
-        for match in codeMatches.reversed() {
-            if let swiftRange = Range(match.range, in: text) {
-                protected.insert((range: swiftRange, content: String(text[swiftRange])), at: 0)
-            }
-        }
+        // (A previous "protect fenced code blocks" pass was computed here and
+        // never used — the tag patterns below operate on the whole string.)
 
         var result = text
 
         // Strip each reasoning tag pair and their content
         for tagName in reasoningTagNames {
             let pattern = #"<\s*"# + NSRegularExpression.escapedPattern(for: tagName) + #"\b[^>]*>[\s\S]*?<\s*/\s*"# + NSRegularExpression.escapedPattern(for: tagName) + #"\s*>"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            if let regex = cachedRegex(pattern: pattern, options: .caseInsensitive) {
                 result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
             }
         }
@@ -61,7 +76,7 @@ public struct OpenClawResponseFilter {
         // Strip trailing unclosed opening tags (e.g., "<thinking>" at end of partial response)
         for tagName in reasoningTagNames {
             let pattern = #"<\s*"# + NSRegularExpression.escapedPattern(for: tagName) + #"\b[^>]*>[\s\S]*$"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            if let regex = cachedRegex(pattern: pattern, options: .caseInsensitive) {
                 result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
             }
         }
@@ -101,7 +116,7 @@ public struct OpenClawResponseFilter {
         var result = text
         for tagName in toolCallTagNames {
             let pattern = #"<\s*"# + NSRegularExpression.escapedPattern(for: tagName) + #"\b[^>]*>[\s\S]*?<\s*/\s*"# + NSRegularExpression.escapedPattern(for: tagName) + #"\s*>"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            if let regex = cachedRegex(pattern: pattern, options: .caseInsensitive) {
                 result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
             }
         }
@@ -114,42 +129,42 @@ public struct OpenClawResponseFilter {
         var result = text
 
         // Remove fenced code blocks entirely
-        if let regex = try? NSRegularExpression(pattern: #"```[\s\S]*?```"#) {
+        if let regex = cachedRegex(pattern: #"```[\s\S]*?```"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
 
         // Remove inline code
-        if let regex = try? NSRegularExpression(pattern: #"`[^`]+`"#) {
+        if let regex = cachedRegex(pattern: #"`[^`]+`"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
 
         // Remove image syntax entirely: ![alt](url)
-        if let regex = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\([^\)]*\)"#) {
+        if let regex = cachedRegex(pattern: #"!\[[^\]]*\]\([^\)]*\)"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
 
         // Convert link syntax to just the text: [text](url) -> text
-        if let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\([^\)]*\)"#) {
+        if let regex = cachedRegex(pattern: #"\[([^\]]+)\]\([^\)]*\)"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1")
         }
 
         // Remove header markers (keep text)
-        if let regex = try? NSRegularExpression(pattern: #"(?m)^#{1,6}\s+"#) {
+        if let regex = cachedRegex(pattern: #"(?m)^#{1,6}\s+"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
 
         // Remove bold/italic markers
-        if let regex = try? NSRegularExpression(pattern: #"\*{1,3}|_{1,3}"#) {
+        if let regex = cachedRegex(pattern: #"\*{1,3}|_{1,3}"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
 
         // Remove HTML tags
-        if let regex = try? NSRegularExpression(pattern: #"</?[a-zA-Z][^>]*>"#) {
+        if let regex = cachedRegex(pattern: #"</?[a-zA-Z][^>]*>"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
 
         // Collapse multiple newlines
-        if let regex = try? NSRegularExpression(pattern: #"\n{3,}"#) {
+        if let regex = cachedRegex(pattern: #"\n{3,}"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "\n\n")
         }
 

@@ -244,10 +244,9 @@ class PodcastSettingsViewModel: NSObject, ObservableObject, AVAudioPlayerDelegat
 
     func pickAndUploadVoiceSample(speaker: Int) {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [
-            .wav, .mp3, .aiff,
-            .init(filenameExtension: "m4a")!,
-        ]
+        // `UTType(filenameExtension:)` is optional — it returns nil when
+        // nothing on the system claims the extension, which would trap here.
+        panel.allowedContentTypes = [.wav, .mp3, .aiff] + [UTType(filenameExtension: "m4a")].compactMap { $0 }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.message = "Select a voice sample for Host \(speaker == 1 ? "A" : "B")"
@@ -262,11 +261,21 @@ class PodcastSettingsViewModel: NSObject, ObservableObject, AVAudioPlayerDelegat
 
         if speaker == 1 { isUploadingSpeaker1 = true } else { isUploadingSpeaker2 = true }
 
-        guard let fileData = try? Data(contentsOf: fileURL) else {
-            if speaker == 1 { isUploadingSpeaker1 = false } else { isUploadingSpeaker2 = false }
-            return
+        // Reading the sample and assembling the multipart body used to happen
+        // on the main thread, so a large voice sample beach-balled the UI.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            guard let fileData = try? Data(contentsOf: fileURL) else {
+                DispatchQueue.main.async {
+                    if speaker == 1 { self.isUploadingSpeaker1 = false } else { self.isUploadingSpeaker2 = false }
+                }
+                return
+            }
+            self.performVoiceSampleUpload(speaker: speaker, url: url, fileURL: fileURL, fileData: fileData)
         }
+    }
 
+    private func performVoiceSampleUpload(speaker: Int, url: URL, fileURL: URL, fileData: Data) {
         let boundary = UUID().uuidString
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

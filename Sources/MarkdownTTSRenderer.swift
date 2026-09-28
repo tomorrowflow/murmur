@@ -307,9 +307,26 @@ struct MarkdownTTSRenderer {
     }
 
     /// Generate silence as WAV data at 24kHz 16-bit mono.
+    /// Cache of rendered silence blobs. Only a handful of gap lengths are ever
+    /// used, but one was allocated per gap — thousands per reading session.
+    private static var silenceCache: [String: Data] = [:]
+    private static let silenceCacheLock = NSLock()
+
     static func generateSilenceWav(durationMs: Int, sampleRate: Int = 24000) -> Data {
+        let key = "\(durationMs)@\(sampleRate)"
+        silenceCacheLock.lock()
+        if let cached = silenceCache[key] {
+            silenceCacheLock.unlock()
+            return cached
+        }
+        silenceCacheLock.unlock()
+
         let pcmData = generateSilence(durationMs: durationMs, sampleRate: sampleRate)
-        return wrapInWav(pcmData: pcmData, sampleRate: sampleRate)
+        let wav = wrapInWav(pcmData: pcmData, sampleRate: sampleRate)
+        silenceCacheLock.lock()
+        silenceCache[key] = wav
+        silenceCacheLock.unlock()
+        return wav
     }
 
     private static func wrapInWav(pcmData: Data, sampleRate: Int) -> Data {

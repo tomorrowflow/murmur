@@ -24,12 +24,19 @@ struct FileEditController {
     ///   - lineRange: 1-based half-open range of lines to replace
     ///   - newText: Replacement text (may contain newlines)
     ///   - expectedModDate: If provided, verify file hasn't changed since this date
+    ///   - expectedOriginal: If provided, verify the lines about to be replaced
+    ///     still hold this text. The modification-date check alone is close to
+    ///     useless here: the caller clears highlight markers (a write) and then
+    ///     captures the date, so a concurrent save inside the 0.5s tolerance
+    ///     passes and gets silently overwritten. Comparing the actual bytes
+    ///     being replaced closes that window.
     /// - Returns: The new full file content after replacement
     static func replaceParagraph(
         in filePath: String,
         lineRange: Range<Int>,
         with newText: String,
-        expectedModDate: Date? = nil
+        expectedModDate: Date? = nil,
+        expectedOriginal: String? = nil
     ) throws -> String {
         guard FileManager.default.fileExists(atPath: filePath) else {
             throw EditError.fileNotFound(filePath)
@@ -52,8 +59,20 @@ struct FileEditController {
         let start = lineRange.lowerBound - 1
         let end = lineRange.upperBound - 1
 
-        guard start >= 0 && end <= lines.count else {
+        // `start <= end` matters as much as the bounds: a stale line range can
+        // invert after an external edit, and `replaceSubrange` traps on an
+        // inverted range rather than throwing.
+        guard start >= 0, start <= end, end <= lines.count else {
             throw EditError.paragraphOutOfRange
+        }
+
+        if let expectedOriginal = expectedOriginal {
+            let actual = lines[start..<end].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let expected = expectedOriginal.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard actual == expected else {
+                throw EditError.fileModifiedExternally
+            }
         }
 
         // Split new text into lines

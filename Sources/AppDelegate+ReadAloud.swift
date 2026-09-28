@@ -23,18 +23,33 @@ extension AppDelegate {
         }
     }
 
+    /// The single way a Read Aloud session ends — X button, Escape, the
+    /// Cmd+Opt+S hotkey, the post-completion auto-dismiss, or a stop from
+    /// another feature. Cancels any queued auto-record (a Task already past
+    /// its cancellation check may still set state=.complete after stop()
+    /// and would otherwise spawn the recording overlay the user just
+    /// closed), releases the manager so `isAudioBusy()` clears, and lets the
+    /// next queued recap proceed.
+    func tearDownReadAloudSession() {
+        pendingAutoRecordAfterReadAloud = false
+        recapTargetApp = nil
+        recapTargetWindow = nil
+        readAloudManager?.stop()
+        readAloudOverlay?.dismissNow()
+        readAloudManager = nil
+        readAloudOverlay = nil
+        readAloudInterruptActive = false
+        stopWaveformAnimation()
+        drainRecapQueueIfIdle()
+    }
+
     func handleReadSelectedTextToggle() {
         debugLog("handleReadSelectedTextToggle called, isCurrentlyPlaying=\(isCurrentlyPlaying), readAloudActive=\(readAloudManager?.isActive ?? false)")
         NSLog("TTS: handleReadSelectedTextToggle called, isCurrentlyPlaying=\(isCurrentlyPlaying), readAloudActive=\(readAloudManager?.isActive ?? false)")
 
         // If read-aloud session is active, stop it
         if readAloudManager?.isActive == true {
-            readAloudManager?.stop()
-            readAloudOverlay?.dismiss()
-            readAloudManager = nil
-            readAloudOverlay = nil
-            readAloudInterruptActive = false
-            stopWaveformAnimation()
+            tearDownReadAloudSession()
             return
         }
 
@@ -53,11 +68,7 @@ extension AppDelegate {
 
         // Stop read-aloud session if active
         if readAloudManager?.isActive == true {
-            readAloudManager?.stop()
-            readAloudOverlay?.dismiss()
-            readAloudManager = nil
-            readAloudOverlay = nil
-            readAloudInterruptActive = false
+            tearDownReadAloudSession()
         }
 
         // Cancel the current streaming task
@@ -166,22 +177,7 @@ extension AppDelegate {
         overlay.viewModel.targetAppIcon = sourceApp?.icon
         overlay.viewModel.targetAppName = sourceApp?.localizedName
         overlay.onStop = { [weak self] in
-            // Explicit user dismiss cancels any queued auto-record. Without
-            // this, a Task that's already past `guard !Task.isCancelled`
-            // will still set state=.complete on MainActor after stop() runs,
-            // and our state handler would spawn the recording overlay the
-            // user just closed.
-            self?.pendingAutoRecordAfterReadAloud = false
-            self?.recapTargetApp = nil
-            self?.recapTargetWindow = nil
-            self?.readAloudManager?.stop()
-            self?.readAloudOverlay?.dismiss()
-            self?.readAloudManager = nil
-            self?.readAloudOverlay = nil
-            self?.readAloudInterruptActive = false
-            self?.stopWaveformAnimation()
-            // User closed this session — let the next queued recap proceed.
-            self?.drainRecapQueueIfIdle()
+            self?.tearDownReadAloudSession()
         }
         overlay.onPlayPause = { [weak self] in
             guard let self = self, let manager = self.readAloudManager else { return }

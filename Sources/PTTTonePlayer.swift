@@ -7,7 +7,15 @@ class PTTTonePlayer {
 
     private let sampleRate: Double = 44100
     private let volume: Float = 0.35
-    private var player: AVAudioPlayer?
+    /// Live players. A single slot meant `playStopTone()` deallocated a start
+    /// tone that was still sounding; finished players are swept on each play.
+    private var players: [AVAudioPlayer] = []
+
+    /// Rendered WAV blobs, keyed by tone + lead-in. Each tone used to be
+    /// re-synthesised and WAV-encoded on the main thread on the key-down path,
+    /// appending ~44 100 one-byte `Data` chunks per beep with the Bluetooth
+    /// lead-in.
+    private var toneCache: [String: Data] = [:]
 
     private init() {}
 
@@ -76,6 +84,26 @@ class PTTTonePlayer {
     }
 
     private func playTone(frequencies: [Double], noteDuration: Double, prependSilence: Double = 0) {
+        let key = "\(frequencies.map { String($0) }.joined(separator: "-"))@\(noteDuration)+\(prependSilence)"
+        let data: Data
+        if let cached = toneCache[key] {
+            data = cached
+        } else {
+            data = renderTone(frequencies: frequencies, noteDuration: noteDuration, prependSilence: prependSilence)
+            toneCache[key] = data
+        }
+
+        players.removeAll { !$0.isPlaying }
+        do {
+            let player = try AVAudioPlayer(data: data)
+            players.append(player)
+            player.play()
+        } catch {
+            print("PTTTonePlayer: failed to play tone: \(error)")
+        }
+    }
+
+    private func renderTone(frequencies: [Double], noteDuration: Double, prependSilence: Double) -> Data {
         let silenceSamples = Int(sampleRate * prependSilence)
         let totalSamples = silenceSamples + Int(sampleRate * noteDuration) * frequencies.count
         var samples = [Float]()
@@ -103,13 +131,7 @@ class PTTTonePlayer {
             }
         }
 
-        let data = wavData(samples: samples, sampleRate: Int(sampleRate))
-        do {
-            player = try AVAudioPlayer(data: data)
-            player?.play()
-        } catch {
-            print("PTTTonePlayer: failed to play tone: \(error)")
-        }
+        return wavData(samples: samples, sampleRate: Int(sampleRate))
     }
 
     private func wavData(samples: [Float], sampleRate: Int) -> Data {
@@ -120,6 +142,7 @@ class PTTTonePlayer {
         let dataSize = samples.count * blockAlign
 
         var data = Data()
+        data.reserveCapacity(44 + dataSize)
         // RIFF header
         data.append(contentsOf: "RIFF".utf8)
         appendUInt32(&data, UInt32(36 + dataSize))

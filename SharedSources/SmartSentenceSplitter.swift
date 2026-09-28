@@ -42,10 +42,15 @@ public struct SmartSentenceSplitter {
         return sentences.isEmpty ? [cleanText] : sentences
     }
     
+    /// Compiled once — this runs per streamed token while an answer is being
+    /// read aloud.
+    private static let boundaryRegex = try! NSRegularExpression(
+        pattern: #"([.!?]+[\s]*[\)\]"']*)\s+"#,
+        options: []
+    )
+
     private static func preliminarySplit(_ text: String) -> [String] {
-        // Split on sentence endings: . ! ? with optional quotes/parentheses
-        let pattern = #"([.!?]+[\s]*[\)\]"']*)\s+"#
-        let regex = try! NSRegularExpression(pattern: pattern, options: [])
+        let regex = Self.boundaryRegex
         
         var sentences: [String] = []
         var lastRange = text.startIndex
@@ -54,7 +59,10 @@ public struct SmartSentenceSplitter {
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
         
         for match in matches {
-            let range = Range(match.range, in: text)!
+            // A match boundary that doesn't land on a Character boundary (an
+            // NSRange splitting a grapheme cluster) would trap on force-unwrap;
+            // skip it instead — the text simply stays in the current sentence.
+            guard let range = Range(match.range, in: text) else { continue }
             let sentence = String(text[lastRange..<range.upperBound]).trimmingCharacters(in: .whitespacesAndNewlines)
             if !sentence.isEmpty {
                 sentences.append(sentence)
@@ -110,8 +118,10 @@ public struct SmartSentenceSplitter {
             return true
         }
         
-        // Heuristics for abbreviation detection
-        if baseWord.count <= 4 && baseWord.allSatisfy({ $0.isLetter && $0.isUppercase }) {
+        // Dotted forms like "U.S" are abbreviations even when not listed.
+        // A bare short all-caps word is not: the old rule merged any sentence
+        // ending in one ("…fired the CEO." / "…all in IT.") into the next.
+        if baseWord.contains(".") && baseWord.allSatisfy({ $0.isLetter || $0 == "." }) {
             return true
         }
         

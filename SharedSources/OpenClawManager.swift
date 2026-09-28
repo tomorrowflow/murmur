@@ -105,8 +105,33 @@ public class OpenClawManager: NSObject {
     public private(set) var isAuthenticated = false
     public private(set) var isPendingPairing = false
 
-    /// Callback fired when connection state changes: (isConnected, isAuthenticated, isPendingPairing)
+    /// Callback fired when connection state changes: (isConnected, isAuthenticated, isPendingPairing).
+    /// Owned by the AppDelegate for the menu-bar status hint — use
+    /// `addStatusObserver` from anywhere else rather than overwriting it.
     public var onStatusChange: ((Bool, Bool, Bool) -> Void)?
+
+    /// Secondary status observers, keyed by the token `addStatusObserver`
+    /// returns. A single-slot callback meant the settings tab silently took
+    /// over the AppDelegate's handler for the rest of the session, freezing
+    /// the menu-bar OpenClaw hint.
+    private var statusObservers: [UUID: (Bool, Bool, Bool) -> Void] = [:]
+
+    /// Register a status observer. Keep the token and pass it to
+    /// `removeStatusObserver` when the observer goes away.
+    @discardableResult
+    public func addStatusObserver(_ observer: @escaping (Bool, Bool, Bool) -> Void) -> UUID {
+        let token = UUID()
+        DispatchQueue.main.async { [weak self] in
+            self?.statusObservers[token] = observer
+        }
+        return token
+    }
+
+    public func removeStatusObserver(_ token: UUID) {
+        DispatchQueue.main.async { [weak self] in
+            self?.statusObservers.removeValue(forKey: token)
+        }
+    }
 
     public var deviceId: String { deviceIdentity.deviceId }
 
@@ -257,7 +282,11 @@ public class OpenClawManager: NSObject {
         let authenticated = isAuthenticated
         let pending = isPendingPairing
         DispatchQueue.main.async { [weak self] in
-            self?.onStatusChange?(connected, authenticated, pending)
+            guard let self = self else { return }
+            self.onStatusChange?(connected, authenticated, pending)
+            for observer in self.statusObservers.values {
+                observer(connected, authenticated, pending)
+            }
         }
     }
 

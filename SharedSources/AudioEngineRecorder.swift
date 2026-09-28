@@ -197,6 +197,10 @@ public final class AudioEngineRecorder {
     /// can prove that abandoned sessions never reach the microphone.
     private var engineStartAttempts = 0
 
+    /// Throttle for `onLevel`. Touched only from the audio tap thread.
+    private var lastLevelPublish: TimeInterval = 0
+    private static let levelPublishInterval: TimeInterval = 1.0 / 20.0
+
     /// Test hook. Reads the counter on the queue that owns it.
     internal func engineStartAttemptsForTesting() -> Int {
         engineQueue.sync { engineStartAttempts }
@@ -214,8 +218,21 @@ public final class AudioEngineRecorder {
         micReadyFired = false
 
         configureInputDevice(input)
-        installInputTap(on: input)
+        let tapInstalled = installInputTap(on: input)
         registerConfigChangeObserver(for: engine)
+
+        // A failed tap install means the input node handed us a 0 Hz / 0-channel
+        // format — normal for a Bluetooth mic mid A2DP→HFP switch. Starting the
+        // engine anyway produced a running engine with no tap: no samples, no
+        // onMicReady, and stop() returning an empty buffer with no error shown.
+        // Drive the same retry loop the codec-switch path uses instead.
+        guard tapInstalled else {
+            print("⚠️ \(config.label): input tap unavailable at start — entering recovery")
+            isRecoveringFromConfigChange = true
+            configRecoveryDeadline = .now() + config.codecSwitchRecoveryWindow
+            attemptEngineRecovery(session: session)
+            return
+        }
 
         do {
             engine.prepare()
@@ -227,7 +244,11 @@ public final class AudioEngineRecorder {
             teardownEngine()
             let message = "Could not start the microphone: \(error.localizedDescription)"
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                // Session-guarded: a start failure reported after the user has
+                // already triggered a new recording must not flip `isRecording`
+                // off under the live engine — stop() early-returns on that flag,
+                // so the mic would stay hot and the device override unrestored.
+                guard let self = self, self.isCurrent(session) else { return }
                 self.isRecording = false
                 self.isStarting = false
                 self.onStartFailure?(message)
@@ -240,11 +261,11 @@ public final class AudioEngineRecorder {
         inputNode?.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine?.reset()
-        AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden()
+        AudioDeviceManager.shared.restoreDefaultInputDeviceIfOverridden(owner: self)
     }
 
     private func configureInputDevice(_ input: AVAudioInputNode) {
-        if let deviceName = AudioDeviceManager.shared.applyInputDeviceOverrideIfNeeded() {
+        if let deviceName = AudioDeviceManager.shared.applyInputDeviceOverrideIfNeeded(owner: self) {
             print("✅ \(config.label): set input to \(deviceName)")
         }
         let outFormat = input.outputFormat(forBus: 0)
@@ -304,15 +325,21 @@ public final class AudioEngineRecorder {
                     }
                 }
 
-                let rms = sqrt(channelData.withMemoryRebound(to: Float.self, capacity: frameLength) { ptr in
+                // Level metering is a UI concern at ~20 Hz; the tap fires ~47
+                // times a second, so most of these posts only caused SwiftUI
+                // churn on the recording overlay.
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - self.lastLevelPublish >= Self.levelPublishInterval {
+                    self.lastLevelPublish = now
                     var sum: Float = 0
                     for i in 0..<frameLength {
-                        sum += ptr[i] * ptr[i]
+                        let s = channelData[i]
+                        sum += s * s
                     }
-                    return sum / Float(frameLength)
-                })
-                let db = 20 * log10(max(rms, 0.00001))
-                DispatchQueue.main.async { self.onLevel?(db) }
+                    let rms = sqrt(sum / Float(frameLength))
+                    let db = 20 * log10(max(rms, 0.00001))
+                    DispatchQueue.main.async { self.onLevel?(db) }
+                }
             }
         }
 
@@ -384,7 +411,9 @@ public final class AudioEngineRecorder {
 
         let fail: (String) -> Void = { [weak self] message in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                // Same reasoning as the start-failure path: never tear down the
+                // flags of a session that has already been replaced.
+                guard let self = self, self.isCurrent(session) else { return }
                 self.isRecording = false
                 self.isStarting = false
                 self.onEngineLost?(message)

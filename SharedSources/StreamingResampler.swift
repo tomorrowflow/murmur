@@ -12,6 +12,10 @@ public final class StreamingResampler {
     private let targetFormat: AVAudioFormat
     private var converter: AVAudioConverter?
     private var converterInputFormat: AVAudioFormat?
+    /// Reused across calls. `resample` runs ~47 times a second per recording,
+    /// and allocating a fresh AVAudioPCMBuffer inside an audio tap callback is
+    /// exactly the kind of malloc traffic that causes dropouts.
+    private var outputBuffer: AVAudioPCMBuffer?
 
     public init?(targetSampleRate: Double) {
         guard let format = AVAudioFormat(
@@ -36,12 +40,17 @@ public final class StreamingResampler {
         if converter == nil || converterInputFormat != inputFormat {
             converter = AVAudioConverter(from: inputFormat, to: targetFormat)
             converterInputFormat = inputFormat
+            outputBuffer = nil
         }
         guard let converter else { return [] }
 
         let ratio = targetFormat.sampleRate / inputFormat.sampleRate
         let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 16
-        guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return [] }
+        if outputBuffer == nil || outputBuffer!.frameCapacity < capacity {
+            outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
+        }
+        guard let output = outputBuffer else { return [] }
+        output.frameLength = 0
 
         var bufferConsumed = false
         var conversionError: NSError?

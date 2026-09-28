@@ -12,6 +12,18 @@ import SharedModels
 final class CallTranscriptionRunner {
     static let shared = CallTranscriptionRunner()
 
+    /// Raised when a second run is requested while one is in flight. The HTTP
+    /// layer maps this to 409 rather than a generic 400.
+    enum TranscribeError: LocalizedError {
+        case busy(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .busy(let id): return "A transcription is already running (session \(id))"
+            }
+        }
+    }
+
     private(set) var isBusy = false
     private(set) var currentSessionId: String?
     private var onComplete: (() -> Void)?
@@ -48,6 +60,13 @@ final class CallTranscriptionRunner {
     /// initial metadata.json, and kick off transcription. Returns the new
     /// session id + directory immediately (transcription runs async).
     func transcribeFiles(_ paths: [URL]) throws -> (id: String, dir: URL) {
+        // Only one run at a time. `startTranscription` overwrites `onComplete`,
+        // so an unguarded second run silently drops the capture flow's
+        // completion — leaving CallCaptureManager stuck in `.transcribing`
+        // with its overlay up and every later capture refused.
+        guard !isBusy else {
+            throw TranscribeError.busy(currentSessionId ?? "unknown")
+        }
         guard let first = paths.first else {
             throw NSError(domain: "CallTranscribe", code: 1, userInfo: [NSLocalizedDescriptionKey: "No files provided"])
         }

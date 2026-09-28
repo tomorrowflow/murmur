@@ -34,6 +34,32 @@ final class ClaudeHostRegistry {
     private let approvedKey = "claude.approvedHosts"
     private let queue = DispatchQueue(label: "com.murmur.claudeHostRegistry")
     private var _pending: [PendingHost] = []
+    /// Decoded copy of the approved list. `isApproved` runs twice per HTTP
+    /// request, and decoding JSON out of UserDefaults each time made every
+    /// request pay for it.
+    private var _approvedCache: [ApprovedHost]?
+    /// Upper bound on the in-memory pending list. Without it a LAN scanner (or
+    /// a host cycling IPv6 privacy addresses) grows it without limit and spawns
+    /// a blocking reverse-DNS lookup per entry.
+    private static let maxPending = 50
+
+    /// Serialises reverse-DNS lookups. `getnameinfo` blocks for seconds on an
+    /// unreachable resolver; one lookup at a time keeps a burst of unknown IPs
+    /// from occupying the global queue's threads.
+    private let dnsQueue = DispatchQueue(label: "com.murmur.claudeHostRegistry.dns", qos: .utility)
+
+    /// Posts the change notification on the main thread. Callers reach this
+    /// from the NWConnection queue, and the settings tab's `onReceive` mutates
+    /// `@Published` state in response — which must not happen off-main.
+    private func postDidChange() {
+        if Thread.isMainThread {
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        } else {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+            }
+        }
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -42,18 +68,24 @@ final class ClaudeHostRegistry {
     // MARK: - Approved hosts
 
     var approvedHosts: [ApprovedHost] {
-        guard let data = defaults.data(forKey: approvedKey),
-              let decoded = try? JSONDecoder().decode([ApprovedHost].self, from: data) else {
-            return []
+        queue.sync {
+            if let cached = _approvedCache { return cached }
+            guard let data = defaults.data(forKey: approvedKey),
+                  let decoded = try? JSONDecoder().decode([ApprovedHost].self, from: data) else {
+                _approvedCache = []
+                return []
+            }
+            _approvedCache = decoded
+            return decoded
         }
-        return decoded
     }
 
     private func writeApproved(_ hosts: [ApprovedHost]) {
         if let data = try? JSONEncoder().encode(hosts) {
             defaults.set(data, forKey: approvedKey)
         }
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        queue.sync { _approvedCache = hosts }
+        postDidChange()
     }
 
     func isApproved(ip: String) -> Bool {
@@ -102,12 +134,12 @@ final class ClaudeHostRegistry {
         queue.sync {
             if let idx = _pending.firstIndex(where: { $0.ip == ip }) {
                 _pending[idx].attemptCount += 1
-            } else {
+            } else if _pending.count < Self.maxPending {
                 _pending.append(PendingHost(ip: ip, label: nil, firstSeen: Date(), attemptCount: 1))
                 didInsert = true
             }
         }
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        postDidChange()
 
         if didInsert {
             resolveHostname(for: ip)
@@ -116,12 +148,12 @@ final class ClaudeHostRegistry {
 
     func denyPending(ip: String) {
         queue.sync { _pending.removeAll { $0.ip == ip } }
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        postDidChange()
     }
 
     func clearAllPending() {
         queue.sync { _pending.removeAll() }
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        postDidChange()
     }
 
     // MARK: - Reverse DNS
@@ -130,7 +162,7 @@ final class ClaudeHostRegistry {
         // Off the main thread — getnameinfo can block briefly. Best-effort
         // only; if it fails we just leave the label nil and the UI shows
         // the IP alone.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        dnsQueue.async { [weak self] in
             guard let hostname = Self.reverseLookup(ip: ip) else { return }
             guard let self = self else { return }
             self.queue.sync {
@@ -138,7 +170,7 @@ final class ClaudeHostRegistry {
                     self._pending[idx].label = hostname
                 }
             }
-            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+            self.postDidChange()
         }
     }
 

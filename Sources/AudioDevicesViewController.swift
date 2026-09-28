@@ -3,7 +3,7 @@ import Combine
 import SharedModels
 import FluidAudio
 
-class AudioDevicesViewController: NSViewController {
+class AudioDevicesViewController: NSViewController, NSSoundDelegate {
     private var deviceManager = AudioDeviceManager.shared
     private var cancellables = Set<AnyCancellable>()
 
@@ -23,6 +23,8 @@ class AudioDevicesViewController: NSViewController {
     private let voiceInfoLabel = NSTextField(labelWithString: "")
     private let testVoiceButton = NSButton(title: "Test Voice", target: nil, action: nil)
     private var testVoiceTask: Task<Void, Never>?
+    /// Retains the test-voice clip for the duration of playback.
+    private var testVoiceSound: NSSound?
     
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
@@ -351,8 +353,16 @@ class AudioDevicesViewController: NSViewController {
                     voice: voice
                 )
                 guard !Task.isCancelled else { return }
-                let sound = NSSound(data: wavData)
-                sound?.play()
+                // Hold the sound in a property: a local NSSound is deallocated
+                // when this closure returns, and a deallocated NSSound stops
+                // playing — the button produced a click or nothing at all.
+                await MainActor.run {
+                    self.testVoiceSound?.stop()
+                    let sound = NSSound(data: wavData)
+                    sound?.delegate = self
+                    self.testVoiceSound = sound
+                    sound?.play()
+                }
             } catch {
                 print("Voice test failed: \(error)")
             }
@@ -366,5 +376,16 @@ class AudioDevicesViewController: NSViewController {
     override func viewDidAppear() {
         super.viewDidAppear()
         updateVoiceUI()
+    }
+
+    func sound(_ sound: NSSound, didFinishPlaying finished: Bool) {
+        if testVoiceSound === sound { testVoiceSound = nil }
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        testVoiceTask?.cancel()
+        testVoiceSound?.stop()
+        testVoiceSound = nil
     }
 }

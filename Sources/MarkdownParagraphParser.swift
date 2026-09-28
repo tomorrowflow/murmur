@@ -211,8 +211,8 @@ struct MarkdownParagraphParser {
                 continue
             }
 
-            // Table (lines containing | pipe characters, with a separator row)
-            if isTableRow(trimmed) {
+            // Table: a pipe row immediately followed by a separator row.
+            if startsTable(lines: lines, at: i) {
                 let startLine = i
                 while i < lineCount {
                     let t = lines[i].trimmingCharacters(in: .whitespaces)
@@ -281,6 +281,37 @@ struct MarkdownParagraphParser {
     private static func isTableRow(_ line: String) -> Bool {
         // A table row contains at least one | and is not a horizontal rule
         return line.contains("|") && !isHorizontalRule(line)
+    }
+
+    /// A GFM table separator: `|---|---|`, `| :-- | --: |`, `--- | ---`.
+    static func isTableSeparatorRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return false }
+        let cells = trimmed
+            .trimmingCharacters(in: CharacterSet(charactersIn: "|"))
+            .components(separatedBy: "|")
+        guard cells.count >= 2 else { return false }
+        for cell in cells {
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            guard !c.isEmpty, c.allSatisfy({ $0 == "-" || $0 == ":" }), c.contains("-") else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// True when the line at `index` starts a real table — i.e. the *next*
+    /// line is a separator row.
+    ///
+    /// Testing only for a `|` treated any prose line containing a pipe as a
+    /// table, so a sentence mentioning a shell pipeline was spoken as
+    /// "Table: run grep foo. wc -l." and had its cells period-separated.
+    static func startsTable(lines: [String], at index: Int) -> Bool {
+        guard index < lines.count, isTableRow(lines[index].trimmingCharacters(in: .whitespaces)) else {
+            return false
+        }
+        guard index + 1 < lines.count else { return false }
+        return isTableSeparatorRow(lines[index + 1])
     }
 
     private static func isListItem(_ line: String) -> Bool {

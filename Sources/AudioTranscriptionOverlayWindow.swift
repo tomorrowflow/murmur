@@ -18,6 +18,27 @@ class AudioTranscriptionOverlayViewModel: ObservableObject {
     @Published var state: AudioTranscriptionOverlayState = .hidden
     @Published var errorText: String = ""
     @Published var elapsedSeconds: Int = 0
+    /// Set once per session. The level callback fires ~20 times a second and
+    /// used to re-assign the three target properties every time whenever the
+    /// icon happened to be nil (the plain hotkey path never sets one), firing
+    /// three `objectWillChange` notifications per audio buffer.
+    private(set) var didPopulateTarget = false
+
+    func populateTargetOnce(icon: NSImage?, name: String?, windowDetail: String?) {
+        guard !didPopulateTarget else { return }
+        didPopulateTarget = true
+        targetAppIcon = icon
+        targetAppName = name
+        targetWindowDetail = windowDetail
+    }
+
+    func resetTarget() {
+        didPopulateTarget = false
+        targetAppIcon = nil
+        targetAppName = nil
+        targetWindowDetail = nil
+    }
+
     @Published var targetAppIcon: NSImage?
     @Published var targetAppName: String?
     /// Where the transcription will be pasted — typically the terminal

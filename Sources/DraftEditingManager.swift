@@ -102,6 +102,17 @@ class DraftEditingManager {
     private var editorAdapter: EditorAdapter?
 
     // Escape key monitors
+    /// Serialises every highlight write to the document.
+    ///
+    /// Highlighting rewrites the whole file (marker characters appended to the
+    /// paragraph's lines), and it used to run in a detached `Task` per
+    /// paragraph. Rapid next/prev — or a navigation overlapping the
+    /// completion `clearHighlight` — let two of them read the same content and
+    /// both write it back, so the loser's markers vanished and anything the
+    /// editor had saved in between was clobbered. Chaining onto the previous
+    /// task keeps them strictly ordered.
+    private var highlightChain: Task<Void, Never>?
+
     private var escapeGlobalMonitor: Any?
     private var escapeLocalMonitor: Any?
 
@@ -172,7 +183,8 @@ class DraftEditingManager {
         editTask = nil
         // Clean up highlight markers from the file
         if let doc = document {
-            Task { await editorAdapter?.clearHighlight(file: doc.filePath) }
+            let adapter = editorAdapter
+            enqueueHighlightWork { await adapter?.clearHighlight(file: doc.filePath) }
         }
         reset()
     }
@@ -262,29 +274,67 @@ class DraftEditingManager {
         }
     }
 
+    /// Locate the paragraph an undo entry refers to.
+    ///
+    /// Stored indices shift whenever an earlier edit changes the paragraph
+    /// count (an edit that splits one paragraph into two renumbers everything
+    /// after it), so the index alone is not a safe anchor — undoing through it
+    /// silently overwrote an unrelated paragraph. Match on the text the edit
+    /// produced instead, and only accept an unambiguous match.
+    private static func resolveParagraphIndex(for entry: DraftEditEntry, in doc: MarkdownDocument) -> Int? {
+        func normalize(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let target = normalize(entry.replacement)
+        if entry.paragraphIndex < doc.paragraphs.count,
+           normalize(doc.paragraphs[entry.paragraphIndex].text) == target {
+            return entry.paragraphIndex
+        }
+        let matches = doc.paragraphs.indices.filter { normalize(doc.paragraphs[$0].text) == target }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     /// Undo a specific edit by index in the edit history.
     func undoEdit(historyIndex: Int) {
-        guard historyIndex < editHistory.count, let doc = document else { return }
+        guard historyIndex >= 0, historyIndex < editHistory.count, let doc = document else { return }
         let entry = editHistory[historyIndex]
 
-        // Find the paragraph — it may have shifted due to later edits
-        let paragraph = doc.paragraphs[entry.paragraphIndex]
-        NSLog("[DraftEdit] Undoing edit at paragraph \(entry.paragraphIndex)")
+        guard let resolvedIndex = Self.resolveParagraphIndex(for: entry, in: doc) else {
+            let msg = "Can't undo — that paragraph has changed since the edit"
+            NSLog("[DraftEdit] \(msg) (stored index \(entry.paragraphIndex))")
+            state = .error(msg)
+            delegate?.draftDidError(msg)
+            return
+        }
+        let paragraph = doc.paragraphs[resolvedIndex]
+        NSLog("[DraftEdit] Undoing edit at paragraph \(resolvedIndex) (stored \(entry.paragraphIndex))")
 
         state = .applyingEdit
         editTask = Task { [weak self] in
             guard let self = self else { return }
             do {
-                // Clear highlights first, then re-parse for clean line ranges
+                // Clear highlights first, then re-parse for clean line ranges.
+                // Settle any queued highlight write first, or it lands after
+                // the clear and puts markers back into the parsed ranges.
+                await self.awaitHighlightsSettled()
                 await self.editorAdapter?.clearHighlight(file: doc.filePath)
                 let cleanDoc = try MarkdownParagraphParser.parse(filePath: doc.filePath)
-                let cleanParagraph = cleanDoc.paragraphs[entry.paragraphIndex]
+                guard let cleanIndex = Self.resolveParagraphIndex(for: entry, in: cleanDoc) else {
+                    await MainActor.run {
+                        let msg = "Can't undo — that paragraph has changed since the edit"
+                        self.state = .error(msg)
+                        self.delegate?.draftDidError(msg)
+                    }
+                    return
+                }
+                let cleanParagraph = cleanDoc.paragraphs[cleanIndex]
 
                 let _ = try FileEditController.replaceParagraph(
                     in: doc.filePath,
                     lineRange: cleanParagraph.lineRange,
                     with: entry.original,
-                    expectedModDate: cleanDoc.modificationDate
+                    expectedModDate: cleanDoc.modificationDate,
+                    expectedOriginal: cleanParagraph.text
                 )
 
                 // Re-parse after edit
@@ -340,13 +390,19 @@ class DraftEditingManager {
                             self.delegate?.draftDidActivateParagraph(index: i, paragraph: paragraph)
                         }
                         if let doc = document {
-                            Task {
-                                // Single mate call: highlights paragraph and scrolls to it
-                                await editorAdapter?.highlightLines(
-                                    file: doc.filePath,
-                                    from: paragraph.lineRange.lowerBound,
-                                    to: paragraph.lineRange.upperBound
-                                )
+                            let adapter = await MainActor.run { self.editorAdapter }
+                            let range = paragraph.lineRange
+                            await MainActor.run {
+                                // Single mate call: highlights paragraph and
+                                // scrolls to it. Queued so two navigations
+                                // can't rewrite the file concurrently.
+                                self.enqueueHighlightWork {
+                                    await adapter?.highlightLines(
+                                        file: doc.filePath,
+                                        from: range.lowerBound,
+                                        to: range.upperBound
+                                    )
+                                }
                             }
                         }
                     }
@@ -409,7 +465,8 @@ class DraftEditingManager {
 
         guard !Task.isCancelled else { return }
         // Clear highlights when reading completes
-        if let doc = document {
+        if let doc = await MainActor.run(body: { self.document }) {
+            await awaitHighlightsSettled()
             await editorAdapter?.clearHighlight(file: doc.filePath)
         }
         await MainActor.run {
@@ -482,11 +539,24 @@ class DraftEditingManager {
             guard let doc = self.document else { return }
 
             // 1. Clear highlight markers first — they modify the file, which
-            //    would cause the mod-date check to fail
+            //    would cause the mod-date check to fail. Queued highlight
+            //    writes must land before the clear, not after it.
+            await awaitHighlightsSettled()
             await editorAdapter?.clearHighlight(file: doc.filePath)
 
-            // 2. Re-parse the now-clean file to get correct line ranges
+            // 2. Re-parse the now-clean file to get correct line ranges.
+            //    The user may have edited the document in the editor while the
+            //    LLM was streaming, so the re-parse can have fewer paragraphs
+            //    than the index we started from.
             let cleanDoc = try MarkdownParagraphParser.parse(filePath: doc.filePath)
+            guard paragraphIndex < cleanDoc.paragraphs.count else {
+                await MainActor.run {
+                    let msg = "Document changed while the edit was generating — paragraph \(paragraphIndex + 1) no longer exists"
+                    self.state = .error(msg)
+                    self.delegate?.draftDidError(msg)
+                }
+                return
+            }
             let cleanParagraph = cleanDoc.paragraphs[paragraphIndex]
 
             // 3. Apply the edit to the clean file
@@ -494,7 +564,8 @@ class DraftEditingManager {
                 in: doc.filePath,
                 lineRange: cleanParagraph.lineRange,
                 with: finalText,
-                expectedModDate: cleanDoc.modificationDate
+                expectedModDate: cleanDoc.modificationDate,
+                expectedOriginal: cleanParagraph.text
             )
 
             // Re-parse document after edit
@@ -603,21 +674,23 @@ class DraftEditingManager {
         try Task.checkCancellation()
 
         // Pause Spotify/Music/Podcasts/etc. for the playback session per
-        // user setting; resumed in reset(). Idempotent.
+        // user setting; resumed in reset(). Idempotent. Re-check
+        // cancellation first so a task cancelled by stop() can't cancel the
+        // resume that stop() just scheduled.
+        try Task.checkCancellation()
         if AudioDuckMode.current.pausesMediaDuringPlayback {
             MediaRemoteController.shared.pause()
         }
 
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("draftEdit_tts_\(UUID().uuidString).wav")
-        try data.write(to: tempURL)
-
         // Collect audio for export. audioSegments/currentPlayer are owned by
         // the main thread (stop/export mutate them there); this task runs on
         // the cooperative pool, so hop for every mutation.
-        await MainActor.run { audioSegments.append(data) }
+        await MainActor.run { collectAudioSegment(data) }
 
-        let player = try AVAudioPlayer(contentsOf: tempURL)
+        // Played straight from memory. Every sentence *and* every silence gap
+        // used to round-trip through a unique temp file — write, decode,
+        // delete, three syscalls per couple of seconds of speech.
+        let player = try AVAudioPlayer(data: data)
         player.prepareToPlay()
         await MainActor.run { currentPlayer = player }
 
@@ -637,7 +710,6 @@ class DraftEditingManager {
             DispatchQueue.main.async { [weak self] in
                 if self?.currentPlayer === player { self?.currentPlayer = nil }
             }
-            try? FileManager.default.removeItem(at: tempURL)
         }
 
         if !isPaused {
@@ -690,6 +762,38 @@ class DraftEditingManager {
         }
     }
 
+    /// See the note on ReadAloudManager.deinit — a leaked local Escape monitor
+    /// silently eats Escape for the whole app.
+    deinit {
+        let global = escapeGlobalMonitor
+        let local = escapeLocalMonitor
+        let cleanup = {
+            if let global = global { NSEvent.removeMonitor(global) }
+            if let local = local { NSEvent.removeMonitor(local) }
+        }
+        if Thread.isMainThread { cleanup() } else { DispatchQueue.main.async(execute: cleanup) }
+    }
+
+    /// Enqueue a highlight write behind any already-pending one.
+    @discardableResult
+    private func enqueueHighlightWork(_ work: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        let previous = highlightChain
+        let task = Task { [weak self] in
+            _ = await previous?.value
+            _ = self
+            await work()
+        }
+        highlightChain = task
+        return task
+    }
+
+    /// Wait for all queued highlight writes to land. Call before re-parsing the
+    /// file for an edit, so line ranges are read from settled content.
+    private func awaitHighlightsSettled() async {
+        let chain = await MainActor.run { self.highlightChain }
+        _ = await chain?.value
+    }
+
     private func removeEscapeMonitor() {
         if let monitor = escapeGlobalMonitor {
             NSEvent.removeMonitor(monitor)
@@ -703,6 +807,28 @@ class DraftEditingManager {
 
     // MARK: - Reset
 
+
+    /// Upper bound on retained export audio. Segments are 24 kHz 16-bit mono
+    /// (~2.9 MB per minute of speech), so a long document would otherwise grow
+    /// this without limit for an export the user may never request.
+    private static let maxAudioSegmentBytes = 150 * 1024 * 1024
+    private var audioSegmentBytes = 0
+    private var didWarnAudioSegmentLimit = false
+
+    /// Append to the export buffer unless the budget is spent.
+    private func collectAudioSegment(_ data: Data) {
+        guard audioSegmentBytes + data.count <= Self.maxAudioSegmentBytes else {
+            if !didWarnAudioSegmentLimit {
+                didWarnAudioSegmentLimit = true
+                NSLog("Audio export buffer hit its %d MB limit — later audio won't be included in an export",
+                      Self.maxAudioSegmentBytes / (1024 * 1024))
+            }
+            return
+        }
+        audioSegmentBytes += data.count
+        audioSegments.append(data)
+    }
+
     private func reset() {
         state = .idle
         document = nil
@@ -713,6 +839,8 @@ class DraftEditingManager {
         streamingEditText = ""
         cueAudioCache = [:]
         audioSegments = []
+        audioSegmentBytes = 0
+        didWarnAudioSegmentLimit = false
         MediaRemoteController.shared.resumeIfWePaused()
         hasPrimedBluetoothOutput = false
     }

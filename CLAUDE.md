@@ -8,9 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Development build and run
 swift build && swift run Murmur
 
-# Production app bundle
-./build.sh
-cp -R build/Murmur.app /Applications/
+# Production app bundle — builds, installs to /Applications, relaunches,
+# then waits for the HTTP server to answer before reporting success.
+./build.sh                      # release
+./build.sh debug                # debug configuration
+./build.sh --no-install         # build the bundle only
+./build.sh --no-launch          # install but don't relaunch
+./build.sh --install-dir ~/Apps # install somewhere else
 
 # Run a specific test/tool executable
 swift run TestSentenceSplitter

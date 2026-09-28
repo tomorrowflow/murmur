@@ -311,6 +311,15 @@ extension AppDelegate {
     }
 
     private func stopOpenClawPushToTalk() {
+        // Retire the Bluetooth warm-up chain for this session. Leaving
+        // `onMicReady` installed lets it fire during the *next* recording,
+        // where it clears the buffer 0.5s in (eating the first half-second of
+        // speech) and plays a stray start tone; leaving `bluetoothWarmingUp`
+        // set pins the STT overlay on "Connecting microphone…" and suppresses
+        // voice detection app-wide.
+        openClawRecordingManager?.onMicReady = nil
+        bluetoothWarmingUp = false
+
         if let pending = openClawPendingStartWorkItem {
             // Released during the tone-delay window, before the engine
             // started: cancel the deferred start instead of dropping the stop.
@@ -340,6 +349,11 @@ extension AppDelegate {
         // and dismiss its overlay before we start recording.
         if readAloudManager?.isActive == true {
             print("STT PTT: interrupting active Read Aloud session")
+            // The interrupted session must not auto-record into its old
+            // recap target once this recording ends.
+            pendingAutoRecordAfterReadAloud = false
+            recapTargetApp = nil
+            recapTargetWindow = nil
             readAloudManager?.stop()
             readAloudOverlay?.dismissNow()
             readAloudManager = nil
@@ -362,6 +376,8 @@ extension AppDelegate {
         sttAutoRecordAfterRecap = isAutoRecordAfterRecap
         sttHasCapturedVoice = false
         cancelUtteranceSilenceTimer()
+        // New session: let the overlay pick up this session's paste target.
+        audioOverlay?.viewModel.resetTarget()
         if let app = overrideTargetApp {
             sttPushToTalkTargetApp = app
             sttPushToTalkTargetWindow = overrideTargetWindow
@@ -370,10 +386,8 @@ extension AppDelegate {
             sttPushToTalkTargetApp = NSWorkspace.shared.frontmostApplication
             // Capture the specific focused window via Accessibility API
             if let app = sttPushToTalkTargetApp {
-                let appElement = AXUIElementCreateApplication(app.processIdentifier)
-                var windowValue: AnyObject?
-                if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success {
-                    sttPushToTalkTargetWindow = (windowValue as! AXUIElement)
+                if let window = AXSafe.focusedWindow(pid: app.processIdentifier) {
+                    sttPushToTalkTargetWindow = window
                     var titleValue: AnyObject?
                     if AXUIElementCopyAttributeValue(sttPushToTalkTargetWindow!, kAXTitleAttribute as CFString, &titleValue) == .success {
                         print("STT PTT: captured target window: \"\(titleValue as? String ?? "")\" in \(app.localizedName ?? "Unknown")")
@@ -470,11 +484,11 @@ extension AppDelegate {
               !draftEditInterruptActive,
               !useCursorAnchoredOverlay else { return }
         let overlay = ensureAudioOverlay()
-        if overlay.viewModel.targetAppIcon == nil {
-            overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
-            overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
-            overlay.viewModel.targetWindowDetail = Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
-        }
+        overlay.viewModel.populateTargetOnce(
+            icon: sttPushToTalkTargetApp?.icon,
+            name: sttPushToTalkTargetApp?.localizedName,
+            windowDetail: Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
+        )
         overlay.show(state: state)
     }
 

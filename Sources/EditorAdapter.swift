@@ -59,9 +59,15 @@ class TextMateAdapter: EditorAdapter {
             // First remove any existing markers
             content = content.replacingOccurrences(of: TextMateAdapter.marker, with: "")
 
-            // Split into lines, add marker to target lines
+            // Split into lines, add marker to target lines. `startLine`/`endLine`
+            // are 1-based half-open and come from a parse that may predate an
+            // edit in the editor, so clamp both ends — an unclamped
+            // `(startLine-1)..<min(endLine-1, count)` traps when the file
+            // shrank below startLine.
             var lines = content.components(separatedBy: "\n")
-            for i in (startLine - 1)..<min(endLine - 1, lines.count) {
+            let lowerIndex = max(0, startLine - 1)
+            let upperIndex = min(max(endLine - 1, lowerIndex), lines.count)
+            for i in lowerIndex..<upperIndex {
                 let line = lines[i]
                 // Only mark non-empty lines
                 if !line.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -112,26 +118,14 @@ class TextMateAdapter: EditorAdapter {
     /// Get the current cursor line number in TextMate via the Accessibility API.
     /// Reads the focused text element's selected text range and counts newlines to determine the line.
     static func getCursorLine() -> Int? {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: AnyObject?
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
-              let element = focusedElement else {
+        guard let axElement = AXSafe.focusedElement() else {
             NSLog("[TextMateAdapter] Failed to get focused element")
             return nil
         }
 
-        let axElement = element as! AXUIElement
-
         // Get the selected text range (gives us the cursor position as a character offset)
-        var rangeValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success else {
+        guard let range = AXSafe.selectedTextRange(axElement) else {
             NSLog("[TextMateAdapter] Failed to get selected text range")
-            return nil
-        }
-
-        var range = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else {
-            NSLog("[TextMateAdapter] Failed to extract CFRange")
             return nil
         }
 
@@ -145,8 +139,18 @@ class TextMateAdapter: EditorAdapter {
             return nil
         }
 
-        // Count newlines before cursor offset to determine line number (1-based)
-        let prefixEnd = fullText.index(fullText.startIndex, offsetBy: min(cursorOffset, fullText.count))
+        // Count newlines before cursor offset to determine line number (1-based).
+        // AX range locations are UTF-16 offsets, so they must be converted as
+        // such — `offsetBy:` counts Characters, which drifts by one per emoji
+        // or other non-BMP scalar above the cursor.
+        let utf16Count = fullText.utf16.count
+        guard let prefixEnd = String.Index(
+            String.Index(utf16Offset: min(cursorOffset, utf16Count), in: fullText),
+            within: fullText
+        ) else {
+            NSLog("[TextMateAdapter] Cursor offset \(cursorOffset) is not a character boundary")
+            return nil
+        }
         let prefix = fullText[fullText.startIndex..<prefixEnd]
         let lineNumber = prefix.filter { $0 == "\n" }.count + 1
 
@@ -357,7 +361,17 @@ class ObsidianAdapter: EditorAdapter {
     }
 
     /// Check if the companion plugin is reachable.
-    static func isCompanionRunning() -> Bool {
+    ///
+    /// Prefer this from async contexts. The synchronous twin blocks its thread
+    /// on a semaphore for up to a second, which starves the (small) cooperative
+    /// pool when it is called from inside a `Task`.
+    static func isCompanionRunning() async -> Bool {
+        return await getCompanion("/cursor") != nil
+    }
+
+    /// Blocking variant, for the main-thread hotkey path that must decide
+    /// before any async work starts. Never call this from inside a `Task`.
+    static func isCompanionRunningSync() -> Bool {
         return getCompanionSync("/cursor") != nil
     }
 

@@ -20,6 +20,22 @@ public enum HTTPRequestParser {
         data.range(of: headerTerminator)
     }
 
+    /// Byte length of the blank line that terminates the header section.
+    /// Callers scanning incrementally must overlap by `length - 1` bytes so a
+    /// terminator split across two reads is still found.
+    public static let headerTerminatorLength = headerTerminator.count
+
+    /// Header-terminator search that skips the first `offset` bytes.
+    ///
+    /// A request body can arrive over many reads; rescanning the whole
+    /// accumulated buffer each time is quadratic in the body size. The
+    /// returned range is still expressed in `data`'s own indices.
+    public static func headerEndRange(in data: Data, searchingFrom offset: Int) -> Range<Data.Index>? {
+        guard offset > 0 else { return headerEndRange(in: data) }
+        let start = data.index(data.startIndex, offsetBy: min(offset, data.count))
+        return data.range(of: headerTerminator, in: start..<data.endIndex)
+    }
+
     /// Content-Length declared in a (possibly partial) header section.
     public static func contentLength(inHeaderSection headerData: Data) -> Int? {
         guard let text = String(data: headerData, encoding: .utf8) else { return nil }

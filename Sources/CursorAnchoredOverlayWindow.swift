@@ -98,23 +98,10 @@ class CursorAnchoredOverlayWindow {
     /// Get the screen position of the text cursor in the focused app via Accessibility API.
     /// Returns the point just below the cursor, or nil if not available.
     static func getCursorScreenPosition() -> NSPoint? {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: AnyObject?
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success else {
-            return nil
-        }
-        let element = focusedElement as! AXUIElement
+        guard let element = AXSafe.focusedElement() else { return nil }
 
         // Try to get cursor bounds via text range
-        var rangeValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success else {
-            return nil
-        }
-
-        var range = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else {
-            return nil
-        }
+        guard let range = AXSafe.selectedTextRange(element) else { return nil }
 
         // Query bounds for a 1-char range at cursor position
         var queryRange = CFRange(location: range.location, length: max(range.length, 1))
@@ -133,7 +120,7 @@ class CursorAnchoredOverlayWindow {
         }
 
         var rect = CGRect.zero
-        guard AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) else {
+        guard AXSafe.unwrap(boundsValue, .cgRect, into: &rect) else {
             return nil
         }
 

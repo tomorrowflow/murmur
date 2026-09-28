@@ -155,11 +155,14 @@ struct ReadAloudSettingsView: View {
             .formStyle(.grouped)
         }
         .onAppear {
+            // load() assigns ollamaURL, which fires onChange below — so this
+            // view no longer kicks off its own refresh as well.
             viewModel.load()
-            viewModel.refreshModels()
         }
         .onChange(of: viewModel.ollamaURL) { _ in
-            viewModel.refreshModels()
+            // Debounced: this fires per keystroke in the Server URL field, and
+            // each refresh was a live /v1/models request.
+            viewModel.scheduleModelsRefresh()
         }
     }
 }
@@ -172,7 +175,7 @@ class ReadAloudSettingsViewModel: ObservableObject {
 
     @Published var ollamaURL: String = "" { didSet { persist(ollamaURL, forKey: "readAloud.ollamaURL") } }
     @Published var ollamaModel: String = "" { didSet { persist(ollamaModel, forKey: "readAloud.ollamaModel") } }
-    @Published var llmServerAPIKey: String = "" { didSet { persist(llmServerAPIKey, forKey: "readAloud.llmServerAPIKey") } }
+    @Published var llmServerAPIKey: String = "" { didSet { persistSecret(llmServerAPIKey, forKey: LLMClient.serverAPIKeyDefaultsKey) } }
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, forKey: "readAloud.webSearchEnabled") } }
     @Published var ollamaAPIKey: String = "" { didSet { persistSecret(ollamaAPIKey, forKey: "readAloud.ollamaAPIKey") } }
     @Published var resumeBehavior: String = "ask" { didSet { persist(resumeBehavior, forKey: "readAloud.resumeBehavior") } }
@@ -197,16 +200,26 @@ class ReadAloudSettingsViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         ollamaURL = defaults.string(forKey: "readAloud.ollamaURL") ?? "http://localhost:11434"
         ollamaModel = defaults.string(forKey: "readAloud.ollamaModel") ?? ""
-        llmServerAPIKey = defaults.string(forKey: "readAloud.llmServerAPIKey") ?? ""
+        llmServerAPIKey = SecretsStore.get(LLMClient.serverAPIKeyDefaultsKey) ?? ""
         webSearchEnabled = defaults.bool(forKey: "readAloud.webSearchEnabled")
         ollamaAPIKey = SecretsStore.get("readAloud.ollamaAPIKey") ?? ""
         resumeBehavior = defaults.string(forKey: "readAloud.resumeBehavior") ?? "ask"
         draftEditingEditor = defaults.string(forKey: "draftEditing.editor") ?? "auto"
     }
 
+    /// Coalesces the per-keystroke URL changes into one request.
+    private var modelsRefreshWorkItem: DispatchWorkItem?
+
+    func scheduleModelsRefresh() {
+        modelsRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.refreshModels() }
+        modelsRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: item)
+    }
+
     func checkObsidianPlugin() {
         Task {
-            let reachable = ObsidianAdapter.isCompanionRunning()
+            let reachable = await ObsidianAdapter.isCompanionRunning()
             await MainActor.run {
                 self.obsidianPluginReachable = reachable
             }

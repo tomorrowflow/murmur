@@ -115,6 +115,8 @@ extension AppDelegate {
                     ]
                     if wantsWorkflows { payload["workflows"] = "not-implemented" }
                     return (202, MurmurHTTPServer.jsonResponse(payload))
+                } catch let error as CallTranscriptionRunner.TranscribeError {
+                    return (409, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
                 } catch {
                     return (400, MurmurHTTPServer.jsonResponse(["error": error.localizedDescription]))
                 }
@@ -163,19 +165,23 @@ extension AppDelegate {
         }
 
         server.get("/api/v1/draft/status") { [weak self] _ in
-            guard let manager = self?.draftEditingManager, manager.isActive,
-                  let doc = manager.document else {
-                return (200, MurmurHTTPServer.jsonResponse([
-                    "active": false
-                ]))
+            // Hop to main like every other route here: the session state this
+            // reads is written on the main thread by the playback and edit
+            // paths, and the router body runs on a cooperative thread.
+            let payload: [String: Any] = await MainActor.run {
+                guard let manager = self?.draftEditingManager, manager.isActive,
+                      let doc = manager.document else {
+                    return ["active": false]
+                }
+                return [
+                    "active": true,
+                    "sessionId": manager.sessionId.uuidString,
+                    "currentParagraph": manager.currentParagraphIndex,
+                    "totalParagraphs": doc.paragraphs.count,
+                    "state": manager.state.displayName
+                ]
             }
-            return (200, MurmurHTTPServer.jsonResponse([
-                "active": true,
-                "sessionId": manager.sessionId.uuidString,
-                "currentParagraph": manager.currentParagraphIndex,
-                "totalParagraphs": doc.paragraphs.count,
-                "state": manager.state.displayName
-            ]))
+            return (200, MurmurHTTPServer.jsonResponse(payload))
         }
 
         server.post("/api/v1/draft/start") { [weak self] body in
@@ -184,7 +190,8 @@ extension AppDelegate {
                 return (400, MurmurHTTPServer.jsonResponse(["error": "Missing filePath"]))
             }
 
-            guard self?.draftEditingManager?.isActive != true else {
+            let alreadyActive = await MainActor.run { self?.draftEditingManager?.isActive == true }
+            guard !alreadyActive else {
                 return (409, MurmurHTTPServer.jsonResponse(["error": "Session already active"]))
             }
 

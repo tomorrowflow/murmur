@@ -416,7 +416,7 @@ public final class TranscriptionPipeline {
 
     // MARK: Segmentation
 
-    private struct Region { let start: Int; let end: Int }
+    struct Region { let start: Int; let end: Int }
 
     /// Energy-based segmentation. Detects speech frames against a peak-relative
     /// threshold (adapts to per-track level — a call's app track is silent when
@@ -426,7 +426,10 @@ public final class TranscriptionPipeline {
     /// keeps its onset/tail rather than being clipped to unintelligibility),
     /// merges regions that overlap once padded, and caps each segment at
     /// `maxSegment` by splitting at the quietest nearby frame.
-    private func segmentRegions(samples: [Float]) -> [Region] {
+    /// `internal` rather than `private` so the test target can exercise the
+    /// segmentation maths directly — it is the part of this pipeline that is
+    /// pure and worth pinning down.
+    func segmentRegions(samples: [Float]) -> [Region] {
         let frameLen = Int(0.03 * sampleRate)       // 30 ms
         guard frameLen > 0, samples.count >= frameLen else {
             return samples.isEmpty ? [] : [Region(start: 0, end: samples.count)]
@@ -502,7 +505,13 @@ public final class TranscriptionPipeline {
             var start = region.start
             while region.end - start > maxSamples {
                 let hardCut = start + maxSamples
-                let cut = quietestCut(samples: samples, from: hardCut - Int(2 * sampleRate), to: hardCut, frameLen: frameLen) ?? hardCut
+                // The search window must stay above `start`, and the chosen cut
+                // must advance past it. With a small `maxSegmentSeconds` the
+                // 2-second lookback reaches behind `start`, and a cut at or
+                // before it made this loop append empty regions forever.
+                let searchFrom = max(start + frameLen, hardCut - Int(2 * sampleRate))
+                let rawCut = quietestCut(samples: samples, from: searchFrom, to: hardCut, frameLen: frameLen) ?? hardCut
+                let cut = min(max(rawCut, start + frameLen), hardCut)
                 capped.append(Region(start: start, end: cut))
                 start = cut
             }

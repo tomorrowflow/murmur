@@ -15,7 +15,6 @@ enum ManagerTab: Int {
 class UnifiedManagerWindow: NSWindowController {
     private var tabViewController: NSTabViewController!
     private var generalViewController: GeneralSettingsViewController?
-    private var settingsController: SettingsWindowController?
     private var shortcutsViewController: ShortcutsSettingsViewController?
     private var audioDevicesViewController: AudioDevicesViewController?
     private var openClawViewController: OpenClawSettingsViewController?
@@ -53,12 +52,12 @@ class UnifiedManagerWindow: NSWindowController {
         generalTab.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "General")
         tabViewController.addTabViewItem(generalTab)
 
-        // Settings Tab
-        if settingsController == nil {
-            settingsController = SettingsWindowController()
-        }
-        let settingsViewController = NSViewController()
-        settingsViewController.view = settingsController!.window!.contentView!
+        // Settings Tab. Host SettingsView directly rather than building a
+        // whole NSWindow and stealing its content view: that detached the
+        // hosting controller's view from its own window (breaking responder
+        // and appearance containment) behind three force unwraps, and left the
+        // orphaned window alive for the process lifetime.
+        let settingsViewController = NSHostingController(rootView: SettingsView())
         let settingsTab = NSTabViewItem(viewController: settingsViewController)
         settingsTab.label = "Settings"
         settingsTab.image = NSImage(systemSymbolName: "gear", accessibilityDescription: "Settings")

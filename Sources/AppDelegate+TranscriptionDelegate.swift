@@ -65,11 +65,11 @@ extension AppDelegate {
             } else {
                 cursorAnchoredOverlay?.dismiss()
                 let overlay = ensureAudioOverlay()
-                if overlay.viewModel.targetAppIcon == nil {
-                    overlay.viewModel.targetAppIcon = sttPushToTalkTargetApp?.icon
-                    overlay.viewModel.targetAppName = sttPushToTalkTargetApp?.localizedName
-                    overlay.viewModel.targetWindowDetail = Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
-                }
+                overlay.viewModel.populateTargetOnce(
+                    icon: sttPushToTalkTargetApp?.icon,
+                    name: sttPushToTalkTargetApp?.localizedName,
+                    windowDetail: Self.targetWindowDetail(for: sttPushToTalkTargetWindow)
+                )
                 // Don't downgrade .listening → .connecting if a stray audio
                 // buffer arrives while bluetoothWarmingUp is still true.
                 if overlay.viewModel.state != .listening {
@@ -180,10 +180,16 @@ extension AppDelegate {
                 Clean up ONLY the text inside the <transcript> tags. Output the cleaned \
                 text and nothing else.
                 """
-                let refined = try await promptRefinementClient.chat(
-                    system: Self.promptRefinementSystemPrompt,
-                    user: wrappedInput
-                )
+                // Bound the wait. A black-holed LLM endpoint (host asleep,
+                // dropped VPN) otherwise leaves this Task suspended forever:
+                // the overlay stays on "refining", the recap queue never
+                // drains, and the transcription is lost.
+                let refined = try await Self.withTimeout(seconds: Self.promptRefinementTimeout) {
+                    try await self.promptRefinementClient.chat(
+                        system: Self.promptRefinementSystemPrompt,
+                        user: wrappedInput
+                    )
+                }
                 let result = refined.trimmingCharacters(in: .whitespacesAndNewlines)
                 if result.isEmpty {
                     print("Prompt refinement returned empty — using original")
@@ -211,6 +217,31 @@ extension AppDelegate {
                     drainRecapQueueIfIdle()
                 }
             }
+        }
+    }
+
+    /// Upper bound for the cleanup round-trip. Long enough for a local model
+    /// on a cold cache, short enough that the user gets their raw text back
+    /// instead of a stuck overlay.
+    private static let promptRefinementTimeout: TimeInterval = 15
+
+    enum RefinementError: Error { case timedOut }
+
+    /// Run `work`, throwing `RefinementError.timedOut` if it outlives the
+    /// deadline. The losing child is cancelled when the group is torn down.
+    private static func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw RefinementError.timedOut
+            }
+            guard let first = try await group.next() else { throw RefinementError.timedOut }
+            group.cancelAll()
+            return first
         }
     }
 

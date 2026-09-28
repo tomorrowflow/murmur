@@ -97,7 +97,32 @@ class ModelStateManager: ObservableObject {
         self.selectedModel = UserDefaults.standard.string(forKey: "selectedWhisperModel")
     }
     
+    /// Parakeet versions present on disk. Cached because the settings view
+    /// asked the filesystem for this from inside `body`, which re-evaluates
+    /// many times a second while a download is running.
+    @Published private(set) var downloadedParakeetVersions: Set<ParakeetVersion> = []
+
+    func refreshParakeetDownloadState() {
+        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            downloadedParakeetVersions = []
+            return
+        }
+        var found: Set<ParakeetVersion> = []
+        for version in ParakeetVersion.allCases {
+            let modelName = version == .v2 ? "parakeet-tdt-0.6b-v2-coreml" : "parakeet-tdt-0.6b-v3-coreml"
+            let path = documentsPath
+                .appendingPathComponent("FluidAudio")
+                .appendingPathComponent(modelName)
+            if FileManager.default.fileExists(atPath: path.path) { found.insert(version) }
+        }
+        if found != downloadedParakeetVersions { downloadedParakeetVersions = found }
+    }
+
+    /// Serializes the expensive "load it to see if it's complete" validation.
+    private static let validationGate = AsyncSemaphore(value: 1)
+
     func checkDownloadedModels() async {
+        refreshParakeetDownloadState()
         // Don't reset to empty - keep existing state until check completes
         var newDownloadedModels: Set<String> = []
         let modelManager = WhisperModelManager.shared
@@ -120,7 +145,13 @@ class ModelStateManager: ObservableObject {
                         return (model.name, true)
                     }
                     
-                    // Try to load the model with WhisperKit to validate it's complete
+                    // Try to load the model with WhisperKit to validate it's
+                    // complete. Only reached for a model present on disk with
+                    // no completion metadata; serialized by `validationGate`
+                    // so several multi-hundred-MB CoreML loads can't run at
+                    // once just to be thrown away.
+                    await Self.validationGate.wait()
+                    defer { Self.validationGate.signalDetached() }
                     do {
                         let _ = try await WhisperKit(
                             modelFolder: modelPath.path,

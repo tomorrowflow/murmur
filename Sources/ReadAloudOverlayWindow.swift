@@ -656,11 +656,15 @@ class ReadAloudOverlayWindow {
                 panel?.orderFront(nil)
             }
 
-            // Auto-dismiss after completion
+            // Auto-dismiss after completion. Goes through the same onStop
+            // chain as the X button so the AppDelegate tears the session
+            // down (manager released, recap queue drained) — plain
+            // dismiss() only hid the panel and left the finished session
+            // counted as "audio busy" indefinitely.
             autoDismissTimer?.invalidate()
             if state == .complete {
                 autoDismissTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
-                    self?.dismiss()
+                    self?.viewModel.dismiss()
                 }
             }
         }
@@ -755,6 +759,28 @@ class ReadAloudOverlayWindow {
         autoDismissTimer?.invalidate()
         removeEscapeMonitor()
         panel?.orderOut(nil)
+    }
+
+    /// A session's overlay is replaced per read-aloud, and the panel is created
+    /// with `isReleasedWhenClosed = false` — so without this the NSPanel, its
+    /// resize observer and (worst) its *local* Escape monitor outlived every
+    /// session. A leaked local monitor returns nil for keyCode 53, which
+    /// silently swallows Escape app-wide: save panels, settings sheets, the lot.
+    deinit {
+        let panel = self.panel
+        let observer = self.panelResizeObserver
+        let global = self.escapeGlobalMonitor
+        let local = self.escapeLocalMonitor
+        // AppKit teardown must happen on the main thread; deinit can run
+        // anywhere the last reference is dropped.
+        let cleanup = {
+            if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+            if let global = global { NSEvent.removeMonitor(global) }
+            if let local = local { NSEvent.removeMonitor(local) }
+            panel?.orderOut(nil)
+            panel?.close()
+        }
+        if Thread.isMainThread { cleanup() } else { DispatchQueue.main.async(execute: cleanup) }
     }
 
     private func ensurePanel() {

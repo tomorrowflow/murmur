@@ -31,8 +31,15 @@ public class LLMClient {
     /// web-search key above). Sent as a Bearer token when non-empty.
     private var serverAPIKey: String? { Self.resolveServerAPIKey() }
 
+    /// UserDefaults key the token used to live under, kept so
+    /// `SecretsStore.get` can migrate an existing plaintext value.
+    public static let serverAPIKeyDefaultsKey = "readAloud.llmServerAPIKey"
+
     static func resolveServerAPIKey() -> String? {
-        if let key = UserDefaults.standard.string(forKey: "readAloud.llmServerAPIKey"), !key.isEmpty {
+        // SecretsStore reads the Keychain in bundled builds and migrates any
+        // legacy plaintext UserDefaults value on first read. This token used to
+        // be written straight to UserDefaults, unlike its sibling ollamaAPIKey.
+        if let key = SecretsStore.get(serverAPIKeyDefaultsKey), !key.isEmpty {
             return key
         }
         if let env = ProcessInfo.processInfo.environment["LLM_SERVER_API_KEY"], !env.isEmpty {
@@ -52,14 +59,24 @@ public class LLMClient {
     /// Stream a chat completion from the LLM server. Yields content tokens.
     public func streamChat(system: String, user: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            // Hold the task so the consumer breaking out of the for-await
+            // actually stops the request. An unstructured Task does not
+            // inherit cancellation, so interrupting a read-aloud used to leave
+            // the server generating and this loop parsing to completion.
+            let task = Task {
                 do {
                     guard !model.isEmpty else {
                         continuation.finish(throwing: LLMClientError.noModel)
                         return
                     }
 
-                    let url = URL(string: "\(baseURL)/v1/chat/completions")!
+                    // baseURL comes from a user-editable settings field; a
+                    // stray space makes URL(string:) nil, and force-unwrapping
+                    // it crashed the app on the next read-aloud.
+                    guard let url = URL(string: "\(baseURL)/v1/chat/completions") else {
+                        continuation.finish(throwing: LLMClientError.invalidURL(baseURL))
+                        return
+                    }
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -94,10 +111,11 @@ public class LLMClient {
                         return
                     }
 
-                    var fullContent = ""
+                    var filter = ThinkBlockFilter()
                     // OpenAI streaming is Server-Sent Events: each chunk arrives as a
                     // `data: {json}` line, terminated by a `data: [DONE]` sentinel.
                     for try await line in bytes.lines {
+                        if Task.isCancelled { break }
                         guard line.hasPrefix("data:") else { continue }
                         let payloadString = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
                         if payloadString == "[DONE]" { break }
@@ -109,14 +127,18 @@ public class LLMClient {
                               let content = delta["content"] as? String else {
                             continue
                         }
-                        fullContent += content
-
-                        // Strip <think>...</think> blocks incrementally
-                        let filtered = Self.stripThinkBlocks(fullContent)
-                        // Only yield new content after stripping
-                        if !filtered.isEmpty {
-                            continuation.yield(content)
+                        // Emit only text outside <think>…</think>. The old
+                        // form yielded the raw delta whenever the *accumulated*
+                        // stripped text was non-empty, which let an
+                        // unterminated think block stream straight through.
+                        let visible = filter.consume(content)
+                        if !visible.isEmpty {
+                            continuation.yield(visible)
                         }
+                    }
+                    let tail = filter.flush()
+                    if !tail.isEmpty {
+                        continuation.yield(tail)
                     }
                     continuation.finish()
                 } catch is CancellationError {
@@ -127,6 +149,7 @@ public class LLMClient {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -231,11 +254,16 @@ public class LLMClient {
 
     // MARK: - Think Block Stripping
 
+    /// Compiled once. This used to be rebuilt on every call, and the call
+    /// sites run per streamed token.
+    private static let thinkBlockRegex = try? NSRegularExpression(
+        pattern: "<think>.*?</think>",
+        options: .dotMatchesLineSeparators
+    )
+
     public static func stripThinkBlocks(_ text: String) -> String {
         // Remove <think>...</think> blocks (reasoning models)
-        guard let regex = try? NSRegularExpression(pattern: "<think>.*?</think>", options: .dotMatchesLineSeparators) else {
-            return text
-        }
+        guard let regex = thinkBlockRegex else { return text }
         let range = NSRange(text.startIndex..., in: text)
         return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -254,6 +282,7 @@ public enum LLMClientError: LocalizedError {
     case httpError(Int)
     case authenticationFailed(Int)
     case noModel
+    case invalidURL(String)
 
     public var errorDescription: String? {
         switch self {
@@ -265,6 +294,8 @@ public enum LLMClientError: LocalizedError {
             return "LLM server rejected the API key (HTTP \(code)). Set or check the API key in Settings > Read Aloud."
         case .noModel:
             return "No model configured. Set one in Settings > Read Aloud."
+        case .invalidURL(let base):
+            return "LLM server URL is not valid: \(base). Check Settings > Read Aloud."
         }
     }
 }

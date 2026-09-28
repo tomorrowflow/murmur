@@ -305,6 +305,13 @@ class AudioTranscriptionManager {
             if let firstResult = transcriptionResult.first {
                 let transcription = firstResult.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 handleTranscriptionResult(transcription, samples: samples)
+            } else {
+                // WhisperKit returns an empty array for near-silent or clipped
+                // audio. Without a delegate callback here the overlay stays on
+                // "Transcribing" and `sttPushToTalkActive` never clears, so
+                // `isAudioBusy()` blocks every queued recap until relaunch.
+                print("WhisperKit returned no segments — treating as silence")
+                delegate?.recordingWasSkippedDueToSilence()
             }
         } catch {
             print("WhisperKit transcription error: \(error)")

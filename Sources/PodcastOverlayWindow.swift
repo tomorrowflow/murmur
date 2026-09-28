@@ -6,7 +6,27 @@ import SwiftUI
 class PodcastOverlayViewModel: ObservableObject {
     @Published var state: PodcastState = .idle
     @Published var title: String = ""
-    @Published var transcript: [ScriptLine] = []
+    @Published var transcript: [ScriptLine] = [] {
+        didSet { rebuildLineIndex() }
+    }
+
+    /// id → position in `transcript`, so a row can tell whether it is behind
+    /// the active line without scanning the whole transcript twice.
+    private var lineIndexByID: [UUID: Int] = [:]
+
+    private func rebuildLineIndex() {
+        var map: [UUID: Int] = [:]
+        map.reserveCapacity(transcript.count)
+        for (index, line) in transcript.enumerated() { map[line.id] = index }
+        lineIndexByID = map
+    }
+
+    func indexOfLine(id: UUID) -> Int? { lineIndexByID[id] }
+
+    var activeLineIndex: Int? {
+        guard let activeLineId = activeLineId else { return nil }
+        return lineIndexByID[activeLineId]
+    }
     @Published var activeSpeaker: String = ""
     @Published var activeLineId: UUID?
     @Published var webSearchEnabled: Bool = UserDefaults.standard.bool(forKey: "podcast.webSearchEnabled")
@@ -344,10 +364,14 @@ struct PodcastOverlayView: View {
         }
     }
 
+    /// Whether `line` comes before the active one.
+    ///
+    /// This is called once per rendered row and used to do two linear scans of
+    /// the whole transcript each time — quadratic per render on a long
+    /// podcast. `viewModel` publishes the active index directly now.
     private func isPastLine(_ line: ScriptLine) -> Bool {
-        guard let activeId = viewModel.activeLineId,
-              let activeIndex = viewModel.transcript.firstIndex(where: { $0.id == activeId }),
-              let lineIndex = viewModel.transcript.firstIndex(where: { $0.id == line.id }) else {
+        guard let activeIndex = viewModel.activeLineIndex,
+              let lineIndex = viewModel.indexOfLine(id: line.id) else {
             return false
         }
         return lineIndex < activeIndex

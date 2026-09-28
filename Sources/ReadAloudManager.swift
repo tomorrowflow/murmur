@@ -277,6 +277,20 @@ class ReadAloudManager {
         }
     }
 
+    /// A manager released without `stop()` (a hotkey teardown that nils the
+    /// reference, or a new session replacing an old one) would otherwise keep
+    /// its local Escape monitor registered forever, and a local monitor that
+    /// returns nil for keyCode 53 swallows Escape everywhere in the app.
+    deinit {
+        let global = escapeGlobalMonitor
+        let local = escapeLocalMonitor
+        let cleanup = {
+            if let global = global { NSEvent.removeMonitor(global) }
+            if let local = local { NSEvent.removeMonitor(local) }
+        }
+        if Thread.isMainThread { cleanup() } else { DispatchQueue.main.async(execute: cleanup) }
+    }
+
     private func removeEscapeMonitor() {
         if let monitor = escapeGlobalMonitor {
             NSEvent.removeMonitor(monitor)
@@ -457,6 +471,10 @@ class ReadAloudManager {
 
         guard !Task.isCancelled else { return }
         await MainActor.run {
+            // Natural end of the session: hand the audio stage back. reset()
+            // does the same on explicit stop; without this, a session that
+            // simply finished left media paused and the pause flag armed.
+            MediaRemoteController.shared.resumeIfWePaused()
             self.state = .complete
         }
     }
@@ -604,6 +622,12 @@ class ReadAloudManager {
             }
             await MainActor.run { self.answerTTSTask = ttsTask }
 
+            // A sentence only becomes complete when end punctuation is followed
+            // by whitespace. Tracking that lets us skip the split for most
+            // tokens — it used to run over the whole accumulated answer on
+            // every single one, which is quadratic in the answer length.
+            var previousEndedWithSentencePunctuation = false
+
             for try await token in llmClient.streamChat(system: systemPrompt, user: userMessage) {
                 guard !Task.isCancelled else { break }
 
@@ -614,6 +638,14 @@ class ReadAloudManager {
                     self.streamingAnswer = stripped
                     self.delegate?.readAloudDidUpdateStreamingAnswer(stripped)
                 }
+
+                let boundaryPossible = Self.tokenCouldCompleteSentence(
+                    token,
+                    previousEndedWithSentencePunctuation: previousEndedWithSentencePunctuation
+                )
+                previousEndedWithSentencePunctuation = Self.endsWithSentencePunctuation(fullAnswer)
+
+                guard boundaryPossible else { continue }
 
                 // Feed complete sentences to TTS queue
                 let allSentences = SmartSentenceSplitter.splitIntoSentences(stripped)
@@ -716,21 +748,23 @@ class ReadAloudManager {
         // Collect audio for export. audioSegments/currentPlayer are owned by
         // the main thread (stop/export/interrupt mutate them there); this
         // task runs on the cooperative pool, so hop for every mutation.
-        await MainActor.run { audioSegments.append(data) }
+        await MainActor.run { collectAudioSegment(data) }
 
         // Per user setting: pause Spotify/Music/Podcasts/etc. for the whole
         // playback session. resumeIfWePaused() in the session-end path
         // restores them. Idempotent — repeated chunks won't re-pause.
+        //
+        // Re-check cancellation first: the MainActor hop above can land
+        // after stop()/reset() already scheduled the resume, and a pause()
+        // from this cancelled task would cancel that resume and leave
+        // `didPause` stuck for the next session.
+        try Task.checkCancellation()
         if AudioDuckMode.current.pausesMediaDuringPlayback {
             MediaRemoteController.shared.pause()
         }
 
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("readAloud_tts_\(UUID().uuidString).wav")
-        try data.write(to: tempURL)
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
-        let player = try AVAudioPlayer(contentsOf: tempURL)
+        // Played straight from memory — no temp file per sentence.
+        let player = try AVAudioPlayer(data: data)
         player.prepareToPlay()
         // Apply current mute state. Pacing still uses the real player
         // duration so the transcript advances at the natural rate even
@@ -787,6 +821,37 @@ class ReadAloudManager {
         }
     }
 
+    // MARK: - Streaming sentence-boundary heuristics
+
+    private static let sentencePunctuation: Set<Character> = [".", "!", "?"]
+
+    /// True when `text`'s last non-space character can end a sentence.
+    static func endsWithSentencePunctuation(_ text: String) -> Bool {
+        guard let last = text.reversed().first(where: { !$0.isWhitespace }) else { return false }
+        return sentencePunctuation.contains(last)
+    }
+
+    /// Whether appending `token` could have produced a new *complete* sentence.
+    ///
+    /// The splitter only breaks on end punctuation followed by whitespace, so a
+    /// boundary needs either both inside this token, or punctuation already
+    /// pending from earlier text plus leading whitespace here.
+    static func tokenCouldCompleteSentence(
+        _ token: String,
+        previousEndedWithSentencePunctuation: Bool
+    ) -> Bool {
+        if previousEndedWithSentencePunctuation, token.first?.isWhitespace == true { return true }
+        var sawPunctuation = false
+        for character in token {
+            if sentencePunctuation.contains(character) {
+                sawPunctuation = true
+            } else if sawPunctuation, character.isWhitespace {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Translation
 
     /// Detect if text is non-English using the LLM.
@@ -827,6 +892,28 @@ class ReadAloudManager {
 
     // MARK: - Reset
 
+
+    /// Upper bound on retained export audio. Segments are 24 kHz 16-bit mono
+    /// (~2.9 MB per minute of speech), so a long document would otherwise grow
+    /// this without limit for an export the user may never request.
+    private static let maxAudioSegmentBytes = 150 * 1024 * 1024
+    private var audioSegmentBytes = 0
+    private var didWarnAudioSegmentLimit = false
+
+    /// Append to the export buffer unless the budget is spent.
+    private func collectAudioSegment(_ data: Data) {
+        guard audioSegmentBytes + data.count <= Self.maxAudioSegmentBytes else {
+            if !didWarnAudioSegmentLimit {
+                didWarnAudioSegmentLimit = true
+                NSLog("Audio export buffer hit its %d MB limit — later audio won't be included in an export",
+                      Self.maxAudioSegmentBytes / (1024 * 1024))
+            }
+            return
+        }
+        audioSegmentBytes += data.count
+        audioSegments.append(data)
+    }
+
     private func reset() {
         removeEscapeMonitor()
         currentPlayer?.stop()
@@ -850,6 +937,8 @@ class ReadAloudManager {
         currentInterruptIndex = 0
         isPaused = false
         audioSegments = []
+        audioSegmentBytes = 0
+        didWarnAudioSegmentLimit = false
         state = .idle
     }
 }

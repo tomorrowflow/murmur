@@ -50,6 +50,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
     // Response tracking
     private var currentRunId: String?
+    private var responseWatchdog: DispatchWorkItem?
     private var accumulatedResponse = ""
     private var lastTranscription = ""
     private var currentTTSTask: Task<Void, Never>?
@@ -129,12 +130,13 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             cancelStreamingTTS()
             print("OpenClaw: recording cancelled")
             delegate?.openClawRecordingWasCancelled()
-        } else if isProcessing, let runId = currentRunId {
+        } else if isProcessing {
             // Cancel in-flight request
-            openClawManager.abortChat(runId: runId)
+            if let runId = currentRunId {
+                openClawManager.abortChat(runId: runId)
+            }
             cancelStreamingTTS()
-            isProcessing = false
-            currentRunId = nil
+            endProcessing()
             accumulatedResponse = ""
             delegate?.openClawRecordingWasCancelled()
         }
@@ -170,7 +172,8 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
 
     private func stopRecording() {
-        removeEscapeMonitor()
+        // The Escape monitors stay installed until the run ends (see
+        // `endProcessing`) so the user can also abort the request phase.
         recorder.stop { [weak self] samples in
             self?.handleCapturedAudio(samples)
         }
@@ -182,6 +185,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
         // Validate audio
         guard !samples.isEmpty else {
+            endProcessing()
             delegate?.openClawRecordingWasCancelled()
             return
         }
@@ -199,6 +203,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         let db = 20 * log10(max(rms, 0.00001))
         if db < -55.0 {
             print("OpenClaw: audio too quiet (dB: \(db))")
+            endProcessing()
             delegate?.openClawRecordingWasCancelled()
             return
         }
@@ -233,11 +238,11 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
         guard let text = transcription else {
             // The transcriber already reported a specific error via the delegate.
-            isProcessing = false
+            endProcessing()
             return
         }
         guard !text.isEmpty else {
-            isProcessing = false
+            endProcessing()
             delegate?.openClawDidFail(error: "Transcription produced no text")
             return
         }
@@ -245,7 +250,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         let durationSeconds = Double(samples.count) / sampleRate
         if STTHallucinationFilter.isLikelyHallucination(text, audioDurationSeconds: durationSeconds) {
             print("OpenClaw: dropping likely hallucination on short audio (\(String(format: "%.2f", durationSeconds))s): \"\(text)\"")
-            isProcessing = false
+            endProcessing()
             delegate?.openClawRecordingWasCancelled()
             return
         }
@@ -258,7 +263,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         if !openClawManager.isAuthenticated {
             let authenticated = await openClawManager.connectAndWaitForAuth(timeout: 10)
             if !authenticated {
-                isProcessing = false
+                endProcessing()
                 delegate?.openClawDidFail(error: "Not connected to OpenClaw gateway")
                 return
             }
@@ -267,6 +272,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         // Send to OpenClaw
         let runId = openClawManager.sendChat(text: text)
         currentRunId = runId
+        armResponseWatchdog()
     }
 
     @MainActor
@@ -345,6 +351,45 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
             delegate?.openClawDidFail(error: "Transcription failed: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Ends the request phase from any terminal path: clears run state,
+    /// retires the response watchdog and removes the Escape monitors.
+    ///
+    /// These used to be removed in `stopRecording()`, which made the
+    /// `isProcessing` branch of the Escape handler unreachable — Escape could
+    /// cancel a recording but not the request it turned into.
+    private func endProcessing() {
+        isProcessing = false
+        currentRunId = nil
+        cancelResponseWatchdog()
+        removeEscapeMonitor()
+    }
+
+    /// Longest gap tolerated between the request (or the last streamed delta)
+    /// and the next message from the gateway.
+    private static let responseTimeout: TimeInterval = 120
+
+    /// Arm the no-response watchdog. Re-armed on every delta, so a long agent
+    /// run that keeps streaming is never cut off — only true silence trips it.
+    private func armResponseWatchdog() {
+        cancelResponseWatchdog()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isProcessing else { return }
+            let runId = self.currentRunId
+            NSLog("OpenClaw: no response within \(Int(Self.responseTimeout))s — abandoning run")
+            if let runId = runId { self.openClawManager.abortChat(runId: runId) }
+            self.cancelStreamingTTS()
+            self.endProcessing()
+            self.delegate?.openClawDidFail(error: "No response from the OpenClaw gateway (timed out)")
+        }
+        responseWatchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.responseTimeout, execute: item)
+    }
+
+    private func cancelResponseWatchdog() {
+        responseWatchdog?.cancel()
+        responseWatchdog = nil
     }
 
     private func removeEscapeMonitor() {
@@ -609,10 +654,21 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         if let error = error {
             print("OpenClaw: disconnected: \(error.localizedDescription)")
         }
+        // A drop mid-run never produces a final message, so without this the
+        // status bar stays on "thinking…" and the auto-mic stays suppressed
+        // for the rest of the session.
+        guard isProcessing else { return }
+        cancelStreamingTTS()
+        endProcessing()
+        delegate?.openClawDidFail(error: error.map {
+            "Lost connection to the OpenClaw gateway: \($0.localizedDescription)"
+        } ?? "Lost connection to the OpenClaw gateway")
     }
 
     func openClawDidReceiveDelta(runId: String, text: String, seq: Int) {
         guard runId == currentRunId else { return }
+        // Progress: push the no-response deadline out.
+        armResponseWatchdog()
         accumulatedResponse = text
         let filtered = OpenClawResponseFilter.filter(text)
         delegate?.openClawDidReceiveResponse(text: filtered)
@@ -627,6 +683,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
     func openClawDidReceiveFinal(runId: String, text: String, seq: Int) {
         guard runId == currentRunId else { return }
         accumulatedResponse = text
+        cancelResponseWatchdog()
         isProcessing = false
 
         let filtered = OpenClawResponseFilter.filter(text)
@@ -642,12 +699,12 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
         finishStreamingTTS(filtered)
 
         currentRunId = nil
+        removeEscapeMonitor()
     }
 
     func openClawDidReceiveError(runId: String, message: String) {
         guard runId == currentRunId else { return }
-        isProcessing = false
-        currentRunId = nil
+        endProcessing()
         cancelStreamingTTS()
         print("OpenClaw: error: \(message)")
         delegate?.openClawDidFail(error: message)
@@ -655,8 +712,7 @@ class OpenClawRecordingManager: OpenClawManagerDelegate {
 
     func openClawDidReceiveAborted(runId: String, partialText: String?) {
         guard runId == currentRunId else { return }
-        isProcessing = false
-        currentRunId = nil
+        endProcessing()
         cancelStreamingTTS()
         print("OpenClaw: aborted")
         delegate?.openClawRecordingWasCancelled()

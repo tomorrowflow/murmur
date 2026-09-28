@@ -94,8 +94,16 @@ public class AudioDeviceManager: ObservableObject {
     
     public func refreshDeviceList() {
         let allDevices = getAllAudioDevices()
-        availableInputDevices = [AudioDevice.systemDefault] + allDevices.filter { $0.isInput }
-        availableOutputDevices = [AudioDevice.systemDefault] + allDevices.filter { $0.isOutput }
+        let inputs = [AudioDevice.systemDefault] + allDevices.filter { $0.isInput }
+        let outputs = [AudioDevice.systemDefault] + allDevices.filter { $0.isOutput }
+        availableInputDevices = inputs
+        availableOutputDevices = outputs
+        snapshotLock.lock()
+        inputDeviceSnapshot = inputs
+        outputDeviceSnapshot = outputs
+        deviceIDByUID.removeAll()
+        isBluetoothByDeviceID.removeAll()
+        snapshotLock.unlock()
 
         // Fall back to system default if selected device was removed
         if !useSystemDefaultInput,
@@ -291,7 +299,7 @@ public class AudioDeviceManager: ObservableObject {
         }
         
         guard let uid = selectedInputDeviceUID else { return nil }
-        return availableInputDevices.first { $0.uid == uid }
+        return inputDevicesSnapshot.first { $0.uid == uid }
     }
     
     public func getCurrentOutputDevice() -> AudioDevice? {
@@ -300,7 +308,7 @@ public class AudioDeviceManager: ObservableObject {
         }
         
         guard let uid = selectedOutputDeviceUID else { return nil }
-        return availableOutputDevices.first { $0.uid == uid }
+        return outputDevicesSnapshot.first { $0.uid == uid }
     }
     
     public func getSystemDefaultInputDeviceID() -> AudioDeviceID? {
@@ -357,34 +365,101 @@ public class AudioDeviceManager: ObservableObject {
     /// user's default microphone for every other app.
     private var savedDefaultInputDeviceID: AudioDeviceID?
 
+    /// Guards the override state. Apply/restore run on each recorder's private
+    /// engine queue, and there is more than one recorder.
+    private let overrideLock = NSLock()
+
+    /// Recorders that currently hold the override. The override is global but
+    /// was restored per-recorder: stopping an STT recording while an OpenClaw
+    /// recording was still capturing switched the system default input back
+    /// underneath it. The saved default is only restored once the last holder
+    /// lets go.
+    private var overrideOwners: Set<ObjectIdentifier> = []
+
+    /// Lock-protected snapshot of the device lists for callers that are not on
+    /// the main thread. The `@Published` arrays are rewritten on main by the
+    /// CoreAudio property listener, so reading them from an engine queue is a
+    /// data race on a Swift array.
+    private let snapshotLock = NSLock()
+    private var inputDeviceSnapshot: [AudioDevice] = []
+    private var outputDeviceSnapshot: [AudioDevice] = []
+
+    /// UID → device id, and device id → "is Bluetooth". Resolving a UID walks
+    /// every device and issues a property query per device; that ran on the
+    /// main thread for every push-to-talk tone. Both caches are dropped
+    /// whenever the device list changes.
+    private var deviceIDByUID: [String: AudioDeviceID] = [:]
+    private var isBluetoothByDeviceID: [AudioDeviceID: Bool] = [:]
+
+    /// Thread-safe copy of the current input device list.
+    public var inputDevicesSnapshot: [AudioDevice] {
+        snapshotLock.lock(); defer { snapshotLock.unlock() }
+        return inputDeviceSnapshot
+    }
+
+    /// Thread-safe copy of the current output device list.
+    public var outputDevicesSnapshot: [AudioDevice] {
+        snapshotLock.lock(); defer { snapshotLock.unlock() }
+        return outputDeviceSnapshot
+    }
+
     /// If the user picked a dedicated input device, set it as the system
     /// default (AVAudioEngine on macOS records from the default input),
     /// remembering the previous default. Returns the name of the device the
     /// override applied, or nil when no override was needed.
+    /// - Parameter owner: the recorder taking the override, so the system
+    ///   default is only put back once every holder has released it.
     @discardableResult
-    public func applyInputDeviceOverrideIfNeeded() -> String? {
+    public func applyInputDeviceOverrideIfNeeded(owner: AnyObject) -> String? {
         guard !useSystemDefaultInput,
               let selectedUID = selectedInputDeviceUID,
               let deviceID = getAudioDeviceID(for: selectedUID) else { return nil }
 
         let current = getSystemDefaultInputDeviceID()
-        guard current != deviceID else { return nil }  // already the default
 
-        guard setSystemDefaultInputDevice(deviceID) else { return nil }
+        overrideLock.lock()
+        // Register the holder even when the device is already the default:
+        // another recorder may have applied the override, and this one must
+        // still count so its stop doesn't restore out from under the first.
+        overrideOwners.insert(ObjectIdentifier(owner))
+        let alreadyDefault = (current == deviceID)
+        if alreadyDefault {
+            overrideLock.unlock()
+            return nil
+        }
+        overrideLock.unlock()
+
+        guard setSystemDefaultInputDevice(deviceID) else {
+            overrideLock.lock()
+            overrideOwners.remove(ObjectIdentifier(owner))
+            overrideLock.unlock()
+            return nil
+        }
+
+        overrideLock.lock()
         // Keep the oldest saved default across repeated applies so nested
         // calls (e.g. config-change restarts) still restore the original.
         if savedDefaultInputDeviceID == nil {
             savedDefaultInputDeviceID = current
         }
-        return availableInputDevices.first { $0.uid == selectedUID }?.name ?? selectedUID
+        overrideLock.unlock()
+
+        return inputDevicesSnapshot.first { $0.uid == selectedUID }?.name ?? selectedUID
     }
 
     /// Restore the system default input device replaced by
-    /// `applyInputDeviceOverrideIfNeeded()`. Safe to call when no override is
-    /// active.
-    public func restoreDefaultInputDeviceIfOverridden() {
-        guard let saved = savedDefaultInputDeviceID else { return }
+    /// `applyInputDeviceOverrideIfNeeded(owner:)`. Safe to call when no
+    /// override is active, and a no-op while another recorder still holds one.
+    public func restoreDefaultInputDeviceIfOverridden(owner: AnyObject) {
+        overrideLock.lock()
+        overrideOwners.remove(ObjectIdentifier(owner))
+        guard overrideOwners.isEmpty, let saved = savedDefaultInputDeviceID else {
+            overrideLock.unlock()
+            return
+        }
         savedDefaultInputDeviceID = nil
+        overrideLock.unlock()
+
         if setSystemDefaultInputDevice(saved) {
             print("Restored previous system default input device")
         }
@@ -411,9 +486,18 @@ public class AudioDeviceManager: ObservableObject {
 
     /// Returns true if the given device uses Bluetooth transport.
     private func isBluetoothTransport(deviceID: AudioDeviceID) -> Bool {
+        snapshotLock.lock()
+        let cached = isBluetoothByDeviceID[deviceID]
+        snapshotLock.unlock()
+        if let cached = cached { return cached }
+
         let transport = getTransportType(deviceID: deviceID)
-        return transport == kAudioDeviceTransportTypeBluetooth ||
-               transport == kAudioDeviceTransportTypeBluetoothLE
+        let isBluetooth = transport == kAudioDeviceTransportTypeBluetooth ||
+                          transport == kAudioDeviceTransportTypeBluetoothLE
+        snapshotLock.lock()
+        isBluetoothByDeviceID[deviceID] = isBluetooth
+        snapshotLock.unlock()
+        return isBluetooth
     }
 
     /// Returns true if the current input device uses Bluetooth transport
@@ -445,6 +529,20 @@ public class AudioDeviceManager: ObservableObject {
     }
 
     public func getAudioDeviceID(for uid: String) -> AudioDeviceID? {
+        snapshotLock.lock()
+        let cached = deviceIDByUID[uid]
+        snapshotLock.unlock()
+        if let cached = cached { return cached }
+        let resolved = resolveAudioDeviceID(for: uid)
+        if let resolved = resolved {
+            snapshotLock.lock()
+            deviceIDByUID[uid] = resolved
+            snapshotLock.unlock()
+        }
+        return resolved
+    }
+
+    private func resolveAudioDeviceID(for uid: String) -> AudioDeviceID? {
         // First, iterate through all devices to find matching UID
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,

@@ -175,6 +175,10 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private var startedAt: Date?
     private var endedAt: Date?
     private var micURL: URL?
+    private var extraMicURLs: [URL] = []           // mic-2.wav, … from mic engine rolls
+    private var extraMicOffsets: [Double] = []     // per-file start offset (s), parallel to extraMicURLs
+    private var micFormat: AVAudioFormat?
+    private var micConfigObserver: NSObjectProtocol?
     private var appURL: URL?                       // primary far-end file (app.wav), nil until opened
     private var plannedAppFileURL: URL?            // intended app.wav path (before it opens)
     private var extraAppURLs: [URL] = []           // app-2.wav, … from far-end rolls
@@ -197,6 +201,13 @@ final class CallCaptureManager: NSObject, ObservableObject {
     private var appAudioFile: AVAudioFile?
     private var appFormat: AVAudioFormat?
     private let appQueue = DispatchQueue(label: "com.murmur.callcapture.app")
+    /// Guards `micAudioFile` between the AVAudioEngine tap thread and the main
+    /// thread. The far-end path gets this for free — its IOProc runs on
+    /// `appQueue`, so `appQueue.sync {}` is a barrier — but a tap block is
+    /// delivered on an engine-owned thread we can't join, so releasing the
+    /// file during teardown could close the ExtAudioFileRef underneath an
+    /// in-flight write.
+    private let micFileLock = NSLock()
     private var farEndActive = false
     /// The process-object set currently being tapped, so the listener can tell
     /// whether a process-list change actually affects our target.
@@ -243,6 +254,8 @@ final class CallCaptureManager: NSObject, ObservableObject {
         // Reset per-session far-end state.
         extraAppURLs = []
         extraAppOffsets = []
+        extraMicURLs = []
+        extraMicOffsets = []
         tappedProcessObjects = []
         farEndActive = false
 
@@ -621,7 +634,9 @@ final class CallCaptureManager: NSObject, ObservableObject {
             appFirstHostTime = inInputTime.pointee.mHostTime
         }
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inInputData, deallocator: nil) else { return }
-        publishLevel(peakFromBufferList(inInputData), channel: .app)
+        if shouldPublishLevel(.app) {
+            publishLevel(peakFromBufferList(inInputData), channel: .app)
+        }
         do {
             try file.write(from: buffer)
         } catch {
@@ -693,17 +708,20 @@ final class CallCaptureManager: NSObject, ObservableObject {
         }
         micAudioFile = file
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, when in
-            guard let self else { return }
-            if self.micFirstHostTime == 0 {
-                self.micFirstHostTime = when.hostTime
-            }
-            self.publishLevel(self.peakFromPCMBuffer(buffer), channel: .mic)
-            do {
-                try self.micAudioFile?.write(from: buffer)
-            } catch {
-                NSLog("[CallCapture] mic.wav write failed: \(error.localizedDescription)")
-            }
+        installMicTap(on: input, format: format)
+
+        micFormat = format
+
+        // An hour-long call on a Bluetooth headset will hit at least one route
+        // or codec change. AVAudioEngine stops delivering tap buffers across
+        // one, so without this mic.wav simply truncated at that moment — no
+        // error, no log, discovered only at transcription time.
+        micConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleMicConfigurationChange()
         }
 
         engine.prepare()
@@ -711,35 +729,138 @@ final class CallCaptureManager: NSObject, ObservableObject {
             try engine.start()
         } catch {
             input.removeTap(onBus: 0)
+            removeMicConfigObserver()
+            micFileLock.lock()
             micAudioFile = nil
+            micFileLock.unlock()
             throw CallCaptureError.fileCreationFailed("microphone engine: \(error.localizedDescription)")
         }
         micEngine = engine
     }
 
+    private func installMicTap(on input: AVAudioInputNode, format: AVAudioFormat) {
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, when in
+            guard let self else { return }
+            if self.micFirstHostTime == 0 {
+                self.micFirstHostTime = when.hostTime
+            }
+            if self.shouldPublishLevel(.mic) {
+                self.publishLevel(self.peakFromPCMBuffer(buffer), channel: .mic)
+            }
+            self.micFileLock.lock()
+            defer { self.micFileLock.unlock() }
+            do {
+                try self.micAudioFile?.write(from: buffer)
+            } catch {
+                NSLog("[CallCapture] mic.wav write failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Reinstall the mic tap after the engine reconfigures (Bluetooth codec
+    /// switch, device plugged in, sample-rate change). If the input format
+    /// changed, the existing file can't take the new buffers, so roll to a
+    /// fresh `mic-<n>.wav` carrying its own start offset — the same strategy
+    /// the far end uses for `app-<n>.wav`.
+    private func handleMicConfigurationChange() {
+        guard state == .recording, let engine = micEngine else { return }
+
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
+        let newFormat = input.outputFormat(forBus: 0)
+        guard newFormat.sampleRate > 0, newFormat.channelCount > 0 else {
+            NSLog("[CallCapture] mic config change: input format not ready — skipping this notification")
+            return
+        }
+
+        let formatChanged = micFormat.map {
+            $0.sampleRate != newFormat.sampleRate
+                || $0.channelCount != newFormat.channelCount
+                || $0.commonFormat != newFormat.commonFormat
+        } ?? true
+
+        if formatChanged, let dir = sessionDirectory {
+            let n = extraMicURLs.count + 2
+            let url = dir.appendingPathComponent("mic-\(n).wav")
+            do {
+                let file = try AVAudioFile(
+                    forWriting: url,
+                    settings: newFormat.settings,
+                    commonFormat: newFormat.commonFormat,
+                    interleaved: newFormat.isInterleaved
+                )
+                // Assigning under the lock finalizes the previous file (ARC
+                // closes its handle) without racing an in-flight write.
+                micFileLock.lock()
+                micAudioFile = file
+                micFileLock.unlock()
+                let offset = hostTimeOffsetSeconds(from: startHostTime, to: AudioGetCurrentHostTime())
+                extraMicURLs.append(url)
+                extraMicOffsets.append(offset)
+                NSLog("[CallCapture] Mic rolled to \(url.lastPathComponent) at offset \(String(format: "%.2f", offset))s")
+            } catch {
+                NSLog("[CallCapture] mic roll failed: \(error.localizedDescription) — keeping previous file")
+            }
+        }
+
+        micFormat = newFormat
+        installMicTap(on: input, format: newFormat)
+
+        if !engine.isRunning {
+            do {
+                engine.prepare()
+                try engine.start()
+                NSLog("[CallCapture] mic engine restarted after configuration change")
+            } catch {
+                NSLog("[CallCapture] mic engine restart failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func removeMicConfigObserver() {
+        if let observer = micConfigObserver {
+            NotificationCenter.default.removeObserver(observer)
+            micConfigObserver = nil
+        }
+    }
+
     private func teardownMic() {
+        removeMicConfigObserver()
         if let engine = micEngine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
         micEngine = nil
+        micFormat = nil
+        // Release the file only once no write is in flight, so the tail of the
+        // recording is flushed and the WAV header records the real length.
+        micFileLock.lock()
         micAudioFile = nil
+        micFileLock.unlock()
     }
 
     // MARK: - Level metering
 
     private enum LevelChannel { case mic, app }
 
-    private func publishLevel(_ peak: Float, channel: LevelChannel) {
+    /// Whether this channel is due for a level update. Split out from
+    /// `publishLevel` so callers can skip the full peak scan of the buffer —
+    /// it used to be computed as an argument and then discarded ~95% of the
+    /// time, on a live-call audio callback.
+    private func shouldPublishLevel(_ channel: LevelChannel) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
         switch channel {
         case .mic:
-            guard now - lastMicLevelPublish >= 1.0 / 20.0 else { return }
+            guard now - lastMicLevelPublish >= 1.0 / 20.0 else { return false }
             lastMicLevelPublish = now
         case .app:
-            guard now - lastAppLevelPublish >= 1.0 / 20.0 else { return }
+            guard now - lastAppLevelPublish >= 1.0 / 20.0 else { return false }
             lastAppLevelPublish = now
         }
+        return true
+    }
+
+    private func publishLevel(_ peak: Float, channel: LevelChannel) {
 
         // Map peak amplitude to a dB-normalized 0...1, matching AudioLevelMonitor.
         let db = 20 * log10(max(peak, 0.00001))
@@ -765,7 +886,12 @@ final class CallCaptureManager: NSObject, ObservableObject {
         return peak
     }
 
+    /// Scans the raw tap bytes as Float32. The process-tap format is read once
+    /// at bring-up and is Float32 in practice, but interpreting some other
+    /// layout as floats would produce garbage, so callers must only use this
+    /// when `appFormat` says Float32.
     private func peakFromBufferList(_ abl: UnsafePointer<AudioBufferList>) -> Float {
+        guard appFormat?.commonFormat == .pcmFormatFloat32 else { return 0 }
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
         var peak: Float = 0
         for buffer in buffers {
@@ -902,6 +1028,10 @@ final class CallCaptureManager: NSObject, ObservableObject {
         }
         if let micURL {
             tracks.append(.init(role: "mic", file: micURL.lastPathComponent))
+            for (i, extra) in extraMicURLs.enumerated() {
+                let offset: Double? = i < extraMicOffsets.count ? extraMicOffsets[i] : nil
+                tracks.append(.init(role: "mic", file: extra.lastPathComponent, offsetSeconds: offset))
+            }
         }
 
         var meta = CallSessionMetadata(

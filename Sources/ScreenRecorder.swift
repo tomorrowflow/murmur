@@ -18,12 +18,17 @@ class ScreenRecorder {
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return nil
         }
 
-        guard let output = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
+        // Read to EOF *before* waiting: ffmpeg's device list can exceed the
+        // 64 KiB pipe buffer (many cameras, virtual devices, Continuity
+        // Camera), and then it blocks on write while we block on exit.
+        let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard let output = String(data: data, encoding: .utf8) else {
             return nil
         }
 
@@ -110,12 +115,25 @@ class ScreenRecorder {
 
         self.recordingProcess = process
 
+        // Without this, ffmpeg exiting on its own (screen-recording permission
+        // denied, binary missing, disk full) leaves `isRecording` true forever:
+        // every later start returns .alreadyRecording and stop reports a bogus
+        // failure.
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, self.recordingProcess === process else { return }
+                self.isRecording = false
+            }
+        }
+
         do {
             try process.run()
             self.isRecording = true
             completion(.success(outputPath))
             print("🎥 Screen recording started: \(filename)")
         } catch {
+            self.recordingProcess = nil
+            self.outputURL = nil
             completion(.failure(error))
             print("❌ Failed to start screen recording: \(error)")
         }
@@ -143,6 +161,9 @@ class ScreenRecorder {
                 if Date().timeIntervalSince(startTime) > maxWaitTime {
                     print("⚠️  Recording stop timed out - terminating forcefully")
                     process.terminate()
+                    // Wait for the exit rather than breaking straight into the
+                    // file-size check — ffmpeg is still writing the moov atom.
+                    process.waitUntilExit()
                     break
                 }
                 Thread.sleep(forTimeInterval: 0.1)

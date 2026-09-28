@@ -176,10 +176,12 @@ class OpenClawSettingsViewModel: ObservableObject {
     }
 
     func startObserving() {
-        // Set up the onStatusChange callback on the manager
+        // Register as an *additional* observer. Assigning `onStatusChange`
+        // here used to clobber the AppDelegate's handler, so opening this tab
+        // once froze the menu-bar OpenClaw status for the rest of the session.
         if let appDelegate = NSApp.delegate as? AppDelegate,
            let manager = appDelegate.openClawManagerPublic {
-            manager.onStatusChange = { [weak self] _, _, _ in
+            statusObserverToken = manager.addStatusObserver { [weak self] _, _, _ in
                 DispatchQueue.main.async {
                     self?.refreshStatus()
                 }
@@ -196,7 +198,15 @@ class OpenClawSettingsViewModel: ObservableObject {
     func stopObserving() {
         pollTimer?.invalidate()
         pollTimer = nil
+        if let token = statusObserverToken,
+           let appDelegate = NSApp.delegate as? AppDelegate,
+           let manager = appDelegate.openClawManagerPublic {
+            manager.removeStatusObserver(token)
+        }
+        statusObserverToken = nil
     }
+
+    private var statusObserverToken: UUID?
 
     func refreshStatus() {
         guard let appDelegate = NSApp.delegate as? AppDelegate,

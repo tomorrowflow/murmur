@@ -53,12 +53,14 @@ extension AppDelegate {
     func openClawAudioLevelDidUpdate(db: Float) {
         AudioLevelMonitor.shared.update(db: db)
         updateStatusBarWithLevel(db: db)
-        openClawOverlay?.show(state: bluetoothWarmingUp ? .connecting : .listening)
-        // refreshOpenClawStatusHint is idempotent and cheap — call once so
-        // the menu reflects "listening" as soon as the first frame arrives.
-        // Subsequent frames are harmless no-ops on the menu (NSMenuItem just
-        // stores the new title; if equal, AppKit doesn't redraw).
-        refreshOpenClawStatusHint()
+        // Only touch the overlay when the state actually changes. Calling
+        // show() per audio frame reassigned @Published state and ordered the
+        // panel front ~20 times a second, re-rendering the whole overlay.
+        let desired: OpenClawOverlayState = bluetoothWarmingUp ? .connecting : .listening
+        if openClawOverlay?.viewModel.state != desired {
+            openClawOverlay?.show(state: desired)
+            refreshOpenClawStatusHint()
+        }
         // Drive auto-mic silence detection if this audio level update is
         // arriving from a follow-up recording we opened automatically.
         if openClawAutoMicActive {

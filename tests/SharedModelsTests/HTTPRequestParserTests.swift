@@ -73,3 +73,47 @@ final class HTTPRequestParserTests: XCTestCase {
         XCTAssertNotNil(HTTPRequestParser.headerEndRange(in: Data(slice)))
     }
 }
+
+/// The incremental header scan added so a large POST body isn't re-scanned
+/// from byte zero on every 64 KB read.
+final class HTTPRequestParserIncrementalScanTests: XCTestCase {
+
+    private func data(_ s: String) -> Data { s.data(using: .utf8)! }
+
+    func testOffsetZeroMatchesTheWholeBufferScan() {
+        let request = data("POST /x HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi")
+        let expected = HTTPRequestParser.headerEndRange(in: request)
+        XCTAssertNotNil(expected)
+        XCTAssertEqual(HTTPRequestParser.headerEndRange(in: request, searchingFrom: 0), expected)
+    }
+
+    func testFindsTerminatorThatStartsAfterTheOffset() {
+        let request = data("POST /x HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi")
+        let found = HTTPRequestParser.headerEndRange(in: request, searchingFrom: 10)
+        XCTAssertEqual(found, HTTPRequestParser.headerEndRange(in: request))
+    }
+
+    /// The reason callers must overlap by `headerTerminatorLength - 1`: the
+    /// blank line can straddle two reads.
+    func testTerminatorSplitAcrossReadsIsFoundWithOverlap() {
+        let head = data("GET /x HTTP/1.1\r\nHost: a\r\n\r")
+        let full = head + data("\nbody")
+        // Naive resume at the previous length would start past the "\r".
+        let overlap = max(0, head.count - (HTTPRequestParser.headerTerminatorLength - 1))
+        XCTAssertNotNil(HTTPRequestParser.headerEndRange(in: full, searchingFrom: overlap))
+        XCTAssertEqual(
+            HTTPRequestParser.headerEndRange(in: full, searchingFrom: overlap),
+            HTTPRequestParser.headerEndRange(in: full)
+        )
+    }
+
+    func testNoTerminatorYetReturnsNil() {
+        let partial = data("GET /x HTTP/1.1\r\nHost: a\r\n")
+        XCTAssertNil(HTTPRequestParser.headerEndRange(in: partial, searchingFrom: 4))
+    }
+
+    func testOffsetBeyondBufferIsSafe() {
+        let partial = data("GET /x HTTP/1.1\r\n")
+        XCTAssertNil(HTTPRequestParser.headerEndRange(in: partial, searchingFrom: 9_999))
+    }
+}

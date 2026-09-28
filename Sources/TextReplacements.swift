@@ -11,9 +11,24 @@ class TextReplacements {
 
     private var config: ReplacementsConfig = .empty
 
-    private var configFileURL: URL {
-        let currentDirectory = FileManager.default.currentDirectoryPath
-        return URL(fileURLWithPath: currentDirectory).appendingPathComponent("config.json")
+    /// Where `config.json` is looked for, in order. A `Murmur.app` launched
+    /// from Finder has cwd "/", so the cwd-only lookup meant user text
+    /// replacements silently stopped applying in every bundled build. Same
+    /// candidate chain as the `.env` loader in main.swift.
+    static var configCandidates: [URL] {
+        let fm = FileManager.default
+        var urls = [URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("config.json")]
+        if let resourceURL = Bundle.main.resourceURL {
+            urls.append(resourceURL.appendingPathComponent("config.json"))
+        }
+        if let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            urls.append(appSupport.appendingPathComponent("Murmur/config.json"))
+        }
+        return urls
+    }
+
+    private var configFileURL: URL? {
+        Self.configCandidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     private init() {
@@ -21,8 +36,9 @@ class TextReplacements {
     }
 
     private func loadConfig() {
-        guard FileManager.default.fileExists(atPath: configFileURL.path) else {
-            print("No config file found at \(configFileURL.path)")
+        guard let configFileURL = configFileURL else {
+            let looked = Self.configCandidates.map(\.path).joined(separator: ", ")
+            NSLog("TextReplacements: no config.json found (looked in: \(looked))")
             return
         }
 

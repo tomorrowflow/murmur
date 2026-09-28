@@ -27,16 +27,13 @@ extension AppDelegate {
     }
 
     func getSelectedTextViaAccessibility() -> String? {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedElement: AnyObject?
-        let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-        if result != .success {
-            NSLog("Accessibility: failed to get focused element (error: \(result.rawValue))")
+        guard let element = AXSafe.focusedElement() else {
+            NSLog("Accessibility: failed to get focused element")
+            return nil
         }
-        guard result == .success, let element = focusedElement else { return nil }
 
         var selectedText: AnyObject?
-        let textResult = AXUIElementCopyAttributeValue(element as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedText)
+        let textResult = AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedText)
         if textResult != .success {
             NSLog("Accessibility: failed to get selected text (error: \(textResult.rawValue))")
         }
@@ -82,11 +79,7 @@ extension AppDelegate {
         // Capture current focused window so we can switch back to it
         var currentWindow: AXUIElement?
         if let currentPid = currentFrontmost?.processIdentifier {
-            let currentAppElement = AXUIElementCreateApplication(currentPid)
-            var windowValue: AnyObject?
-            if AXUIElementCopyAttributeValue(currentAppElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success {
-                currentWindow = (windowValue as! AXUIElement)
-            }
+            currentWindow = AXSafe.focusedWindow(pid: currentPid)
         }
 
         // Check if target app is still running
@@ -193,11 +186,7 @@ extension AppDelegate {
 
     /// Currently focused window of the given app, or nil.
     private static func focusedWindow(forAppPid pid: pid_t) -> AXUIElement? {
-        let appEl = AXUIElementCreateApplication(pid)
-        var raw: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &raw) == .success,
-              let v = raw, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
-        return (v as! AXUIElement)
+        AXSafe.focusedWindow(pid: pid)
     }
 
     private static func axTitle(_ el: AXUIElement) -> String? {

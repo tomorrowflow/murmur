@@ -88,15 +88,19 @@ class TranscriptionHistory {
     // the docs dir proportionally.
     private var entries: [TranscriptionEntry] = []
 
-    private var historyFileURL: URL {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    /// Resolved once. This used to re-run `createDirectory` on every access,
+    /// and it is accessed twice per save.
+    private lazy var historyFileURL: URL = {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
         let appSupportDir = documentsPath.appendingPathComponent("Murmur", isDirectory: true)
-
-        // Create directory if it doesn't exist
         try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
-
         return appSupportDir.appendingPathComponent("transcription_history.json")
-    }
+    }()
+
+    /// Serialises encode + write off the main thread.
+    private let saveQueue = DispatchQueue(label: "com.murmur.transcriptionHistory.save", qos: .utility)
+    private var pendingSave: DispatchWorkItem?
 
     /// Directory where podcast audio WAVs are persisted, one per entry.
     var audioDirectory: URL {
@@ -127,12 +131,42 @@ class TranscriptionHistory {
         }
     }
 
+    /// Persist the history.
+    ///
+    /// Coalesced and moved off the main thread: `addPermissionEntry` is called
+    /// from the Claude Code PreToolUse hook on *every* tool call, and each call
+    /// re-encoded the whole array and rewrote the whole file inline. The write
+    /// is atomic so a crash or quit mid-write can't truncate the file.
     private func saveHistory() {
-        do {
-            let data = try JSONEncoder().encode(entries)
-            try data.write(to: historyFileURL)
-        } catch {
-            print("Failed to save history: \(error)")
+        let snapshot = entries
+        let url = historyFileURL
+        pendingSave?.cancel()
+        let work = DispatchWorkItem {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                NSLog("Failed to save history: \(error.localizedDescription)")
+            }
+        }
+        pendingSave = work
+        saveQueue.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Write immediately, blocking until the file is on disk. Used at app
+    /// termination so a coalesced save is never lost.
+    func flushPendingSave() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        let snapshot = entries
+        let url = historyFileURL
+        saveQueue.sync {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                NSLog("Failed to flush history: \(error.localizedDescription)")
+            }
         }
     }
 

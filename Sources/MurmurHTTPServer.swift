@@ -73,7 +73,10 @@ class MurmurHTTPServer {
     /// useful for external uptime checks and leaks nothing.
     private let authExemptPaths: Set<String> = ["/api/v1/health"]
 
-    var isRunning: Bool { listener != nil }
+    /// Listener state lives on `queue` — the state-update handler runs there
+    /// and nils the listener on failure, while start/stop/restart are driven
+    /// from main. Reading it from anywhere else raced those two.
+    var isRunning: Bool { queue.sync { listener != nil } }
     var activeBinding: BindingMode { currentBinding }
 
     init(port: UInt16 = 7878) {
@@ -98,7 +101,13 @@ class MurmurHTTPServer {
     // MARK: - Lifecycle
 
     func start(binding: BindingMode) throws {
-        stop()
+        try queue.sync { try startOnQueue(binding: binding) }
+    }
+
+    /// `queue`-confined implementation. Every mutation of `listener` and
+    /// `currentBinding` happens here or in `stopOnQueue`.
+    private func startOnQueue(binding: BindingMode) throws {
+        stopOnQueue()
 
         let params = NWParameters.tcp
         // Allow rebinding immediately after a previous listener on the same
@@ -153,6 +162,11 @@ class MurmurHTTPServer {
     }
 
     func stop() {
+        queue.sync { stopOnQueue() }
+    }
+
+    private func stopOnQueue() {
+        guard listener != nil else { return }
         listener?.cancel()
         listener = nil
         NSLog("[HTTP] Server stopped")
@@ -163,7 +177,8 @@ class MurmurHTTPServer {
     /// to release, then re-binds — NWListener.cancel() is async and racing
     /// a new bind produces EADDRINUSE without that gap.
     func restart(binding: BindingMode) {
-        if binding == currentBinding && isRunning { return }
+        let unchanged = queue.sync { binding == currentBinding && listener != nil }
+        if unchanged { return }
         stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self = self else { return }
@@ -219,8 +234,11 @@ class MurmurHTTPServer {
                 return
             }
 
-            // Keep reading until the blank line that ends the headers.
-            guard let headerEnd = HTTPRequestParser.headerEndRange(in: buffer) else {
+            // Keep reading until the blank line that ends the headers. The
+            // scan resumes just behind the previously-seen tail rather than
+            // restarting at byte 0, which made a large POST quadratic.
+            let scanFrom = max(0, accumulated.count - (HTTPRequestParser.headerTerminatorLength - 1))
+            guard let headerEnd = HTTPRequestParser.headerEndRange(in: buffer, searchingFrom: scanFrom) else {
                 if isComplete {
                     self.sendResponse(connection: connection, statusCode: 400, body: self.jsonBytes(["error": "Bad request"]))
                 } else {

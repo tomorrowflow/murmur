@@ -160,9 +160,12 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
             titleLabel.stringValue = "No history yet"
             clearButton.isEnabled = false
         } else {
-            let podcastCount = allEntries.filter { $0.kind == .podcast }.count
-            let recapCount = allEntries.filter { $0.kind == .recap }.count
-            let permissionCount = allEntries.filter { $0.kind == .permission }.count
+            // One pass instead of three full scans of the history.
+            var countsByKind: [HistoryEntryKind: Int] = [:]
+            for entry in allEntries { countsByKind[entry.kind, default: 0] += 1 }
+            let podcastCount = countsByKind[.podcast] ?? 0
+            let recapCount = countsByKind[.recap] ?? 0
+            let permissionCount = countsByKind[.permission] ?? 0
             let transcriptCount = allEntries.count - podcastCount - recapCount - permissionCount
             var parts: [String] = []
             parts.append("\(transcriptCount) transcript\(transcriptCount == 1 ? "" : "s")")
@@ -561,8 +564,9 @@ class TranscriptionHistoryViewController: NSViewController, NSTableViewDelegate,
         }
 
         // Preview: always reserve 2 lines of space so short and long entries
-        // render at a consistent height (longer ones tail-truncate).
-        _ = isPodcast ? cleanedPodcastPreview(text: entry.text) : p.answer
+        // render at a consistent height (longer ones tail-truncate). The height
+        // is fixed, so the preview text itself isn't needed here — building it
+        // rewrote the whole podcast markdown once per row per reload.
         let lineHeight: CGFloat = 18
         let previewHeight = lineHeight * CGFloat(kPreviewLineLimit) + 2
         total += previewHeight

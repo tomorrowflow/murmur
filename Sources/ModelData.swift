@@ -14,7 +14,11 @@ struct ModelInfo {
 }
 
 struct ModelData {
-    static var availableModels: [ModelInfo] {
+    /// Built once. This was a computed property, so every SwiftUI body
+    /// evaluation and every model scan re-allocated the whole array.
+    static let availableModels: [ModelInfo] = buildAvailableModels()
+
+    private static func buildAvailableModels() -> [ModelInfo] {
         var models = [
         // Distil-Whisper Large v3
         // Primary Source: https://huggingface.co/distil-whisper/distil-large-v3

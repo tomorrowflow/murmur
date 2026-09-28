@@ -92,6 +92,15 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         } else {
             disarmBufferingWatchdog()
         }
+        // A podcast that finishes, errors or loses its connection ends the
+        // playback session without going through reset(); resume the
+        // user's media here too, otherwise it stays paused until X.
+        switch newState {
+        case .complete, .error, .disconnected:
+            MediaRemoteController.shared.resumeIfWePaused()
+        default:
+            break
+        }
     }
 
     private func armBufferingWatchdog() {
@@ -110,13 +119,29 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     private func handleBufferingStall() {
         guard state == .buffering else { return }
-        let needed = currentChunkIndex + 1
+        // `currentChunkIndex + 1` is wrong before the first chunk ever plays:
+        // with no player yet we are waiting on `currentChunkIndex` itself, so
+        // the old form re-requested from chunk 1 and chunk 0 never arrived —
+        // a permanent "Buffering" that re-requested every 25s forever.
+        let needed = nextChunkToPlay()
         guard needed < totalChunks else { return }
-        NSLog("Podcast: buffering watchdog — stuck waiting for chunk \(needed), re-requesting stream")
+        bufferingStallRetries += 1
+        guard bufferingStallRetries <= Self.maxBufferingStallRetries else {
+            NSLog("Podcast: buffering watchdog gave up after \(bufferingStallRetries) retries on chunk \(needed)")
+            state = .error("The podcast server stopped sending audio")
+            delegate?.podcastDidError("The podcast server stopped sending audio")
+            return
+        }
+        NSLog("Podcast: buffering watchdog — stuck waiting for chunk \(needed), re-requesting stream (attempt \(bufferingStallRetries))")
         requestStreamChunks(from: needed)
         // Re-arm in case the re-stream also stalls (e.g. server-side issue).
         armBufferingWatchdog()
     }
+
+    /// Consecutive stall re-requests without progress. Reset whenever a chunk
+    /// actually starts playing.
+    private var bufferingStallRetries = 0
+    private static let maxBufferingStallRetries = 4
 
     var isSessionActive: Bool {
         switch state {
@@ -202,6 +227,16 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     deinit {
         disconnect()
+        // Escape monitors are installed for the life of a session; a manager
+        // torn down without reaching reset() would leak a local monitor that
+        // swallows Escape app-wide.
+        let global = escapeGlobalMonitor
+        let local = escapeLocalMonitor
+        let cleanup = {
+            if let global = global { NSEvent.removeMonitor(global) }
+            if let local = local { NSEvent.removeMonitor(local) }
+        }
+        if Thread.isMainThread { cleanup() } else { DispatchQueue.main.async(execute: cleanup) }
     }
 
     // MARK: - Public API
@@ -227,6 +262,13 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         // (the WebSocket will be ready synchronously after connect() since we start listening immediately)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
+            // Escape or Stop within this half-second already ran reset(); without
+            // this check the deferred INGEST resurrects a session with no id,
+            // which can never complete and blocks every later startSession.
+            guard self.state == .connecting else {
+                NSLog("Podcast: session ended before INGEST — dropping request")
+                return
+            }
             var payload: [String: Any] = [
                 "type": "INGEST",
                 "content_type": contentType,
@@ -317,10 +359,17 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             // Resume current chunk from where it was paused
             p.play()
             updateNowPlaying(paused: false)
-            // Re-schedule line advancement for remaining time
+            // Re-schedule line advancement for the remaining time. Passing the
+            // player's position matters: without it the highlight restarted at
+            // line 1 and spread the whole chunk's lines over the time that was
+            // actually left, desyncing every pause.
             let remaining = p.duration - p.currentTime
             if remaining > 0 {
-                scheduleLineAdvancement(duration: p.duration, hasPrependedSilence: false)
+                scheduleLineAdvancement(
+                    duration: p.duration,
+                    hasPrependedSilence: currentChunkHadPrependedSilence,
+                    startingAt: p.currentTime
+                )
             }
         } else if let pending = pendingPlayData {
             // A chunk was queued while the previous chunk had finished during pause
@@ -340,6 +389,10 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
     private var isReplaying = false
 
+    /// Whether the chunk currently loaded in `player` had silence prepended.
+    /// Needed to re-derive line timings correctly when resuming from a pause.
+    private var currentChunkHadPrependedSilence = false
+
     /// Replay the full podcast from the beginning using collected audio segments.
     func replayFromStart() {
         NSLog("Podcast: replaying from start (\(audioSegments.count) segments)")
@@ -358,7 +411,16 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
 
         // Combine and play
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self, let data = self.combinedAudioData() else { return }
+            guard let self = self else { return }
+            guard let data = self.combinedAudioData() else {
+                // Leaving isReplaying set makes the next real chunk-finish look
+                // like the end of a replay and jumps the session to .complete.
+                DispatchQueue.main.async {
+                    self.isReplaying = false
+                    NSLog("Podcast: replay aborted — no combined audio available")
+                }
+                return
+            }
             DispatchQueue.main.async {
                 do {
                     self.player?.stop()
@@ -388,6 +450,16 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     /// Cancel an in-progress interrupt and resume podcast flow.
     /// Used when the user's recording fails, is cancelled, or contains no speech.
     func cancelInterrupt() {
+        // The session can have been stopped between the interrupt starting and
+        // the transcription failing. Forcing `.buffering` on a session with no
+        // id leaves a ghost session whose stream request is a no-op.
+        guard isSessionActive || state == .listening else {
+            NSLog("Podcast: interrupt cancelled after the session ended — ignoring")
+            isPlayingInterruptResponse = false
+            preInterruptTranscript = nil
+            preInterruptActiveLineId = nil
+            return
+        }
         isPlayingInterruptResponse = false
 
         // Restore transcript to pre-interrupt state
@@ -852,6 +924,18 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             return
         }
 
+        // Queue first, append second. `resumePlayback` re-enters this method
+        // for the queued chunk, so appending before the paused check added the
+        // same audio and transcript lines twice — visible as duplicated lines
+        // in the overlay and a doubled chunk in the exported WAV.
+        if isPaused {
+            NSLog("Podcast: queuing chunk \(chunkIndex) (paused)")
+            pendingPlayData = (data: data, chunkIndex: chunkIndex)
+            currentChunkIndex = chunkIndex
+            delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
+            return
+        }
+
         audioSegments.append(data)
         let lines = chunkTranscriptByIndex[chunkIndex] ?? []
 
@@ -859,14 +943,6 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             transcript.append(contentsOf: lines)
             currentChunkLines = lines
             delegate?.podcastDidUpdateTranscript(transcript)
-        }
-
-        if isPaused {
-            NSLog("Podcast: queuing chunk \(chunkIndex) (paused)")
-            pendingPlayData = (data: data, chunkIndex: chunkIndex)
-            currentChunkIndex = chunkIndex
-            delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
-            return
         }
 
         do {
@@ -889,9 +965,11 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             updateNowPlaying()
 
             currentChunkIndex = chunkIndex
+            bufferingStallRetries = 0
             delegate?.podcastDidUpdateChunkProgress(current: chunkIndex + 1, total: totalChunks)
             sendChunkPlayed(chunkIndex)
 
+            currentChunkHadPrependedSilence = (chunkIndex == 0)
             scheduleLineAdvancement(duration: player?.duration ?? 0, hasPrependedSilence: chunkIndex == 0)
         } catch {
             NSLog("Podcast: playback error for chunk \(chunkIndex): \(error)")
@@ -903,13 +981,14 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     /// Play an ad-hoc data blob that isn't a numbered chunk — used for interrupt
     /// responses. Still appended to audioSegments so export preserves order.
     private func playInterruptResponse(data: Data) {
-        audioSegments.append(data)
-
+        // Same ordering rule as startPlayingChunk: resume re-enters here.
         if isPaused {
             NSLog("Podcast: queuing interrupt response (paused)")
             pendingPlayData = (data: data, chunkIndex: -1)
             return
         }
+
+        audioSegments.append(data)
 
         do {
             player = try AVAudioPlayer(data: data)
@@ -918,6 +997,7 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
             player?.play()
             state = .playing
             updateNowPlaying()
+            currentChunkHadPrependedSilence = false
             scheduleLineAdvancement(duration: player?.duration ?? 0, hasPrependedSilence: false)
         } catch {
             NSLog("Podcast: interrupt playback error: \(error)")
@@ -981,7 +1061,14 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     /// still fires before the chunk-finished delegate cancels pending timers.
     private let lineAdvanceTailBuffer: TimeInterval = 0.15
 
-    private func scheduleLineAdvancement(duration: TimeInterval, hasPrependedSilence: Bool = false) {
+    /// Schedule the transcript highlight for the chunk in `player`.
+    /// - Parameter elapsed: playback position already covered, so a resume
+    ///   activates the line being spoken instead of replaying from the top.
+    private func scheduleLineAdvancement(
+        duration: TimeInterval,
+        hasPrependedSilence: Bool = false,
+        startingAt elapsed: TimeInterval = 0
+    ) {
         cancelLineAdvanceTimers()
         let lines = currentChunkLines
         guard !lines.isEmpty, duration > 0 else { return }
@@ -1007,30 +1094,35 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
         let silenceOffset: TimeInterval = hasPrependedSilence ? prependedSilenceDuration : 0
         let speechDuration = duration - silenceOffset
 
-        // Activate first line immediately
-        if let first = lines.first {
-            activeLineId = first.id
-            delegate?.podcastDidActivateLine(first.id)
-        }
-
-        // Clamp subsequent timers so the last line always fires before the
-        // audio player finishes the chunk (otherwise cancelLineAdvanceTimers
-        // would swallow a highlight that was shifted past the chunk end).
+        // Clamp timers so the last line always fires before the audio player
+        // finishes the chunk (otherwise cancelLineAdvanceTimers would swallow
+        // a highlight that was shifted past the chunk end).
         let maxDelay = silenceOffset + max(0, speechDuration - lineAdvanceTailBuffer)
 
+        // Absolute activation time of each line within the chunk.
+        var times: [TimeInterval] = []
         var speechElapsed: TimeInterval = 0
-        for (i, line) in lines.enumerated() {
-            let lineId = line.id
-            if i > 0 { // first line already activated above
-                let raw = silenceOffset + speechElapsed * lineAdvanceDelayFactor
-                let delay = min(raw, maxDelay)
-                let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-                    self?.activeLineId = lineId
-                    self?.delegate?.podcastDidActivateLine(lineId)
-                }
-                lineAdvanceTimers.append(timer)
-            }
+        for i in lines.indices {
+            let raw = i == 0 ? 0 : silenceOffset + speechElapsed * lineAdvanceDelayFactor
+            times.append(min(raw, maxDelay))
             speechElapsed += (weights[i] / totalWeight) * speechDuration
+        }
+
+        // Everything already spoken collapses into "activate the latest one
+        // now"; only the rest gets a timer, offset by what has already played.
+        var current = 0
+        while current + 1 < lines.count && times[current + 1] <= elapsed { current += 1 }
+        activeLineId = lines[current].id
+        delegate?.podcastDidActivateLine(lines[current].id)
+
+        for i in (current + 1)..<lines.count {
+            let lineId = lines[i].id
+            let delay = max(0, times[i] - elapsed)
+            let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                self?.activeLineId = lineId
+                self?.delegate?.podcastDidActivateLine(lineId)
+            }
+            lineAdvanceTimers.append(timer)
         }
     }
 
@@ -1104,6 +1196,14 @@ class PodcastManager: NSObject, AVAudioPlayerDelegate {
     // MARK: - AVAudioPlayerDelegate
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        // Ignore a player we've already moved on from. A chunk that finishes
+        // just as the next one is installed (storeDownloadedChunk starts it
+        // directly) would otherwise advance twice, cutting the new chunk off.
+        guard player === self.player else {
+            NSLog("Podcast: ignoring finish callback from a superseded player")
+            return
+        }
+
         // Replay finished — return to complete state
         if isReplaying {
             isReplaying = false

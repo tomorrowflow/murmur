@@ -43,13 +43,23 @@ extension AppDelegate {
         guard !transcript.isEmpty else { return }
         let title = overlay.viewModel.title.isEmpty ? "Podcast" : overlay.viewModel.title
         let markdown = renderPodcastMarkdown(title: title, lines: transcript)
-        let audioData = manager.combinedAudioData()
-        TranscriptionHistory.shared.addPodcastEntry(
-            title: title,
-            markdown: markdown,
-            audioData: audioData
-        )
+        // Mark saved before the async hop so repeated .complete transitions
+        // can't queue a second save while this one is still building audio.
         savedCurrentPodcastToHistory = true
+
+        // `combinedAudioData()` decodes and re-muxes every chunk (it snapshots
+        // its inputs on main itself). Running it *on* main froze the UI for
+        // seconds at the end of a long podcast.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let audioData = manager.combinedAudioData()
+            DispatchQueue.main.async {
+                TranscriptionHistory.shared.addPodcastEntry(
+                    title: title,
+                    markdown: markdown,
+                    audioData: audioData
+                )
+            }
+        }
     }
 
     private func renderPodcastMarkdown(title: String, lines: [ScriptLine]) -> String {

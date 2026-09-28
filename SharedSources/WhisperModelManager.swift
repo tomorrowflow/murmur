@@ -65,10 +65,16 @@ public class WhisperModelManager {
             isComplete: true
         )
         
-        // Save metadata
-        if let data = try? JSONEncoder().encode(metadata) {
-            try? data.write(to: metadataPath)
+        // Save metadata. A silently-failed write (missing directory, full
+        // disk) used to still print success, and `isModelDownloaded` then
+        // returned false forever — re-validating or re-downloading the model
+        // on every launch.
+        do {
+            let data = try JSONEncoder().encode(metadata)
+            try data.write(to: metadataPath, options: .atomic)
             print("✅ Marked \(modelName) as downloaded")
+        } catch {
+            NSLog("Failed to mark \(modelName) as downloaded: \(error.localizedDescription)")
         }
     }
     
@@ -136,20 +142,11 @@ public class WhisperModelManager {
     public func validateModelIntegrity(_ modelName: String) -> Bool {
         let modelPath = getModelPath(for: modelName)
         
-        // Check for essential WhisperKit model files
-        let essentialFiles = [
-            "config.json",
-            "model.mil"  // Or other essential model files
-        ]
-        
-        for fileName in essentialFiles {
-            let filePath = modelPath.appendingPathComponent(fileName)
-            if !fileManager.fileExists(atPath: filePath.path) {
-                // Not all models have the same structure, so we'll be lenient
-                // Just check that the directory exists and has some content
-                break
-            }
-        }
+        // Model layouts differ between WhisperKit releases, so there is no
+        // single required filename to test. The check below is therefore
+        // deliberately just "the directory exists and is non-empty" — the
+        // previous loop over an `essentialFiles` list computed nothing and
+        // discarded its own result.
         
         // Basic check: directory exists and has files
         guard fileManager.fileExists(atPath: modelPath.path) else {
